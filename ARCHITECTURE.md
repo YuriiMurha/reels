@@ -4,8 +4,17 @@ Current state of the app. Updated in the same commit as the code it describes.
 
 ## Status
 
-Pre-implementation (2026-10-06). No app code yet. The full target design is in
-[`docs/superpowers/specs/2026-10-06-saved-reels-android-design.md`](docs/superpowers/specs/2026-10-06-saved-reels-android-design.md); this file describes only what exists.
+M0 in progress. The design is in
+[`docs/superpowers/specs/2026-10-06-saved-reels-android-design.md`](docs/superpowers/specs/2026-10-06-saved-reels-android-design.md);
+this file describes only what exists.
+
+## Components
+
+| Component | Where | What it does |
+|---|---|---|
+| Build | `settings.gradle.kts`, `gradle/libs.versions.toml` | Two modules, versions pinned in one catalog. AGP 9 built-in Kotlin. |
+| `:instagram` | `instagram/` | Pure Kotlin/JVM module reserved for all Instagram-specific code. Empty so far. |
+| `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
 
 ## Decided so far
 
