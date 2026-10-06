@@ -124,7 +124,6 @@ fun SearchScreen(
                     onOpen = { index -> onOpenViewer(current, index) },
                     modifier = Modifier.padding(horizontal = 8.dp),
                     state = gridState,
-                    contentPadding = padding,
                 )
             }
         }
