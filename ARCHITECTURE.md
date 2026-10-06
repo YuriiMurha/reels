@@ -18,6 +18,7 @@ this file describes only what exists.
 | Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR/session/cookie files, `sessionid` values and `Cookie:` headers. Enable per clone with `git config core.hooksPath .githooks`. |
 | Database | `app/.../data/db/` | Room v1: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `sync_run`, `sync_cursor`, `api_request`. Schema exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. |
 | Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
+| Pacer | `app/.../sync/pacing/` | Single gate for Instagram API calls: one at a time, 4–12 s log-normal gaps, 60–180 s breaks every 15–30, 300/run and 600/24 h budgets, an interactive lane with priority, a 2-wide CDN lane, rate-limit cooldowns (1 h, then 24 h). Policies: `Conservative` (real) and `Fast` (fake only). |
 
 ## Decided so far
 
