@@ -33,17 +33,20 @@ class FakeInstagramClient(
         answer("saved:${collectionId ?: "all"}:$cursor") {
             val items = if (collectionId == null) library.allSaved() else library.itemsIn(collectionId)
             val page = items.page(cursor)
-            if (reportsSavedCollectionIds) page else page.copy(items = page.items.map { it.copy(savedCollectionIds = null) })
+            page.copy(items = page.items.map { visible(it) })
         }
 
     override suspend fun mediaInfo(mediaPk: String): RemoteMedia =
-        answer("mediaInfo:$mediaPk") { library.media(mediaPk) ?: throw InstagramException.ShapeChanged("items[0]") }
+        answer("mediaInfo:$mediaPk") { visible(library.media(mediaPk) ?: throw InstagramException.ShapeChanged("items[0]")) }
 
     private inline fun <T> answer(call: String, block: () -> T): T {
         callLog += call
         failures.failureFor(callLog.size)?.let { throw it }
         return block()
     }
+
+    private fun visible(media: RemoteMedia): RemoteMedia =
+        if (reportsSavedCollectionIds) media else media.copy(savedCollectionIds = null)
 
     private fun <T> List<T>.page(cursor: String?): Page<T> {
         val start = (cursor?.removePrefix("o:")?.toInt() ?: 0).coerceAtMost(size)

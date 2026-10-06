@@ -56,4 +56,22 @@ class FakeInstagramClientTest {
         assertTrue(page.items.isEmpty())
         assertNull(page.nextCursor)
     }
+
+    @Test
+    fun mediaInfoHidesSavedCollectionIdsWhenNotReported() = runTest {
+        val library = FakeLibrary(itemCount = 10)
+        // Find an item that has non-empty savedCollectionIds to avoid vacuous test
+        val itemWithCollections = library.allSaved().first { it.savedCollectionIds.orEmpty().isNotEmpty() }
+        assertTrue(itemWithCollections.savedCollectionIds.orEmpty().isNotEmpty(), "precondition: item has collections")
+
+        // With reportsSavedCollectionIds = false, mediaInfo should hide the ids
+        val clientHiding = FakeInstagramClient(library, reportsSavedCollectionIds = false)
+        val mediaHiding = clientHiding.mediaInfo(itemWithCollections.pk)
+        assertNull(mediaHiding.savedCollectionIds)
+
+        // With reportsSavedCollectionIds = true, mediaInfo should expose the ids
+        val clientReporting = FakeInstagramClient(library, reportsSavedCollectionIds = true)
+        val mediaReporting = clientReporting.mediaInfo(itemWithCollections.pk)
+        assertEquals(itemWithCollections.savedCollectionIds, mediaReporting.savedCollectionIds)
+    }
 }
