@@ -41,6 +41,12 @@ internal suspend fun OkHttpClient.getJsonObject(url: HttpUrl): JsonObject {
         val body = try {
             it.body.string()
         } catch (e: IOException) {
+            // The headers already said what happened. Only a 2xx or 5xx is worth a retry; a redirect or a 4xx
+            // (challenge, login, rate limit) must still stop the run even though its body could not be read.
+            if (it.code in 300..499) {
+                throw ErrorClassifier.classify(it.code, it.header("Location"), it.header("Content-Type"), "")
+                    ?: InstagramException.ShapeChanged("http.${it.code}")
+            }
             throw InstagramException.Transient(e)
         }
         ErrorClassifier.classify(it.code, it.header("Location"), it.header("Content-Type"), body)?.let { error -> throw error }

@@ -5,6 +5,7 @@ import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.SessionProbe
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 
@@ -15,11 +16,14 @@ class WebSessionProbe(
     private val base: HttpUrl = WebEndpoints.BASE,
 ) : SessionProbe {
     override suspend fun currentUser(): Account {
-        val userId = cookies.cookieValue(WebEndpoints.BASE.toString(), "ds_user_id") ?: throw InstagramException.LoginRequired()
+        // The id goes into the request path, so anything but digits ("..", "42a") counts as no session.
+        val userId = cookies.cookieValue(WebEndpoints.BASE.toString(), "ds_user_id")
+            ?.takeIf { id -> id.isNotEmpty() && id.all { it in '0'..'9' } }
+            ?: throw InstagramException.LoginRequired()
         val json = http.getJsonObject(WebEndpoints.currentUser(base, userId))
         val user = json["user"] as? JsonObject ?: throw InstagramException.ShapeChanged("user")
         val username = user.string("username") ?: throw InstagramException.ShapeChanged("user.username")
-        val pk = (user["pk"] as? JsonPrimitive)?.content ?: userId
+        val pk = (user["pk"] as? JsonPrimitive)?.contentOrNull ?: userId
         return Account(pk = pk, username = username)
     }
 }

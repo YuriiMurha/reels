@@ -86,4 +86,90 @@ class ErrorClassifierTest {
     fun okJsonPasses() {
         assertNull(classify(200, """{"status":"ok"}"""))
     }
+
+    // --- R34: precedence is challenge, then rate limit, then login ---
+
+    @Test
+    fun challengeBeatsAServerErrorStatus() {
+        assertIs<ChallengeRequired>(classify(500, """{"message":"checkpoint_required","status":"fail"}"""))
+    }
+
+    @Test
+    fun challengeBeatsTooManyRequests() {
+        assertIs<ChallengeRequired>(classify(429, """{"message":"challenge_required","status":"fail"}"""))
+    }
+
+    @Test
+    fun rateLimitBeatsLoginRequired() {
+        assertIs<RateLimited>(
+            classify(401, """{"message":"Please wait a few minutes before you try again.","require_login":true,"status":"fail"}"""),
+        )
+    }
+
+    @Test
+    fun rateLimitBeatsAServerErrorStatus() {
+        assertIs<RateLimited>(classify(503, """{"message":"feedback_required","status":"fail"}"""))
+    }
+
+    // --- R38a: only a challenge OBJECT counts ---
+
+    @Test
+    fun aNullOrBooleanChallengeFieldIsNotAChallenge() {
+        assertNull(classify(200, """{"challenge":null,"status":"ok"}"""))
+        assertNull(classify(200, """{"challenge":false,"status":"ok"}"""))
+    }
+
+    @Test
+    fun anEmptyChallengeObjectStillStopsWithoutAUrl() {
+        assertNull(assertIs<ChallengeRequired>(classify(400, """{"challenge":{},"status":"fail"}""")).challengeUrl)
+    }
+
+    // --- R38b: challenge URLs are resolved and must stay on instagram.com over https ---
+
+    @Test
+    fun protocolRelativeChallengeUrlResolvesToHttps() {
+        val error = assertIs<ChallengeRequired>(
+            classify(400, """{"message":"challenge_required","challenge":{"url":"//i.instagram.com/challenge/x/"}}"""),
+        )
+        assertEquals("https://i.instagram.com/challenge/x/", error.challengeUrl)
+    }
+
+    @Test
+    fun foreignChallengeUrlIsDroppedButStillStops() {
+        val fromBody = assertIs<ChallengeRequired>(
+            classify(400, """{"message":"challenge_required","challenge":{"url":"https://evil.example/challenge/"}}"""),
+        )
+        assertNull(fromBody.challengeUrl)
+        val fromRedirect = assertIs<ChallengeRequired>(classify(302, body = "", location = "https://evil.example/challenge/"))
+        assertNull(fromRedirect.challengeUrl)
+    }
+
+    @Test
+    fun lookAlikeAndPlainHttpChallengeUrlsAreDropped() {
+        for (url in listOf(
+            "https://notinstagram.com/challenge/",
+            "https://www.instagram.com.evil.example/challenge/",
+            "https://www.instagram.com@evil.example/challenge/",
+            "http://www.instagram.com/challenge/",
+            "javascript:alert(1)",
+        )) {
+            val error = assertIs<ChallengeRequired>(classify(302, body = "", location = url), url)
+            assertNull(error.challengeUrl, url)
+        }
+    }
+
+    @Test
+    fun theBareDomainAndItsSubdomainsAreAccepted() {
+        assertEquals(
+            "https://instagram.com/challenge/",
+            assertIs<ChallengeRequired>(classify(302, body = "", location = "https://instagram.com/challenge/")).challengeUrl,
+        )
+    }
+
+    // --- R38d: the HTML check ignores case ---
+
+    @Test
+    fun htmlContentTypeIsMatchedCaseInsensitively() {
+        assertIs<LoginRequired>(classify(200, "<!DOCTYPE html><html></html>", contentType = "Text/HTML"))
+    }
 }

@@ -62,4 +62,20 @@ class WebSessionProbeTest {
         val unreachable = WebSessionProbe(HttpClientFactory.create(cookies, "UA"), cookies, base = url)
         assertFailsWith<InstagramException.Transient> { unreachable.currentUser() }
     }
+
+    @Test
+    fun aUserIdThatIsNotDigitsIsTreatedAsLoggedOutWithoutARequest() = runTest {
+        for (bad in listOf("..", "42a", "4 2", "%2e%2e")) {
+            cookies.clearAll()
+            cookies.setCookie("https://www.instagram.com", "ds_user_id=$bad")
+            assertFailsWith<InstagramException.LoginRequired>(bad) { probe().currentUser() }
+        }
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun aNullPkFallsBackToTheCookieUserId() = runTest {
+        server.enqueue(MockResponse.Builder().code(200).body("""{"user":{"pk":null,"username":"tester"},"status":"ok"}""").build())
+        assertEquals(Account("42", "tester"), probe().currentUser())
+    }
 }

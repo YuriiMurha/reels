@@ -1,15 +1,23 @@
 package io.github.yuriimurha.reels.instagram.web
 
+import io.github.yuriimurha.reels.instagram.InstagramException
+import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.SocketEffect
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URI
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -207,5 +215,65 @@ class HttpClientFactoryTest {
         val recorded = server.takeRequest()
         assertNull(recorded.headers["X-CSRFToken"])
         assertEquals("sessionid=s1", recorded.headers["Cookie"])
+    }
+
+    // --- R36: a crash inside the interceptor chain or the cookie bridge must stay an IOException ---
+
+    private class ThrowingCookieStore : CookieStore {
+        override fun cookieHeader(url: String): String? = throw IllegalStateException("secret-zq9")
+
+        override fun setCookie(url: String, setCookie: String) = Unit
+
+        override fun flush() = Unit
+
+        override fun clearAll() = Unit
+    }
+
+    @Test
+    fun aCrashingCookieStoreBecomesTransientWithoutLeakingItsMessage() = runTest {
+        val client = HttpClientFactory.create(ThrowingCookieStore(), "UA")
+        val error = assertFailsWith<InstagramException.Transient> { client.getJsonObject(server.url("/api/v1/x/")) }
+        assertFalse("secret-zq9" in error.stackTraceToString(), "no message, cause or suppressed exception may carry the crash text")
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun aCrashingCookieStoreDoesNotKillTheDispatcherThread() = runTest {
+        val uncaught = CopyOnWriteArrayList<Throwable>()
+        val workers = CopyOnWriteArrayList<Thread>()
+        val executor = Executors.newCachedThreadPool { task -> Thread(task).also { workers += it } }
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> uncaught += e }
+        try {
+            val client = HttpClientFactory.create(ThrowingCookieStore(), "UA").newBuilder().dispatcher(Dispatcher(executor)).build()
+            assertFailsWith<InstagramException.Transient> { client.getJsonObject(server.url("/api/v1/x/")) }
+            // Let every worker finish; a rethrown crash would reach the handler before its thread dies.
+            executor.shutdown()
+            workers.forEach { it.join(5_000) }
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
+        assertEquals(emptyList(), uncaught.map { it::class.java.name }, "nothing may escape to the uncaught-exception handler")
+    }
+
+    @Test
+    fun theSessionProbeReportsACrashingClientAsTransient() = runTest {
+        val good = InMemoryCookieStore().apply { setCookie(site, "ds_user_id=42") }
+        val probe = WebSessionProbe(HttpClientFactory.create(ThrowingCookieStore(), "UA"), good, base = server.url("/"))
+        assertFailsWith<InstagramException.Transient> { probe.currentUser() }
+    }
+
+    // --- R37: OkHttp must never silently re-send a request outside the Pacer ---
+
+    @Test
+    fun aStaleKeepAliveConnectionIsNotSilentlyResent() = runTest {
+        // OkHttp only retries a connection that already served a request, so warm one up first.
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        server.enqueue(MockResponse.Builder().onResponseStart(SocketEffect.CloseSocket()).build())
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        val client = HttpClientFactory.create(InMemoryCookieStore(), "UA")
+        client.getJsonObject(server.url("/api/v1/x/"))
+        assertFailsWith<InstagramException.Transient> { client.getJsonObject(server.url("/api/v1/x/")) }
+        assertEquals(2, server.requestCount, "the third queued response must never be fetched")
     }
 }
