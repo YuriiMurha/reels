@@ -27,6 +27,9 @@ private const val LIVE_COLLECTION_NAMES = """COALESCE((
             WHERE cm.mediaPk = media.pk AND cm.collectionId != '$ALL_SAVED_ID' AND c.removedAt IS NULL
             ORDER BY c.name)), '')"""
 
+/** A media row that still needs its thumbnail fetched from [url]. */
+data class ThumbnailTarget(val pk: String, val url: String)
+
 @Dao
 interface MediaDao {
     @Query("SELECT * FROM media WHERE pk IN (:pks)")
@@ -37,6 +40,15 @@ interface MediaDao {
 
     @Query("UPDATE media SET thumbPath = :path WHERE pk = :pk")
     suspend fun setThumbPath(pk: String, path: String?)
+
+    /** Live items of [scope] that run [runId] saw but has no thumbnail for: what an interrupted page leaves behind. */
+    @Query(
+        """
+        SELECT m.pk AS pk, m.thumbUrl AS url FROM media m JOIN collection_media cm ON cm.mediaPk = m.pk
+        WHERE cm.collectionId = :scope AND cm.lastSeenRunId = :runId AND m.thumbPath IS NULL AND m.removedAt IS NULL
+        """,
+    )
+    suspend fun withoutThumbnailSeenIn(scope: String, runId: Long): List<ThumbnailTarget>
 
     @Query("UPDATE media SET removedAt = :at, thumbPath = NULL WHERE pk IN (:pks)")
     suspend fun markRemoved(pks: List<String>, at: Long)

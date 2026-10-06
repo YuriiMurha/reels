@@ -10,6 +10,7 @@ import io.github.yuriimurha.reels.data.db.SyncCursorEntity
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.data.db.ThumbnailTarget
 import io.github.yuriimurha.reels.data.media.MediaFetcher
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.InstagramClient
@@ -129,7 +130,8 @@ class SyncEngine(
     }
 
     private suspend fun walkScope(progress: Progress, scope: String, label: String, knownCollections: Set<String>) {
-        var cursor = syncDao.cursor(progress.run.id, scope) ?: SyncCursorEntity(
+        val resumed = syncDao.cursor(progress.run.id, scope)
+        var cursor = resumed ?: SyncCursorEntity(
             runId = progress.run.id,
             scope = scope,
             nextCursor = null,
@@ -137,6 +139,11 @@ class SyncEngine(
             walkIndex = 0,
             done = false,
         ).also { syncDao.upsertCursor(it) }
+        // A page is committed before its thumbnails are cached, so a run that died in between never revisits that page.
+        if (resumed != null) {
+            val left = mediaDao.withoutThumbnailSeenIn(scope, progress.run.id)
+            cacheThumbnails(progress, left, countFailures = false)
+        }
         if (!cursor.done) progress.phase("Syncing $label")
         while (!cursor.done) {
             val from = cursor.nextCursor
@@ -145,7 +152,7 @@ class SyncEngine(
             val outcome = db.withTransaction { applyPage(progress, scope, current, page, knownCollections) }
             cursor = outcome.cursor
             outcome.removedPks.forEach(thumbnails::delete)
-            cacheThumbnails(progress, outcome.needThumbnails)
+            cacheThumbnails(progress, outcome.needThumbnails.map { ThumbnailTarget(it.pk, it.thumbnailUrl) })
         }
         progress.update { it.copy(collectionsDone = it.collectionsDone + 1) }
     }
@@ -229,13 +236,17 @@ class SyncEngine(
         return unsaved
     }
 
-    private suspend fun cacheThumbnails(progress: Progress, items: List<RemoteMedia>) {
+    /**
+     * Fetches and stores [items]' thumbnails. [countFailures] is off for a resume's retry of items whose first
+     * attempt may already have been counted, so one unavailable thumbnail is not counted twice.
+     */
+    private suspend fun cacheThumbnails(progress: Progress, items: List<ThumbnailTarget>, countFailures: Boolean = true) {
         if (items.isEmpty()) return
         val results = coroutineScope {
             items.map { item ->
                 async {
                     val path = try {
-                        val bytes = pacer.cdn { fetcher.fetch(item.thumbnailUrl) }
+                        val bytes = pacer.cdn { fetcher.fetch(item.url) }
                         bytes?.let { withContext(Dispatchers.IO) { thumbnails.write(item.pk, it) } }
                     } catch (e: CancellationException) {
                         throw e
@@ -250,7 +261,7 @@ class SyncEngine(
         progress.update { r ->
             r.copy(
                 thumbsCached = r.thumbsCached + results.count { it.second != null },
-                failures = r.failures + results.count { it.second == null },
+                failures = if (countFailures) r.failures + results.count { it.second == null } else r.failures,
             )
         }
     }

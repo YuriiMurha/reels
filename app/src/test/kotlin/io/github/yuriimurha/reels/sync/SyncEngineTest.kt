@@ -35,6 +35,8 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -276,6 +278,38 @@ class SyncEngineTest {
         val run = db.syncDao().run(id)!!
         assertEquals(SyncStatus.PAUSED, run.status)
         assertEquals("Cancelled", run.lastError)
+    }
+
+    // ---- M1 device walkthrough ----
+
+    @Test
+    fun aResumedRunCachesTheThumbnailsAnInterruptedPageLeftBehind() = runTest {
+        val client = smallClient()
+        val fetched = AtomicInteger()
+        var processDies = true
+        val dyingFetcher = MediaFetcher { url ->
+            // Page 1 (20 thumbnails) is cached, then the process dies while page 2's thumbnails are being fetched.
+            if (processDies && fetched.incrementAndGet() > 20) throw CancellationException("process died")
+            if (url.startsWith("fake://missing/")) null else byteArrayOf(1)
+        }
+        val engine = engine(client, mediaFetcher = dyingFetcher)
+        val id = newRun(SyncMode.QUICK)
+        try {
+            engine.run(id)
+        } catch (_: CancellationException) {
+            // the worker is gone; its page 2 rows and cursor were already committed
+        }
+        val page2 = client.library.allSaved().subList(20, 40).map { it.pk }
+        assertTrue(db.mediaDao().byPks(page2).all { it.thumbPath == null })
+
+        processDies = false
+        engine.run(id)
+
+        val run = db.syncDao().run(id)!!
+        assertEquals(SyncStatus.DONE, run.status)
+        val unavailable = client.library.allSaved().filter { it.thumbnailUrl.startsWith("fake://missing/") }.map { it.pk }.toSet()
+        val without = db.mediaDao().byPks(client.library.allSaved().map { it.pk }).filter { it.thumbPath == null }.map { it.pk }
+        assertEquals(unavailable, without.toSet())
     }
 
     // ---- Fix round 1 (R17-R20) ----
