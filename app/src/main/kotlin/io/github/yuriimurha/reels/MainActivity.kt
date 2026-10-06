@@ -1,13 +1,28 @@
 package io.github.yuriimurha.reels
 
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
-import androidx.compose.material3.Text
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.CompositionLocalProvider
+import io.github.yuriimurha.reels.ui.LocalAppContainer
+import io.github.yuriimurha.reels.ui.ReelsNavHost
+import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         super.onCreate(savedInstanceState)
-        setContent { Text("Reels") }
+        val container = (application as ReelsApp).container
+        setContent {
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) { ReelsNavHost() }
+            }
+        }
     }
 }
