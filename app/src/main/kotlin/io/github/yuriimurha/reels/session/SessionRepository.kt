@@ -68,8 +68,10 @@ class SessionRepository(
 
     /**
      * Writes a pasted sessionid into the cookie store and validates it. Null (and no request) for anything else.
-     * Never strands the current session: a refusal by the Pacer comes before any cookie is written, and if the
-     * check fails in any way (or is cancelled) the previous cookies are put back and the stored state is untouched.
+     * Transactional: only a [SessionState.Valid] result commits. A refusal by the Pacer comes before any cookie is
+     * written; if the check fails, is cancelled, or Instagram rejects the id (Expired, Challenge) the previous cookies
+     * are put back and the stored state, which is only written on commit, stays as it was. A rejection is still
+     * returned so the caller can say why.
      */
     suspend fun pasteSessionId(input: String): SessionState? {
         val parsed = SessionIdInput.parse(input) ?: return null
@@ -79,15 +81,18 @@ class SessionRepository(
             val previousUser = userId()
             sessionEpoch++
             writeSessionCookies(sessionCookie(parsed.sessionId), userCookie(parsed.userId))
-            try {
-                store(probeSession(state.first().handle))
+            suspend fun rollBack() = withContext(NonCancellable) {
+                writeSessionCookies(sessionCookie(previousSession), userCookie(previousUser))
+                sessionEpoch++
+            }
+            val result = try {
+                probeSession(state.first().handle).also { if (it is SessionState.Valid) store(it) }
             } catch (e: Throwable) {
-                withContext(NonCancellable) {
-                    writeSessionCookies(sessionCookie(previousSession), userCookie(previousUser))
-                    sessionEpoch++
-                }
+                rollBack()
                 throw e
             }
+            if (result !is SessionState.Valid) rollBack()
+            result
         }
     }
 

@@ -214,6 +214,55 @@ class SessionRepositoryTest {
     }
 
     @Test
+    fun pasteThatInstagramRejectsKeepsTheCurrentLogin() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        probe.next = { throw InstagramException.LoginRequired() }
+        assertEquals(SessionState.Expired("tester"), repository.pasteSessionId("43%3Acd"))
+        assertEquals("s1", cookies.cookieValue(SessionRepository.INSTAGRAM, "sessionid"))
+        assertEquals("42", cookies.cookieValue(SessionRepository.INSTAGRAM, "ds_user_id"))
+        assertEquals(SessionState.Valid("tester"), repository.state.first(), "a rejected paste leaves the stored state alone")
+    }
+
+    @Test
+    fun pasteThatNeedsAChallengeKeepsTheCurrentLogin() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        probe.next = { throw InstagramException.ChallengeRequired("https://www.instagram.com/challenge/p/") }
+        assertEquals(
+            SessionState.Challenge("https://www.instagram.com/challenge/p/", "tester"),
+            repository.pasteSessionId("43%3Acd"),
+            "the caller still learns why the paste was rejected",
+        )
+        assertEquals("s1", cookies.cookieValue(SessionRepository.INSTAGRAM, "sessionid"))
+        assertEquals("42", cookies.cookieValue(SessionRepository.INSTAGRAM, "ds_user_id"))
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+    }
+
+    @Test
+    fun rejectedPasteWithNoPreviousSessionLeavesNoSession() = runTest {
+        val repository = repository()
+        probe.next = { throw InstagramException.LoginRequired() }
+        assertEquals(SessionState.Expired(null), repository.pasteSessionId("43%3Acd"))
+        assertFalse(repository.hasSessionCookies())
+        assertNull(cookies.cookieValue(SessionRepository.INSTAGRAM, "sessionid"))
+        assertNull(cookies.cookieValue(SessionRepository.INSTAGRAM, "ds_user_id"))
+        assertEquals(SessionState.LoggedOut, repository.state.first())
+    }
+
+    @Test
+    fun aRejectedPasteFlushesItsRollback() = runTest {
+        signedIn()
+        val repository = repository()
+        probe.next = { throw InstagramException.LoginRequired() }
+        repository.pasteSessionId("43%3Acd")
+        assertEquals("flush", cookies.events.last(), "the restored cookies must reach disk too")
+        assertTrue(cookies.setCookies.last().startsWith("ds_user_id=42;"), "the previous values are written back last")
+    }
+
+    @Test
     fun failedPasteWithNoPreviousSessionLeavesNoSession() = runTest {
         val repository = repository()
         probe.next = { throw InstagramException.Transient() }
