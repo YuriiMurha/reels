@@ -22,6 +22,8 @@ object SyncNotifications {
             .setContentTitle(context.getString(R.string.sync_notification_title))
             .setOngoing(true)
             .setProgress(0, 0, true)
+            // User-started work: show at once instead of after Android's 10 s foreground-service notification delay.
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
         return ForegroundInfo(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     }
