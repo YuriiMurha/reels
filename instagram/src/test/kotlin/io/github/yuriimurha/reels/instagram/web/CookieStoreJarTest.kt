@@ -5,6 +5,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class CookieStoreJarTest {
     private val url = "https://www.instagram.com/api/v1/x/".toHttpUrl()
@@ -42,5 +43,45 @@ class CookieStoreJarTest {
         val store = InMemoryCookieStore().apply { setCookie(url.toString(), "a=1") }
         store.setCookie(url.toString(), "a=; Max-Age=0")
         assertNull(store.cookieHeader(url.toString()))
+    }
+
+    @Test
+    fun writtenSetCookieKeepsItsAttributes() {
+        val store = RecordingCookieStore()
+        val cookie = Cookie.Builder()
+            .name("sessionid").value("s2")
+            .domain("instagram.com").path("/")
+            .expiresAt(System.currentTimeMillis() + 31_536_000_000L)
+            .secure().httpOnly()
+            .build()
+
+        CookieStoreJar(store).saveFromResponse(url, listOf(cookie))
+
+        val (writtenUrl, raw) = store.written.single()
+        assertEquals(url.toString(), writtenUrl)
+        val lower = raw.lowercase()
+        for (attribute in listOf("sessionid=s2", "; domain=instagram.com", "; path=/", "; expires=", "; secure", "; httponly")) {
+            assertTrue(attribute in lower, "'$attribute' missing from what reached the store: $raw")
+        }
+    }
+
+    @Test
+    fun skipsCookiesWithNonAsciiOrControlCharacters() {
+        val store = InMemoryCookieStore().apply {
+            setCookie(url.toString(), "a=1")
+            setCookie(url.toString(), "wd=caf\u00e9")
+            setCookie(url.toString(), "bell=x\u0007y")
+            setCookie(url.toString(), "b=2")
+        }
+        assertEquals(listOf("a", "b"), CookieStoreJar(store).loadForRequest(url).map { it.name })
+    }
+
+    @Test
+    fun keepsQuotedValuesWithEscapes() {
+        val store = InMemoryCookieStore().apply { setCookie(url.toString(), "rur=\"CLN\\0541234\\054abc\"") }
+        assertEquals(
+            listOf("rur" to "\"CLN\\0541234\\054abc\""),
+            CookieStoreJar(store).loadForRequest(url).map { it.name to it.value },
+        )
     }
 }

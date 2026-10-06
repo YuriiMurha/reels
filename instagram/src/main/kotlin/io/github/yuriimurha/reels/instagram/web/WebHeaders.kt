@@ -15,7 +15,9 @@ object WebHeaders {
             .header("X-Requested-With", "XMLHttpRequest")
             .header("Accept", "*/*")
             .header("Referer", "https://www.instagram.com/")
-        cookies.cookieValue(request.url.toString(), "csrftoken")?.let { builder.header("X-CSRFToken", it) }
+        cookies.cookieValue(request.url.toString(), "csrftoken")
+            ?.takeIf { it.isHeaderSafe() }
+            ?.let { builder.header("X-CSRFToken", it) }
         chain.proceed(builder.build())
     }
 }

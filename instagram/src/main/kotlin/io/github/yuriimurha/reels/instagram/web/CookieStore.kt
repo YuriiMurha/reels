@@ -26,6 +26,12 @@ fun CookieStore.cookieValue(url: String, name: String): String? =
         ?.substringAfter('=')
         ?.takeIf { it.isNotEmpty() }
 
+/**
+ * True when every character is printable ASCII without spaces (0x21..0x7E): safe to put in a Cookie or X-CSRFToken
+ * header. Anything else would make OkHttp throw an exception whose message can quote the value.
+ */
+internal fun String.isHeaderSafe(): Boolean = all { it in '\u0021'..'\u007e' }
+
 /** Gives OkHttp the store's cookies and writes Instagram's Set-Cookie updates back into it (spec 4.3). */
 class CookieStoreJar(private val store: CookieStore) : CookieJar {
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
@@ -33,7 +39,7 @@ class CookieStoreJar(private val store: CookieStore) : CookieJar {
         return header.split(';').mapNotNull { part ->
             val name = part.substringBefore('=').trim()
             val value = part.substringAfter('=', "").trim()
-            if (name.isEmpty()) {
+            if (name.isEmpty() || !name.isHeaderSafe() || !value.isHeaderSafe()) {
                 null
             } else {
                 runCatching { Cookie.Builder().name(name).value(value).domain(url.host).build() }.getOrNull()
