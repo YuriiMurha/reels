@@ -6,6 +6,27 @@ import androidx.room.Query
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
+/**
+ * Spec 5.3 "Uncategorized": live items saved to All Saved that belong to no live real collection.
+ * Shared by [MediaDao.pageUncategorized], [MediaDao.uncategorizedCount] and [MediaDao.uncategorizedCover];
+ * `m` is the media row and `cm` its All Saved membership, which carries the sort key.
+ */
+private const val UNCATEGORIZED_FROM_WHERE = """
+    FROM media m JOIN collection_media cm ON cm.mediaPk = m.pk AND cm.collectionId = '$ALL_SAVED_ID'
+    WHERE m.removedAt IS NULL AND NOT EXISTS (
+        SELECT 1 FROM collection_media x JOIN collection c ON c.id = x.collectionId
+        WHERE x.mediaPk = m.pk AND x.collectionId != '$ALL_SAVED_ID' AND c.removedAt IS NULL)"""
+
+/**
+ * The value `media.collectionNames` must hold for the enclosing `media` row: the space-joined,
+ * name-ordered names of its live real collections, or '' when it has none.
+ */
+private const val LIVE_COLLECTION_NAMES = """COALESCE((
+        SELECT GROUP_CONCAT(name, ' ') FROM (
+            SELECT c.name AS name FROM collection_media cm JOIN collection c ON c.id = cm.collectionId
+            WHERE cm.mediaPk = media.pk AND cm.collectionId != '$ALL_SAVED_ID' AND c.removedAt IS NULL
+            ORDER BY c.name)), '')"""
+
 @Dao
 interface MediaDao {
     @Query("SELECT * FROM media WHERE pk IN (:pks)")
@@ -22,16 +43,8 @@ interface MediaDao {
 
     @Query(
         """
-        UPDATE media SET collectionNames = COALESCE((
-            SELECT GROUP_CONCAT(name, ' ') FROM (
-                SELECT c.name AS name FROM collection_media cm JOIN collection c ON c.id = cm.collectionId
-                WHERE cm.mediaPk = media.pk AND cm.collectionId != '__all__' AND c.removedAt IS NULL
-                ORDER BY c.name)), '')
-        WHERE collectionNames != COALESCE((
-            SELECT GROUP_CONCAT(name, ' ') FROM (
-                SELECT c.name AS name FROM collection_media cm JOIN collection c ON c.id = cm.collectionId
-                WHERE cm.mediaPk = media.pk AND cm.collectionId != '__all__' AND c.removedAt IS NULL
-                ORDER BY c.name)), '')
+        UPDATE media SET collectionNames = $LIVE_COLLECTION_NAMES
+        WHERE collectionNames != $LIVE_COLLECTION_NAMES
         """,
     )
     suspend fun refreshCollectionNames()
@@ -47,10 +60,7 @@ interface MediaDao {
 
     @Query(
         """
-        SELECT m.* FROM media m JOIN collection_media cm ON cm.mediaPk = m.pk AND cm.collectionId = '__all__'
-        WHERE m.removedAt IS NULL AND NOT EXISTS (
-            SELECT 1 FROM collection_media x JOIN collection c ON c.id = x.collectionId
-            WHERE x.mediaPk = m.pk AND x.collectionId != '__all__' AND c.removedAt IS NULL)
+        SELECT m.* $UNCATEGORIZED_FROM_WHERE
         ORDER BY cm.sortKey DESC
         """,
     )
@@ -58,20 +68,14 @@ interface MediaDao {
 
     @Query(
         """
-        SELECT COUNT(*) FROM media m JOIN collection_media cm ON cm.mediaPk = m.pk AND cm.collectionId = '__all__'
-        WHERE m.removedAt IS NULL AND NOT EXISTS (
-            SELECT 1 FROM collection_media x JOIN collection c ON c.id = x.collectionId
-            WHERE x.mediaPk = m.pk AND x.collectionId != '__all__' AND c.removedAt IS NULL)
+        SELECT COUNT(*) $UNCATEGORIZED_FROM_WHERE
         """,
     )
     fun uncategorizedCount(): Flow<Int>
 
     @Query(
         """
-        SELECT m.thumbPath FROM media m JOIN collection_media cm ON cm.mediaPk = m.pk AND cm.collectionId = '__all__'
-        WHERE m.removedAt IS NULL AND NOT EXISTS (
-            SELECT 1 FROM collection_media x JOIN collection c ON c.id = x.collectionId
-            WHERE x.mediaPk = m.pk AND x.collectionId != '__all__' AND c.removedAt IS NULL)
+        SELECT m.thumbPath $UNCATEGORIZED_FROM_WHERE
         ORDER BY cm.sortKey DESC LIMIT 1
         """,
     )

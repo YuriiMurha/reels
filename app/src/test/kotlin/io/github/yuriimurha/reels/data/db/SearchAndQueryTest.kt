@@ -135,7 +135,11 @@ class SearchAndQueryTest {
 
         collections.deleteRealMembershipsExcept("m1", keep = listOf("c1"))
         assertEquals(listOf("c1"), collections.collectionsOf("m1").map { it.id })
-        assertEquals(9L, collections.maxSortKey(ALL_SAVED_ID), "the All Saved membership is never a 'real' one")
+        assertEquals(
+            listOf("m1"),
+            collections.memberships(ALL_SAVED_ID, listOf("m1")).map { it.mediaPk },
+            "the All Saved membership is never a 'real' one",
+        )
 
         collections.markRemovedExcept(keep = listOf("c1"), at = 3)
         assertEquals(listOf("c1"), collections.liveCollections().first().map { it.id })
@@ -143,6 +147,12 @@ class SearchAndQueryTest {
 
         collections.deleteAllMembershipsOf(listOf("m1"))
         assertEquals(emptyList(), collections.memberships("c1", listOf("m1")))
+        assertEquals(emptyList(), collections.memberships(ALL_SAVED_ID, listOf("m1")), "every scope of m1 goes")
+        assertEquals(
+            listOf("m2"),
+            collections.memberships(ALL_SAVED_ID, listOf("m1", "m2")).map { it.mediaPk },
+            "other media keep their memberships",
+        )
         collections.deleteAllMemberships()
         assertNull(collections.maxSortKey(ALL_SAVED_ID))
     }

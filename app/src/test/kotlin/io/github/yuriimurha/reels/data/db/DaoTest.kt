@@ -1,6 +1,7 @@
 package io.github.yuriimurha.reels.data.db
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.loadAll
 import io.github.yuriimurha.reels.testutil.mediaEntity
@@ -80,22 +81,58 @@ class DaoTest {
     @Test
     fun unseenMembershipsAreFoundAndDeletedPerScope() = runTest {
         givenLibrary()
-        collections.upsertMemberships(listOf(CollectionMediaEntity(ALL_SAVED_ID, "m1", sortKey = 10, lastSeenRunId = 2)))
+        collections.upsertMemberships(
+            listOf(
+                CollectionMediaEntity(ALL_SAVED_ID, "m1", sortKey = 10, lastSeenRunId = 2),
+                // c1 also holds a row that run 2 did see; only its stale row (m2) may go.
+                CollectionMediaEntity("c1", "m1", sortKey = 10, lastSeenRunId = 2),
+            ),
+        )
         assertEquals(setOf("m2", "m3", "m4"), collections.unseenPks(ALL_SAVED_ID, runId = 2).toSet())
         collections.deleteUnseen("c1", runId = 2)
-        assertEquals(emptyList(), media.pageCollection("c1").loadAll())
+        assertEquals(listOf("m1"), media.pageCollection("c1").loadAll().map { it.pk }, "only c1's stale row is deleted")
+        // The delete is scoped to c1: stale rows in other collections, All Saved included, survive.
+        val allPks = listOf("m1", "m2", "m3", "m4")
+        assertEquals(allPks.toSet(), collections.memberships(ALL_SAVED_ID, allPks).map { it.mediaPk }.toSet())
+        assertEquals(listOf("m2", "m3", "m1"), media.pageCollection(ALL_SAVED_ID).loadAll().map { it.pk })
+        assertEquals(listOf("m1"), media.pageCollection("c2").loadAll().map { it.pk })
     }
 
     @Test
     fun deleteLibraryKeepsTheRequestLog() = runTest {
         givenLibrary()
         db.apiRequestDao().insert(ApiRequestEntity(at = 1_000))
-        sync.insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = 0))
+        val runId = sync.insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = 0))
+        sync.upsertCursor(SyncCursorEntity(runId, ALL_SAVED_ID, nextCursor = "c1", walkBase = 1, walkIndex = 0, done = false))
+        val allTypes = MediaType.entries.map { it.name }
+        val pks = listOf("m1", "m2", "m3", "m4")
+
+        // Sanity: the library is really there before the wipe, including its search index.
+        assertEquals(4, media.byPks(pks).size)
+        assertEquals(4, collections.memberships(ALL_SAVED_ID, pks).size)
+        assertEquals(listOf("m2", "m3", "m1"), media.pageSearch("caption*", allTypes, ALL_SAVED_ID).loadAll().map { it.pk })
+        assertEquals(4, ftsIndexedDocuments())
+        assertEquals(runId, sync.cursor(runId, ALL_SAVED_ID)!!.runId)
+
         db.deleteLibrary()
+
         assertEquals(emptyList(), collections.cards().first())
         assertNull(sync.latestRun())
+        assertEquals(emptyList(), media.byPks(pks))
+        assertEquals(emptyList(), collections.memberships(ALL_SAVED_ID, pks))
+        assertEquals(emptyList(), collections.memberships("c1", pks))
+        assertNull(sync.cursor(runId, ALL_SAVED_ID))
+        assertEquals(emptyList(), media.pageSearch("caption*", allTypes, ALL_SAVED_ID).loadAll())
+        assertEquals(0, ftsIndexedDocuments(), "the wipe must leave no orphaned search index rows")
         assertEquals(1, db.apiRequestDao().countSince(0), "the rolling 24 h budget must survive a library wipe")
     }
+
+    /** Rows in FTS4's `docsize` shadow table: one per indexed document, independent of the content table. */
+    private fun ftsIndexedDocuments(): Int =
+        db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM media_fts_docsize").use {
+            it.moveToFirst()
+            it.getInt(0)
+        }
 
     @Test
     fun pauseRunningRunsOnlyTouchesRunning() = runTest {
