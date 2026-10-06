@@ -4,8 +4,9 @@
 
 - [x] Finish the design: video strategy, unsave semantics, sync triggers, screens, error handling
 - [x] Write the design spec: [`docs/superpowers/specs/2026-10-06-saved-reels-android-design.md`](docs/superpowers/specs/2026-10-06-saved-reels-android-design.md)
-- [ ] Owner reviews the written spec
-- [ ] Write the implementation plan (it replaces the provisional sequence below)
+- [x] Owner reviews the written spec
+- [x] Write the M0–M2 implementation plan: [`docs/superpowers/plans/2026-10-06-saved-reels-m0-m2.md`](docs/superpowers/plans/2026-10-06-saved-reels-m0-m2.md)
+- [ ] Owner reviews the plan and picks the execution method
 
 ## Owner actions
 

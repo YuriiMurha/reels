@@ -20,3 +20,11 @@ Append-only log. Newest entry at the bottom; never edit past entries.
   retries on challenges, escalating cooldowns on rate limits, and deletion only after a complete walk.
 - An adapter spike on the owner's phone (M3) confirms endpoints, headers and `saved_collection_ids` before
   the real parsers are written.
+
+## 2026-10-06: M0–M2 plan written
+
+- 18-task TDD plan for M0 (skeleton, secret guard), M1 (full app on the fake backend) and M2 (WebView login,
+  paced session validation); M3–M6 get their own plans after the M3 spike.
+- Spec amended to match: `SessionProbe` split and `reportsSavedCollectionIds` on the adapter contract,
+  progress columns on `sync_run`, one numbering scheme for quick and full walks, a separate fake-backend
+  Pacer, and SDK level 36.

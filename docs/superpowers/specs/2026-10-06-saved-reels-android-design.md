@@ -52,8 +52,12 @@ Package: `io.github.yuriimurha.reels`.
 ### 4.2 Adapter interface
 
 ```kotlin
-interface InstagramClient {
+interface SessionProbe {                     // split out so login (M2) ships before the rest (M3)
     suspend fun currentUser(): Account
+}
+
+interface InstagramClient : SessionProbe {
+    val reportsSavedCollectionIds: Boolean   // strategy A vs B (section 7.2), known from the spike
     suspend fun collections(cursor: String?): Page<RemoteCollection>
     suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> // null = All Saved
     suspend fun mediaInfo(mediaPk: String): RemoteMedia
@@ -151,7 +155,8 @@ Index on (`collectionId`, `sortKey` DESC).
 **`media_fts`**: FTS4 with `contentEntity = media`, over `caption`, `author`, `collectionNames`.
 
 **`sync_run`**: `id`, `mode` (QUICK/FULL), `status` (RUNNING, PAUSED, DONE, CANCELLED, STOPPED_CHALLENGE,
-STOPPED_LOGIN, STOPPED_RATE_LIMIT, STOPPED_SHAPE), `startedAt`, `finishedAt?`, `requestsUsed`, `newItems`,
+STOPPED_LOGIN, STOPPED_RATE_LIMIT, STOPPED_SHAPE), `startedAt`, `finishedAt?`, `phase`, `collectionsDone`,
+`collectionsTotal`, `requestsUsed`, `newItems`,
 `seenItems`, `thumbsCached`, `failures`, `lastError?` (already redacted text). A run that ends unfinished
 (PAUSED or any STOPPED_*) is *resumable*; CANCELLED means a resumable run was discarded.
 
@@ -169,9 +174,10 @@ STOPPED_LOGIN, STOPPED_RATE_LIMIT, STOPPED_SHAPE), `startedAt`, `finishedAt?`, `
   above unwalked ones in correct order while the walk is in progress, and unwalked items keep their previous
   relative order. `walkBase` and `walkIndex` are persisted in `sync_cursor`, so a resumed walk continues
   with the same numbering.
-- **Quick sync of a scope:** the new items found, in feed order, get `max + n, ..., max + 1`, so they sit
-  above the current top. Already-known items keep their keys. Order drift from re-saves is corrected by the
-  next full sync.
+- **Quick sync of a scope:** uses the same `walkBase`/`walkIndex` numbering, but assigns `walkBase - i` only
+  to items the scope doesn't have yet; known items keep their keys. New items therefore sit above the current
+  top in feed order, even when they span several pages. Order drift from re-saves is corrected by the next
+  full sync.
 
 ### 5.3 Derived views
 
@@ -285,7 +291,9 @@ keys; only fields the app needs are required.
 
 ### 7.3 Pacer
 
-One instance per process. API requests go strictly one at a time.
+One instance per process for real Instagram traffic. The fake backend has its own, with in-memory budgets,
+so fake syncs never consume the real budget or trigger the real cooldown. API requests go strictly one at a
+time.
 
 | Rule | `Conservative` | `Fast` (fake only) |
 |---|---|---|
@@ -390,7 +398,8 @@ Run locally with `./gradlew check`. Every safety guard has a test that fails whe
 ## 11. Tooling and workflow
 
 - Gradle Kotlin DSL with a version catalog (`gradle/libs.versions.toml`), latest stable AGP, Kotlin 2.x with
-  KSP for Room, and the Compose BOM. `compileSdk`/`targetSdk` at the latest stable level; `minSdk 29`.
+  KSP for Room, and the Compose BOM. `compileSdk`/`targetSdk` 36 (API 37 exists, but Robolectric support for it is unconfirmed; bump when it
+  is); `minSdk 29`.
 - `./gradlew installDebug` installs the debug build (mock mode available).
 - `./gradlew installRelease` installs an R8-minified release build with a baseline profile, signed with a
   local keystore described in `keystore.properties` (gitignored). Smoothness is judged on this build.
