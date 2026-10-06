@@ -28,6 +28,7 @@ this file describes only what exists.
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks`. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip). |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
 | Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard), Cancel, live run counters, budgets, cooldown countdown, status banners, history, Delete library (keeps the session and request log). |
+| Session | `app/.../session/` | The session lives only in the WebView's `CookieManager` (`AndroidCookieStore`), shared with OkHttp. `SessionRepository` validates via one paced interactive request, stores only state + handle in DataStore, accepts pasted sessionids (parsed locally, no request for garbage), logs out by clearing cookies. Real traffic uses `AppContainer.instagramPacer` (Conservative, Room request log, DataStore cooldown). |
 
 ## Decided so far
 
