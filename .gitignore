@@ -1,0 +1,43 @@
+# --- Secrets & personal data: never commit (this repo is public) ---
+# Instagram session material and anything that may embed it
+*.session
+session*.json
+cookies*.txt
+*.har
+**/secrets/
+.env
+.env.*
+!.env.example
+# Signing keys and machine-local SDK paths
+local.properties
+keystore.properties
+*.keystore
+*.jks
+
+# --- Gradle / Android / Kotlin ---
+.gradle/
+build/
+.kotlin/
+.externalNativeBuild/
+.cxx/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+output-metadata.json
+*.hprof
+
+# --- IDEs ---
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# --- OS ---
+.DS_Store
+
+# --- Tool-local state ---
+.remember/
+.claude/worktrees/
+.claude/settings.local.json
