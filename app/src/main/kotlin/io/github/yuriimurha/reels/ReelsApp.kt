@@ -1,6 +1,7 @@
 package io.github.yuriimurha.reels
 
 import android.app.Application
+import android.webkit.WebView
 import androidx.work.Configuration
 import io.github.yuriimurha.reels.di.AppContainer
 import io.github.yuriimurha.reels.di.ReelsWorkerFactory
@@ -17,6 +18,8 @@ class ReelsApp : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        // Debug builds only: lets chrome://inspect show what the real Instagram site requests (spec 6.3).
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         container = AppContainer(this)
         appScope.launch { container.syncController.recoverInterruptedRuns() }
     }

@@ -30,6 +30,7 @@ import org.junit.runner.RunWith
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /** The real [ReelsNavHost] and `GridScreen` over a real (file-backed) Room database, starting on a grid. */
 @RunWith(AndroidJUnit4::class)
@@ -163,5 +164,25 @@ class ReelsNavHostTest {
         compose.waitForIdle()
         assertEquals(searchEntry, navController.currentBackStackEntry)
         assertNull(searchEntry.savedStateHandle.get<Int>(VIEWER_INDEX_KEY), "the search left the index behind")
+    }
+
+    @Test
+    fun syncOpensTheLoginPageAndBackReturnsToSync() {
+        compose.setContent {
+            navController = rememberNavController()
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) {
+                    ReelsNavHost(navController, startDestination = SyncRoute)
+                }
+            }
+        }
+        compose.waitForIdle()
+        compose.onNodeWithText("Log in").performClick()
+        compose.waitForIdle()
+        assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<LoginRoute>(), "Log in did not open the login page")
+        assertNull(navController.currentBackStackEntry!!.toRoute<LoginRoute>().url, "a plain login starts on Instagram's login page")
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.waitForIdle()
+        assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<SyncRoute>(), "Back did not return to Sync")
     }
 }

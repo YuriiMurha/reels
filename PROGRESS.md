@@ -46,3 +46,10 @@ Append-only log. Newest entry at the bottom; never edit past entries.
   - Sync screen shows the 24 h budget only inside the run counters, so right after Delete library it is hidden until the next run; it does keep counting (checked on the next run).
   - Debug-build scrolling on the emulator: 37 % janky frames (median 25 ms, 95th percentile 44 ms). Judged on the M6 release build.
   - Left to the owner: whether the clip is audible (the player was started and unmuted, then muted at the audio-track level, but no ears were involved) and how smooth scrolling feels on the phone.
+
+## 2026-10-07: M2 session, code complete
+
+- WebView login screen, session controls on the Sync screen (state, Check now, Log out, masked Paste sessionid), one paced validation per new session; cookies shared with OkHttp; debug builds allow WebView remote debugging.
+- Unit tests cover the validation-once logic, the paste outcomes (only Valid is accepted; a rejection keeps the current login and never shows an account handle), the https-only WebView client and the Sync-to-Login navigation.
+- Not yet confirmed on a device: the login itself. Confirmed currentUser endpoint and X-IG-App-ID: pending owner check.
+- M2 stays open in `TODO.md` until the owner runs the on-phone checklist (login, relaunch with no request, Check now, logout, optional paste).

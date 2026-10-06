@@ -13,6 +13,7 @@
 - [ ] Install Android Studio (bundles the JDK, Android SDK and emulator)
 - [ ] Decide repo visibility (currently public on GitHub)
 - [ ] Decide the integration flow: PRs on GitHub (needs `gh` installed and logged in) or direct pushes to `main`
+- [ ] Log in on the phone and run the M2 checklist (task-18 report)
 
 ## Milestones (spec section 12)
 

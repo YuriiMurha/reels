@@ -4,7 +4,9 @@ Current state of the app. Updated in the same commit as the code it describes.
 
 ## Status
 
-M1 complete: the full app runs on the fake backend (2,000 generated items). No Instagram access yet. The design is in
+M2 code complete: WebView login and paced session validation are built and unit-tested; the login itself has not been
+confirmed on the owner's phone yet (pending the owner's check). The library still comes from the fake backend until M4.
+The design is in
 [`docs/superpowers/specs/2026-10-06-saved-reels-android-design.md`](docs/superpowers/specs/2026-10-06-saved-reels-android-design.md);
 this file describes only what exists.
 
@@ -29,6 +31,7 @@ this file describes only what exists.
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
 | Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard), Cancel, live run counters, budgets, cooldown countdown, status banners, history, Delete library (keeps the session and request log). |
 | Session | `app/.../session/` | The session lives only in the WebView's `CookieManager` (`AndroidCookieStore`), shared with OkHttp. `SessionRepository` validates via one paced interactive request, stores only state + handle in DataStore, accepts pasted sessionids (parsed locally, no request for garbage), logs out by clearing cookies. A paste is transactional: it first asks the Pacer for permission (no cookie is written during a cooldown or at the daily budget), and only a Valid result commits; a failed, cancelled or rejected (Expired, Challenge) paste puts the previous cookies back and leaves the stored state alone, so it never strands a working session. Validation without cookies makes no request; a result that arrives after a logout or paste is discarded; one mutex serialises jar and state changes. `toString()` of anything holding a sessionid or challenge URL is redacted, and the UI compares sessions by a SHA-256 fingerprint, never the id. `LazySessionProbe` keeps WebView out of container construction. Real traffic uses `AppContainer.instagramPacer` (Conservative, Room request log, DataStore cooldown). |
+| Login | `app/.../ui/login/`, `ui/sync/SessionSection.kt` | Instagram's own login page in a WebView (https only, links never leave the app; a start page that isn't https falls back to the login page). A 1 s local cookie poll triggers one validation per new session (compared by fingerprint, never the sessionid); "Check again" re-validates on request. Sync shows session state, Check now, Log out and Paste sessionid (masked, password keyboard). Only Valid counts as an accepted paste; a rejection says so without naming an account and leaves the current login alone, and a second tap during a paste is ignored. Only adapter and Pacer messages reach the screen; anything else gets a generic line. Debug builds enable WebView remote debugging (`chrome://inspect`). |
 
 ## Decided so far
 

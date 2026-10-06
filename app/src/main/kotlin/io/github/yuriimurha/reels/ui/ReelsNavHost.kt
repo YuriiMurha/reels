@@ -11,6 +11,7 @@ import androidx.navigation.toRoute
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.grid.GridScreen
 import io.github.yuriimurha.reels.ui.home.HomeScreen
+import io.github.yuriimurha.reels.ui.login.LoginScreen
 import io.github.yuriimurha.reels.ui.search.SearchScreen
 import io.github.yuriimurha.reels.ui.sync.SyncScreen
 import io.github.yuriimurha.reels.ui.viewer.ViewerScreen
@@ -30,6 +31,10 @@ data object SearchRoute
 
 @Serializable
 data object SyncRoute
+
+/** [url] is where the WebView starts (a challenge page, or Instagram's home after a paste); null means the login page. */
+@Serializable
+data class LoginRoute(val url: String? = null)
 
 /** The viewer writes its current index here on the previous entry, so the grid scrolls back to it. */
 const val VIEWER_INDEX_KEY = "viewerIndex"
@@ -89,7 +94,18 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
             )
         }
         composable<SyncRoute> {
-            SyncScreen(onBack = { navController.popBackSafely() })
+            SyncScreen(
+                onBack = { navController.popBackSafely() },
+                onOpenLogin = { url -> navController.navigate(LoginRoute(url)) { launchSingleTop = true } },
+            )
+        }
+        composable<LoginRoute> { entry ->
+            val route = entry.toRoute<LoginRoute>()
+            LoginScreen(
+                startUrl = route.url,
+                onDone = { navController.popBackSafely() },
+                onBack = { navController.popBackSafely() },
+            )
         }
     }
 }

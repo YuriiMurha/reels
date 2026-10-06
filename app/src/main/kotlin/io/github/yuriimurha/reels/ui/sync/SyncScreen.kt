@@ -49,16 +49,22 @@ import io.github.yuriimurha.reels.ui.LocalAppContainer
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SyncScreen(onBack: () -> Unit) {
+fun SyncScreen(onBack: () -> Unit, onOpenLogin: (String?) -> Unit) {
     val container = LocalAppContainer.current
     val context = LocalContext.current
-    val viewModel = viewModel { SyncViewModel(container.syncController, container.library, container.backend.pacer) }
+    val viewModel = viewModel {
+        SyncViewModel(container.syncController, container.library, container.backend.pacer, container.session)
+    }
     val run by viewModel.run.collectAsStateWithLifecycle()
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     val pacer by viewModel.pacerStatus.collectAsStateWithLifecycle()
     val lastSync by viewModel.lastSyncAt.collectAsStateWithLifecycle()
     val lastFull by viewModel.lastFullSyncAt.collectAsStateWithLifecycle()
     var confirmDelete by remember { mutableStateOf(false) }
+    val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
+    val sessionMessage by viewModel.sessionMessage.collectAsStateWithLifecycle()
+    val pasteError by viewModel.pasteError.collectAsStateWithLifecycle()
+    var pasting by remember { mutableStateOf(false) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
     val startSync: (SyncMode) -> Unit = { mode ->
@@ -92,6 +98,17 @@ fun SyncScreen(onBack: () -> Unit) {
             onDiscard = viewModel::discard,
             onDeleteLibrary = { confirmDelete = true },
             modifier = Modifier.padding(padding),
+            sessionSection = {
+                SessionSection(
+                    state = sessionState,
+                    message = sessionMessage,
+                    onLogin = { onOpenLogin(null) },
+                    onResolveChallenge = onOpenLogin,
+                    onLogout = viewModel::logout,
+                    onCheck = viewModel::checkSession,
+                    onPaste = { viewModel.clearPasteError(); pasting = true },
+                )
+            },
         )
     }
 
@@ -106,6 +123,19 @@ fun SyncScreen(onBack: () -> Unit) {
                 TextButton(onClick = { confirmDelete = false; viewModel.deleteLibrary() }) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep") } },
+        )
+    }
+
+    if (pasting) {
+        PasteSessionDialog(
+            error = pasteError,
+            onSubmit = { input ->
+                viewModel.paste(input) { needsCsrf ->
+                    pasting = false
+                    if (needsCsrf) onOpenLogin("https://www.instagram.com/")
+                }
+            },
+            onDismiss = { pasting = false },
         )
     }
 }
