@@ -10,6 +10,8 @@ import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.Account
 import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.Page
+import io.github.yuriimurha.reels.instagram.RemoteMedia
 import io.github.yuriimurha.reels.instagram.fake.FakeFailures
 import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
 import io.github.yuriimurha.reels.instagram.fake.FakeLibrary
@@ -57,9 +59,14 @@ class SyncEngineTest {
         client: InstagramClient,
         log: RequestLog = InMemoryRequestLog(),
         cooldowns: CooldownStore = InMemoryCooldownStore(),
+        mediaFetcher: MediaFetcher = fetcher,
+        store: ThumbnailStore = thumbs,
+        sessionSignals: SessionSignals = signals,
     ): SyncEngine {
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
-        return SyncEngine(client, pacer, db, fetcher, thumbs, signals, Random(1), now = { testScheduler.currentTime })
+        return SyncEngine(
+            client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
+        )
     }
 
     private suspend fun newRun(mode: SyncMode): Long =
@@ -269,6 +276,248 @@ class SyncEngineTest {
         val run = db.syncDao().run(id)!!
         assertEquals(SyncStatus.PAUSED, run.status)
         assertEquals("Cancelled", run.lastError)
+    }
+
+    // ---- Fix round 1 (R17-R20) ----
+
+    @Test
+    fun anUnwritableThumbnailStoreCountsFailuresAndTheRunStillFinishes() = runTest {
+        val client = smallClient()
+        val blocked = File(tmp.root, "blocked").apply { writeText("a file where the directory should be") }
+        val run = runSync(engine(client, store = ThumbnailStore(blocked)), SyncMode.QUICK)
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(50, run.failures)
+        assertEquals(0, run.thumbsCached)
+        assertEquals(client.library.allSaved().map { it.pk }, pks(ALL_SAVED_ID))
+        assertTrue(db.mediaDao().byPks(client.library.allSaved().map { it.pk }).all { it.thumbPath == null })
+    }
+
+    @Test
+    fun aFetcherThatThrowsAnythingIsCountedAsAFailedThumbnail() = runTest {
+        val client = smallClient()
+        val badPk = client.library.allSaved()[7].pk
+        val flaky = MediaFetcher { url -> if (url.endsWith("/$badPk")) error("decoder exploded") else byteArrayOf(1) }
+        val run = runSync(engine(client, mediaFetcher = flaky), SyncMode.QUICK)
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(1, run.failures)
+        assertEquals(49, run.thumbsCached)
+        assertNull(db.mediaDao().byPks(listOf(badPk)).single().thumbPath)
+    }
+
+    @Test
+    fun aThrowingChallengeSignalStillLeavesTheRunStopped() = runTest {
+        val client = smallClient()
+        client.failures = FakeFailures { if (it == 3) InstagramException.ChallengeRequired("https://www.instagram.com/challenge/x/") else null }
+        val run = runSync(engine(client, sessionSignals = ThrowingSignals()), SyncMode.QUICK)
+        assertEquals(SyncStatus.STOPPED_CHALLENGE, run.status)
+        assertEquals("Instagram wants verification", run.lastError)
+        assertNotNull(run.finishedAt)
+    }
+
+    @Test
+    fun aThrowingLoginSignalStillLeavesTheRunStopped() = runTest {
+        val client = smallClient()
+        client.failures = FakeFailures { if (it == 1) InstagramException.LoginRequired() else null }
+        val run = runSync(engine(client, sessionSignals = ThrowingSignals()), SyncMode.QUICK)
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals("Session expired", run.lastError)
+        assertNotNull(run.finishedAt)
+    }
+
+    @Test
+    fun anUnexpectedErrorPausesTheRunWithoutPropagatingOrLeakingItsMessage() = runTest {
+        val fake = smallClient()
+        val broken = object : InstagramClient by fake {
+            override suspend fun currentUser(): Account = error("cookie s1 is in this message")
+        }
+        val run = runSync(engine(broken), SyncMode.QUICK)
+        assertEquals(SyncStatus.PAUSED, run.status)
+        assertEquals("Unexpected error: IllegalStateException", run.lastError)
+        assertNotNull(run.finishedAt)
+    }
+
+    @Test
+    fun aFeedThatDoesNotSayWhichCollectionsLeavesMembershipsAlone() = runTest {
+        val fake = smallClient()
+        var hideFor: String? = null
+        val client = object : InstagramClient by fake {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                val page = fake.savedMedia(collectionId, cursor)
+                return page.copy(items = page.items.map { if (it.pk == hideFor) it.copy(savedCollectionIds = null) else it })
+            }
+        }
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        val target = fake.library.allSaved().take(20).first { it.savedCollectionIds.orEmpty().isNotEmpty() }
+        val collectionIds = target.savedCollectionIds.orEmpty()
+        hideFor = target.pk
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
+        collectionIds.forEach { assertTrue(target.pk in pks(it), "QUICK kept ${target.pk} in $it") }
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+        collectionIds.forEach { assertTrue(target.pk in pks(it), "FULL kept ${target.pk} in $it") }
+        assertTrue(target.pk in pks(ALL_SAVED_ID))
+    }
+
+    private suspend fun TestScope.quickRunThatReachesTheEndDeletesNothing(reportsSavedCollectionIds: Boolean) {
+        val client = FakeInstagramClient(
+            FakeLibrary(seed = 5, itemCount = 10, collectionCount = 2),
+            reportsSavedCollectionIds = reportsSavedCollectionIds,
+        )
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        val all = client.library.allSaved()
+        val gone = all[5].pk
+        val moved = all.first { it.pk != gone && it.savedCollectionIds == listOf("c1") }.pk
+        client.library.unsave(gone)
+        client.library.setCollections(moved, setOf("c2"))
+        val callsBefore = client.calls.size
+
+        val run = runSync(engine, SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        val saved = client.calls.drop(callsBefore).filter { it.startsWith("saved:") }
+        assertTrue(saved.all { it.endsWith(":null") }, "every scope was a single page that ended: $saved")
+        assertTrue(gone in pks(ALL_SAVED_ID), "a QUICK run never deletes, even at the end of the feed")
+        assertNull(db.mediaDao().byPks(listOf(gone)).single().removedAt)
+        assertTrue(File(tmp.root, "thumbs/$gone.jpg").exists())
+        if (!reportsSavedCollectionIds) {
+            assertTrue(moved in pks("c1"), "strategy B: a QUICK run does not reconcile c1")
+            assertTrue(moved in pks("c2"), "strategy B: the QUICK walk of c2 adds it")
+        }
+    }
+
+    @Test
+    fun quickRunReachingTheEndOfTheFeedDeletesNothingStrategyA() = runTest {
+        quickRunThatReachesTheEndDeletesNothing(reportsSavedCollectionIds = true)
+    }
+
+    @Test
+    fun quickRunReachingTheEndOfTheFeedDeletesNothingStrategyB() = runTest {
+        quickRunThatReachesTheEndDeletesNothing(reportsSavedCollectionIds = false)
+    }
+
+    private fun strategyBClient() = FakeInstagramClient(
+        FakeLibrary(seed = 7, itemCount = 120, collectionCount = 2),
+        reportsSavedCollectionIds = false,
+    )
+
+    @Test
+    fun interruptedFullStrategyBRunKeepsEveryCollectionMembership() = runTest {
+        val client = strategyBClient()
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        val c1 = client.library.itemsIn("c1")
+        assertTrue(c1.size > 40, "c1 needs several pages, has ${c1.size}")
+        val moved = c1.drop(25).first { it.savedCollectionIds == listOf("c1") }.pk
+        client.library.setCollections(moved, setOf("c2"))
+        val c1Before = pks("c1").toSet()
+        val c2Before = pks("c2").toSet()
+
+        client.failures = FakeFailures {
+            if (client.calls.last() == "saved:c1:o:20") InstagramException.ChallengeRequired(null) else null
+        }
+        val id = newRun(SyncMode.FULL)
+        engine.run(id)
+
+        assertEquals(SyncStatus.STOPPED_CHALLENGE, db.syncDao().run(id)!!.status)
+        assertEquals("saved:c1:o:20", client.calls.last(), "the walk of c1 stopped on its second page")
+        assertEquals(c1Before, pks("c1").toSet(), "an interrupted walk must not delete from c1")
+        assertTrue(moved in pks("c1"))
+        assertEquals(c2Before, pks("c2").toSet())
+
+        client.failures = FakeFailures { null }
+        engine.run(id)
+        assertEquals(SyncStatus.DONE, db.syncDao().run(id)!!.status)
+        assertFalse(moved in pks("c1"), "the resumed walk reached the end, so it reconciles")
+        assertTrue(moved in pks("c2"))
+        assertEquals(client.library.itemsIn("c1").map { it.pk }, pks("c1"))
+    }
+
+    @Test
+    fun completedFullStrategyBRunMovesItemsBetweenCollections() = runTest {
+        val client = strategyBClient()
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        val moved = client.library.itemsIn("c1").first { it.savedCollectionIds == listOf("c1") }.pk
+        client.library.setCollections(moved, setOf("c2"))
+
+        val run = runSync(engine, SyncMode.FULL)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertFalse(moved in pks("c1"))
+        assertTrue(moved in pks("c2"))
+        for (collection in client.library.collections) {
+            assertEquals(client.library.itemsIn(collection.id).map { it.pk }, pks(collection.id))
+        }
+    }
+
+    private class EmptyFeed(private val delegate: InstagramClient) : InstagramClient by delegate {
+        override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> =
+            if (collectionId == null) Page(emptyList(), null) else delegate.savedMedia(collectionId, cursor)
+    }
+
+    @Test
+    fun anEmptySavedFeedInAFullRunStopsInsteadOfDeletingEverything() = runTest {
+        val fake = smallClient()
+        runSync(engine(fake), SyncMode.QUICK)
+        val everything = fake.library.allSaved().map { it.pk }
+
+        val run = runSync(engine(EmptyFeed(fake)), SyncMode.FULL)
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, run.status)
+        assertEquals("Adapter needs repair: empty saved feed", run.lastError)
+        assertEquals(everything, pks(ALL_SAVED_ID))
+        assertTrue(db.mediaDao().byPks(everything).all { it.removedAt == null })
+        for (collection in fake.library.collections) {
+            assertEquals(fake.library.itemsIn(collection.id).map { it.pk }, pks(collection.id))
+        }
+        assertEquals(everything.size, File(tmp.root, "thumbs").listFiles().orEmpty().size)
+    }
+
+    @Test
+    fun anEmptySavedFeedInAQuickRunChangesNothing() = runTest {
+        val fake = smallClient()
+        runSync(engine(fake), SyncMode.QUICK)
+        val everything = fake.library.allSaved().map { it.pk }
+
+        val run = runSync(engine(EmptyFeed(fake)), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(everything, pks(ALL_SAVED_ID))
+    }
+
+    @Test
+    fun aCollectionThatBecameEmptyIsReconciledNotTreatedAsABrokenFeed() = runTest {
+        val client = FakeInstagramClient(
+            FakeLibrary(seed = 2, itemCount = 40, collectionCount = 2),
+            reportsSavedCollectionIds = false,
+        )
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        client.library.itemsIn("c2").forEach { client.library.setCollections(it.pk, setOf("c1")) }
+        assertTrue(pks("c2").isNotEmpty())
+
+        val run = runSync(engine, SyncMode.FULL)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(emptyList(), pks("c2"))
+        assertEquals(client.library.itemsIn("c1").map { it.pk }, pks("c1"))
+    }
+
+    @Test
+    fun aFullRunOnAnAccountThatHasNothingSavedIsFine() = runTest {
+        val client = FakeInstagramClient(FakeLibrary(itemCount = 0, collectionCount = 2))
+        val run = runSync(engine(client), SyncMode.FULL)
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(emptyList(), pks(ALL_SAVED_ID))
+    }
+
+    private class ThrowingSignals : SessionSignals {
+        override suspend fun loginRequired(): Unit = error("signal sink is broken")
+
+        override suspend fun challengeRequired(challengeUrl: String?): Unit = error("signal sink is broken")
     }
 
     private class RecordingSignals : SessionSignals {

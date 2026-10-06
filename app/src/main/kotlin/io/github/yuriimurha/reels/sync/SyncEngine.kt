@@ -26,7 +26,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 
@@ -45,7 +44,11 @@ class SyncEngine(
     private val collectionDao = db.collectionDao()
     private val syncDao = db.syncDao()
 
-    /** Executes or resumes run [runId]. Its final status is left in `sync_run`; only cancellation propagates. */
+    /**
+     * Executes or resumes run [runId]. Its final status is always written to `sync_run` before this returns:
+     * expected failures map to a status, and any unexpected error pauses the run with a `lastError` that names
+     * only the exception class. Only cancellation propagates (after the run is left PAUSED, "Cancelled").
+     */
     suspend fun run(runId: Long) {
         val stored = checkNotNull(syncDao.run(runId)) { "No sync run $runId" }
         val progress = Progress(
@@ -68,11 +71,11 @@ class SyncEngine(
             withContext(NonCancellable) { progress.finish(SyncStatus.PAUSED, "Cancelled") }
             throw e
         } catch (e: InstagramException.ChallengeRequired) {
-            signals.challengeRequired(e.challengeUrl)
             progress.finish(SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification")
+            notifySession { signals.challengeRequired(e.challengeUrl) }
         } catch (e: InstagramException.LoginRequired) {
-            signals.loginRequired()
             progress.finish(SyncStatus.STOPPED_LOGIN, "Session expired")
+            notifySession { signals.loginRequired() }
         } catch (e: InstagramException.RateLimited) {
             progress.finish(SyncStatus.STOPPED_RATE_LIMIT, "Instagram is limiting requests")
         } catch (e: PacerRefusal.CoolingDown) {
@@ -85,6 +88,23 @@ class SyncEngine(
             progress.finish(SyncStatus.PAUSED, "Run budget reached, tap Sync to continue")
         } catch (e: PacerRefusal.DailyBudgetReached) {
             progress.finish(SyncStatus.PAUSED, "24-hour budget reached")
+        } catch (e: Exception) {
+            // Last resort: never strand the run as RUNNING. The message is dropped on purpose (it may hold session data).
+            progress.finish(SyncStatus.PAUSED, "Unexpected error: ${e::class.simpleName ?: "Exception"}")
+        }
+    }
+
+    /**
+     * Tells the session layer about a stop whose status is already written. A failing receiver must not
+     * change that status or escape; cancellation still propagates.
+     */
+    private suspend fun notifySession(signal: suspend () -> Unit) {
+        try {
+            signal()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Intentionally ignored: the run is already STOPPED_*; the owner sees it on the Sync screen.
         }
     }
 
@@ -165,13 +185,21 @@ class SyncEngine(
 
         if (scope == ALL_SAVED_ID && client.reportsSavedCollectionIds) {
             page.items.zip(memberships).forEach { (item, member) ->
-                val ids = item.savedCollectionIds.orEmpty().filter { it in knownCollections }
+                // null means "the response doesn't say" (RemoteMedia): keep what we have, never treat it as "none".
+                val ids = item.savedCollectionIds?.filter { it in knownCollections } ?: return@forEach
                 collectionDao.deleteRealMembershipsExcept(item.pk, ids)
                 collectionDao.upsertMemberships(ids.map { CollectionMediaEntity(it, item.pk, member.sortKey, runId) })
             }
         }
 
         val reachedEnd = page.nextCursor == null
+        if (mode == SyncMode.FULL && scope == ALL_SAVED_ID && reachedEnd &&
+            cursor.walkIndex + page.items.size == 0L && collectionDao.maxSortKey(scope) != null
+        ) {
+            // A walk that ends having seen nothing, over a library that has items, is a broken feed, not an
+            // account that unsaved everything: reconciling would wipe the library. Rolls this page back.
+            throw InstagramException.ShapeChanged("empty saved feed")
+        }
         val hitKnownItem = mode == SyncMode.QUICK && page.items.any { it.pk in members }
         val next = cursor.copy(
             nextCursor = page.nextCursor,
@@ -206,12 +234,15 @@ class SyncEngine(
         val results = coroutineScope {
             items.map { item ->
                 async {
-                    val bytes = try {
-                        pacer.cdn { fetcher.fetch(item.thumbnailUrl) }
-                    } catch (e: IOException) {
-                        null
+                    val path = try {
+                        val bytes = pacer.cdn { fetcher.fetch(item.thumbnailUrl) }
+                        bytes?.let { withContext(Dispatchers.IO) { thumbnails.write(item.pk, it) } }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null // network, decoding or disk trouble: this thumbnail counts as failed, the sync goes on
                     }
-                    item.pk to bytes?.let { withContext(Dispatchers.IO) { thumbnails.write(item.pk, it) } }
+                    item.pk to path
                 }
             }.awaitAll()
         }
