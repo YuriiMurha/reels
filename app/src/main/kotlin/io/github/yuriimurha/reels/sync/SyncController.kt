@@ -36,10 +36,15 @@ class SyncController(
         id
     }
 
-    /** Stops after the current request; the run stays resumable from its cursors. */
+    /**
+     * Stops after the current request; the run stays resumable from its cursors. Takes the same lock as [start], so a
+     * Cancel followed by Sync can never let a late pause overwrite the run that Sync just resumed.
+     */
     suspend fun cancel() {
-        scheduler.cancel()
-        syncDao.pauseRunningRuns("Cancelled")
+        mutex.withLock {
+            scheduler.cancel()
+            syncDao.pauseRunningRuns("Cancelled")
+        }
     }
 
     /** Abandons an unfinished run so the next tap starts fresh. Nothing is deleted (spec 7.1). */

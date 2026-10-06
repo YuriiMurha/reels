@@ -5,15 +5,16 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.testutil.inMemoryDb
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
-import kotlin.test.assertNull
 
 @RunWith(AndroidJUnit4::class)
 class SyncControllerTest {
@@ -34,12 +35,23 @@ class SyncControllerTest {
     }
 
     @Test
-    fun doubleTapDoesNotCreateSecondRun() = runTest {
+    fun sequentialDoubleTapReusesTheRunningRun() = runTest {
         val first = controller.start(SyncMode.QUICK)
-        val second = controller.start(SyncMode.QUICK)
-        val concurrent = listOf(async { controller.start(SyncMode.FULL) }, async { controller.start(SyncMode.QUICK) }).awaitAll()
-        assertEquals(setOf(first), (listOf(second) + concurrent).toSet())
-        assertNull(db.syncDao().run(first + 1), "only one run row exists")
+        val second = controller.start(SyncMode.FULL)
+        assertEquals(first, second)
+        assertEquals(1, runCount())
+        assertEquals(listOf(first, first), scheduler.enqueued, "the second tap re-enqueues the same run (KEEP makes it a no-op)")
+    }
+
+    @Test
+    fun concurrentTapsOnAnEmptyTableCreateExactlyOneRun() = runTest {
+        assertEquals(0, runCount(), "no earlier call: every start() below races on the insert path")
+        val modes = listOf(SyncMode.QUICK, SyncMode.FULL, SyncMode.QUICK, SyncMode.FULL, SyncMode.QUICK, SyncMode.FULL)
+        val ids = modes.map { mode -> async(Dispatchers.Default) { controller.start(mode) } }.awaitAll()
+        assertEquals(1, ids.toSet().size, "all taps get the same run id: $ids")
+        assertEquals(1, runCount())
+        assertEquals(modes.size, scheduler.enqueued.size)
+        assertEquals(setOf(ids.first()), scheduler.enqueued.toSet())
     }
 
     @Test
@@ -87,8 +99,14 @@ class SyncControllerTest {
         assertEquals(SyncStatus.PAUSED, db.syncDao().run(id)!!.status)
     }
 
+    private fun runCount(): Int =
+        db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM sync_run").use {
+            it.moveToFirst()
+            it.getInt(0)
+        }
+
     private class FakeScheduler : SyncScheduler {
-        val enqueued = mutableListOf<Long>()
+        val enqueued = CopyOnWriteArrayList<Long>()
         var cancelled = 0
         var active = false
 
