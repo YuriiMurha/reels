@@ -28,3 +28,9 @@ Append-only log. Newest entry at the bottom; never edit past entries.
 - Spec amended to match: `SessionProbe` split and `reportsSavedCollectionIds` on the adapter contract,
   progress columns on `sync_run`, one numbering scheme for quick and full walks, a separate fake-backend
   Pacer, and SDK level 36.
+
+## 2026-10-06: M0 skeleton
+
+- Two-module Gradle build (AGP 9.4.1 built-in Kotlin, Kotlin 2.4.20, Gradle 9.8.0); `./gradlew check` green.
+- Backup and device transfer disabled, with a test that checks every domain is excluded.
+- Pre-commit secret guard with a self-test script.

@@ -15,6 +15,7 @@ this file describes only what exists.
 | Build | `settings.gradle.kts`, `gradle/libs.versions.toml` | Two modules, versions pinned in one catalog. AGP 9 built-in Kotlin. |
 | `:instagram` | `instagram/` | Pure Kotlin/JVM module reserved for all Instagram-specific code. Empty so far. |
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
+| Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR/session/cookie files, `sessionid` values and `Cookie:` headers. Enable per clone with `git config core.hooksPath .githooks`. |
 
 ## Decided so far
 

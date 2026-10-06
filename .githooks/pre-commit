@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Blocks commits that would publish Instagram session material (this repo is public).
+# Enable once per clone: git config core.hooksPath .githooks
+set -euo pipefail
+
+fail=0
+
+while IFS= read -r -d '' file; do
+  case "$file" in
+    *.har|*.session|*cookies*.txt|session*.json|*/session*.json)
+      echo "pre-commit: refusing to commit $file (looks like session material)"
+      fail=1
+      ;;
+  esac
+done < <(git diff --cached --name-only -z --diff-filter=ACMR)
+
+added="$(git diff --cached -U0 --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
+if printf '%s\n' "$added" | grep -qE 'sessionid=[0-9]+(%3A|:)[A-Za-z0-9]{10,}'; then
+  echo "pre-commit: staged changes contain a sessionid value"
+  fail=1
+fi
+if printf '%s\n' "$added" | grep -qiE '(set-)?cookie: *[a-z0-9_-]+='; then
+  echo "pre-commit: staged changes contain a Cookie header with a value"
+  fail=1
+fi
+
+exit "$fail"
