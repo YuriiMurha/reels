@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -29,15 +30,23 @@ class SyncViewModel(
     val lastSyncAt: StateFlow<Long?> = controller.lastSyncAt.stateIn(viewModelScope, sharing, null)
     val lastFullSyncAt: StateFlow<Long?> = controller.lastFullSyncAt.stateIn(viewModelScope, sharing, null)
 
-    /** Budgets and cooldown, refreshed every second while the screen is visible. Local reads only. */
-    val pacerStatus: StateFlow<PacerStatus?> = flow {
+    /** The Pacer's status and the moment it was read. */
+    private data class Tick(val status: PacerStatus, val at: Long)
+
+    /**
+     * Budgets and cooldown, refreshed every second while the screen is visible. Local reads only. The time travels
+     * with the status because during a cooldown the status itself never changes, and a StateFlow drops repeats.
+     */
+    private val tick: StateFlow<Tick?> = flow {
         while (true) {
-            emit(pacer.status())
+            emit(Tick(pacer.status(), now()))
             delay(1_000)
         }
     }.stateIn(viewModelScope, sharing, null)
 
-    val ui: StateFlow<SyncUiState> = combine(run, pacerStatus) { r, p -> syncUiState(r, p, now()) }
+    val pacerStatus: StateFlow<PacerStatus?> = tick.map { it?.status }.stateIn(viewModelScope, sharing, null)
+
+    val ui: StateFlow<SyncUiState> = combine(run, tick) { r, t -> syncUiState(r, t?.status, t?.at ?: now()) }
         .stateIn(viewModelScope, sharing, syncUiState(null, null, now()))
 
     fun start(mode: SyncMode) {
