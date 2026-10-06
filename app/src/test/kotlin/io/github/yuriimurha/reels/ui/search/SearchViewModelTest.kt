@@ -5,6 +5,7 @@ import io.github.yuriimurha.reels.data.db.ALL_SAVED_ID
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.library.TypeFilter
+import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -17,8 +18,11 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
@@ -26,7 +30,10 @@ import kotlin.test.assertNull
 @RunWith(AndroidJUnit4::class)
 class SearchViewModelTest {
     private val db = inMemoryDb()
-    private val viewModel by lazy { SearchViewModel(LibraryRepository(db)) }
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private val viewModel by lazy { SearchViewModel(LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs")))) }
 
     @Before
     fun setMain() = Dispatchers.setMain(StandardTestDispatcher())

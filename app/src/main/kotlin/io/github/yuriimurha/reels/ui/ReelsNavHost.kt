@@ -12,6 +12,7 @@ import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.grid.GridScreen
 import io.github.yuriimurha.reels.ui.home.HomeScreen
 import io.github.yuriimurha.reels.ui.search.SearchScreen
+import io.github.yuriimurha.reels.ui.sync.SyncScreen
 import io.github.yuriimurha.reels.ui.viewer.ViewerScreen
 import kotlinx.serialization.Serializable
 
@@ -48,7 +49,7 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
                     navController.navigate(GridRoute(source.encode(), title)) { launchSingleTop = true }
                 },
                 onOpenSearch = { navController.navigate(SearchRoute) { launchSingleTop = true } },
-                onOpenSync = {},
+                onOpenSync = { navController.navigate(SyncRoute) { launchSingleTop = true } },
             )
         }
         composable<GridRoute> { entry ->
@@ -86,6 +87,9 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
                 returnedIndex = returnedIndex,
                 onReturnedIndexConsumed = { entry.savedStateHandle.remove<Int>(VIEWER_INDEX_KEY) },
             )
+        }
+        composable<SyncRoute> {
+            SyncScreen(onBack = { navController.popBackSafely() })
         }
     }
 }

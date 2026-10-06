@@ -18,7 +18,7 @@ class AppContainer(context: Context) {
     val db: ReelsDatabase by lazy { ReelsDatabase.build(context) }
     val thumbnails: ThumbnailStore by lazy { ThumbnailStore(File(context.filesDir, "thumbs")) }
     val backend: Backend by lazy { Backend.Fake() }
-    val library: LibraryRepository by lazy { LibraryRepository(db) }
+    val library: LibraryRepository by lazy { LibraryRepository(db, thumbnails) }
     val syncController: SyncController by lazy { SyncController(db, WorkManagerSyncScheduler(context)) }
 
     /** M5 replaces this with the real resolver (link refresh on the interactive lane, pk-keyed cache). */

@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.ALL_SAVED_ID
 import io.github.yuriimurha.reels.data.db.CollectionEntity
 import io.github.yuriimurha.reels.data.db.CollectionMediaEntity
+import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.loadAll
@@ -11,15 +12,23 @@ import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import java.io.File
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 @RunWith(AndroidJUnit4::class)
 class LibraryRepositoryTest {
     private val db = inMemoryDb()
-    private val repository = LibraryRepository(db)
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private val thumbs by lazy { ThumbnailStore(File(tmp.root, "thumbs")) }
+    private val repository by lazy { LibraryRepository(db, thumbs) }
 
     @After
     fun close() = db.close()
@@ -99,6 +108,15 @@ class LibraryRepositoryTest {
     fun uncategorizedSourceListsItemsWithoutCollections() = runTest {
         givenLibrary()
         assertEquals(listOf("m3"), repository.pagingSource(MediaSource.Uncategorized).loadAll().map { it.pk })
+    }
+
+    @Test
+    fun deleteLibraryRemovesRowsAndThumbnails() = runTest {
+        givenLibrary()
+        val path = thumbs.write("m1", byteArrayOf(1))
+        repository.deleteLibrary()
+        assertEquals(emptyList(), repository.collectionCards().first())
+        assertFalse(File(path).exists())
     }
 
     @Test
