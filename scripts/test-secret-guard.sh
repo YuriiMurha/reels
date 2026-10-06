@@ -43,4 +43,7 @@ check blocked "session json" "app/session.json" "{}"
 check blocked "cookies dump" "tmp/cookies-www.txt" "x"
 check blocked "planted sessionid value" "notes.txt" "token $planted_sid"
 check blocked "planted Cookie header" "Api.kt" "val h = \"$planted_cookie\""
+# Regression test for fail-open on large diffs (SIGPIPE with grep -q + pipefail)
+large_file="$(printf '%s\n%s' "token $planted_sid" "$(head -c 200000 /dev/zero | tr '\0' 'a' | fold -w 100)")"
+check blocked "planted sessionid in a large file" "bigfile.txt" "$large_file"
 echo "secret guard: all checks passed"

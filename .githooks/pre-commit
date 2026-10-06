@@ -15,11 +15,11 @@ while IFS= read -r -d '' file; do
 done < <(git diff --cached --name-only -z --diff-filter=ACMR)
 
 added="$(git diff --cached -U0 --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
-if printf '%s\n' "$added" | grep -qE 'sessionid=[0-9]+(%3A|:)[A-Za-z0-9]{10,}'; then
+if grep -qE 'sessionid=[0-9]+(%3A|:)[A-Za-z0-9]{10,}' <<<"$added"; then
   echo "pre-commit: staged changes contain a sessionid value"
   fail=1
 fi
-if printf '%s\n' "$added" | grep -qiE '(set-)?cookie: *[a-z0-9_-]+='; then
+if grep -qiE '(set-)?cookie: *[a-z0-9_-]+=' <<<"$added"; then
   echo "pre-commit: staged changes contain a Cookie header with a value"
   fail=1
 fi
