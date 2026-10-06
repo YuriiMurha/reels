@@ -185,4 +185,29 @@ class ReelsNavHostTest {
         compose.waitForIdle()
         assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<SyncRoute>(), "Back did not return to Sync")
     }
+
+    @Test
+    fun aLateLoginResultPopsOnlyTheLoginScreen() {
+        compose.setContent {
+            navController = rememberNavController()
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) {
+                    ReelsNavHost(navController, startDestination = SearchRoute)
+                }
+            }
+        }
+        compose.waitForIdle()
+        compose.runOnUiThread { navController.navigate(SyncRoute) }
+        compose.waitForIdle()
+        compose.runOnUiThread { navController.navigate(LoginRoute()) }
+        compose.waitForIdle()
+        assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<LoginRoute>())
+        // The first call is the login finishing; the second is a late Valid arriving after the screen is already gone.
+        compose.runOnUiThread {
+            navController.closeLogin()
+            navController.closeLogin()
+        }
+        compose.waitForIdle()
+        assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<SyncRoute>(), "a late result popped Sync as well")
+    }
 }

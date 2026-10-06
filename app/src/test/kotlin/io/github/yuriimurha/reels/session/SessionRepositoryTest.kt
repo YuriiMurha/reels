@@ -165,6 +165,7 @@ class SessionRepositoryTest {
         signedIn()
         val repository = repository()
         assertEquals(SessionState.Valid("tester"), repository.validate())
+        cookies.events.clear() // a Valid result flushes the jar; only what the refusal itself does is under test below
         val callsBefore = probe.calls
         val until = cooldowns.onRateLimited(testScheduler.currentTime)
         val refusal = assertFailsWith<PacerRefusal.CoolingDown> { repository.pasteSessionId("43%3Acd") }
@@ -317,6 +318,38 @@ class SessionRepositoryTest {
         assertEquals(SessionState.LoggedOut, pending.await())
         assertEquals(SessionState.LoggedOut, repository.state.first(), "a late probe result must not resurrect the session")
         assertFalse(repository.hasSessionCookies())
+    }
+
+    @Test
+    fun aValidResultFlushesTheJarSoALoginSurvivesAKill() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(0, cookies.flushes)
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        assertEquals(1, cookies.flushes, "Chromium commits cookies lazily: Valid is stored, so the cookies must be flushed with it")
+    }
+
+    @Test
+    fun aResultThatIsNotValidMakesNoFlush() = runTest {
+        signedIn()
+        val repository = repository()
+        probe.next = { throw InstagramException.LoginRequired() }
+        assertEquals(SessionState.Expired(null), repository.validate())
+        assertEquals(0, cookies.flushes)
+    }
+
+    @Test
+    fun aDiscardedValidResultMakesNoFlush() = runTest {
+        signedIn()
+        val repository = repository()
+        val gate = CompletableDeferred<Unit>()
+        probe.gate = gate
+        val pending = async { repository.validate() }
+        probe.entered.await()
+        repository.logout()
+        gate.complete(Unit)
+        assertEquals(SessionState.LoggedOut, pending.await())
+        assertEquals(0, cookies.flushes, "a late result for a forgotten session must not touch the jar")
     }
 
     @Test

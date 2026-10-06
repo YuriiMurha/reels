@@ -21,6 +21,10 @@ interface LoginSession {
     /** A short, non-reversible tag of the current sessionid (never the id itself), or null. Equal tags mean the same session. */
     fun currentSessionFingerprint(): String?
     fun hasSessionCookies(): Boolean
+
+    /** Whether the jar already holds a csrftoken. A local read, never a request. */
+    fun hasCsrfToken(): Boolean
+
     suspend fun validate(): SessionState
 }
 
@@ -50,7 +54,7 @@ class SessionRepository(
 
     override fun hasSessionCookies(): Boolean = sessionId() != null && userId() != null
 
-    fun hasCsrfToken(): Boolean = cookies.cookieValue(INSTAGRAM, "csrftoken") != null
+    override fun hasCsrfToken(): Boolean = cookies.cookieValue(INSTAGRAM, "csrftoken") != null
 
     /**
      * One paced request on the interactive lane. Network, rate-limit and budget failures propagate unchanged.
@@ -63,7 +67,16 @@ class SessionRepository(
             sessionEpoch to state.first().handle
         }
         val result = probeSession(handle)
-        return lock.withLock { if (epoch != sessionEpoch) state.first() else store(result) }
+        return lock.withLock {
+            if (epoch != sessionEpoch) {
+                state.first()
+            } else {
+                // Valid is persisted at once, but Chromium commits cookies lazily: flush so a kill right after a
+                // WebView login cannot leave "Logged in as" with no sessionid behind it.
+                if (result is SessionState.Valid) cookies.flush()
+                store(result)
+            }
+        }
     }
 
     /**

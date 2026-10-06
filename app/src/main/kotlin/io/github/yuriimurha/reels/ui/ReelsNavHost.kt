@@ -11,6 +11,7 @@ import androidx.navigation.toRoute
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.grid.GridScreen
 import io.github.yuriimurha.reels.ui.home.HomeScreen
+import io.github.yuriimurha.reels.ui.login.LoginPurpose
 import io.github.yuriimurha.reels.ui.login.LoginScreen
 import io.github.yuriimurha.reels.ui.search.SearchScreen
 import io.github.yuriimurha.reels.ui.sync.SyncScreen
@@ -32,9 +33,12 @@ data object SearchRoute
 @Serializable
 data object SyncRoute
 
-/** [url] is where the WebView starts (a challenge page, or Instagram's home after a paste); null means the login page. */
+/**
+ * [url] is where the WebView starts (a challenge page, or Instagram's home after a paste); null means the login page.
+ * [purpose] decides what the screen may spend an Instagram request on.
+ */
 @Serializable
-data class LoginRoute(val url: String? = null)
+data class LoginRoute(val url: String? = null, val purpose: LoginPurpose = LoginPurpose.LOGIN)
 
 /** The viewer writes its current index here on the previous entry, so the grid scrolls back to it. */
 const val VIEWER_INDEX_KEY = "viewerIndex"
@@ -42,6 +46,11 @@ const val VIEWER_INDEX_KEY = "viewerIndex"
 /** Pops only when there is somewhere to go back to, so a stray Back can't empty the NavHost (blank screen). */
 fun NavHostController.popBackSafely() {
     if (previousBackStackEntry != null) popBackStack()
+}
+
+/** Closes the login screen and nothing else: a late result arriving after it is gone must not also pop Sync. */
+fun NavHostController.closeLogin() {
+    popBackStack<LoginRoute>(inclusive = true)
 }
 
 /** [startDestination] is only overridden by tests. */
@@ -96,15 +105,16 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
         composable<SyncRoute> {
             SyncScreen(
                 onBack = { navController.popBackSafely() },
-                onOpenLogin = { url -> navController.navigate(LoginRoute(url)) { launchSingleTop = true } },
+                onOpenLogin = { url, purpose -> navController.navigate(LoginRoute(url, purpose)) { launchSingleTop = true } },
             )
         }
         composable<LoginRoute> { entry ->
             val route = entry.toRoute<LoginRoute>()
             LoginScreen(
                 startUrl = route.url,
-                onDone = { navController.popBackSafely() },
+                onDone = { navController.closeLogin() },
                 onBack = { navController.popBackSafely() },
+                purpose = route.purpose,
             )
         }
     }

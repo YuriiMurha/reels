@@ -45,7 +45,7 @@ class LoginViewModelTest {
     fun doesNotRevalidateSameSession() = runTest {
         session.fingerprint = "s1"
         session.result = { SessionState.Expired(null) }
-        val viewModel = LoginViewModel(session)
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
         repeat(5) {
             viewModel.onCookiesMaybeReady()
             advanceUntilIdle()
@@ -57,7 +57,7 @@ class LoginViewModelTest {
     fun aNewSessionIsChecked() = runTest {
         session.fingerprint = "s1"
         session.result = { SessionState.Expired(null) }
-        val viewModel = LoginViewModel(session)
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
         viewModel.onCookiesMaybeReady()
         advanceUntilIdle()
         session.fingerprint = "s2"
@@ -70,7 +70,7 @@ class LoginViewModelTest {
     fun retryChecksTheSameSessionAgain() = runTest {
         session.fingerprint = "s1"
         session.result = { SessionState.Challenge("https://www.instagram.com/challenge/x/", null) }
-        val viewModel = LoginViewModel(session)
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
         viewModel.onCookiesMaybeReady()
         advanceUntilIdle()
         session.result = { SessionState.Valid("tester") }
@@ -141,8 +141,89 @@ class LoginViewModelTest {
         assertEquals(LoginViewModel.Status.Failed("Instagram is limiting requests"), viewModel.status.value)
     }
 
+    @Test
+    fun aLoginScreenChecksTheSessionItFindsAtOpenExactlyOnce() = runTest {
+        session.fingerprint = "s1"
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(1, session.validations)
+    }
+
+    @Test
+    fun aChallengeScreenDoesNotCheckTheSessionItWasOpenedWith() = runTest {
+        session.fingerprint = "s1" // the session that is waiting on the challenge: already known to be a Challenge
+        val viewModel = LoginViewModel(session, LoginPurpose.CHALLENGE)
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(0, session.validations, "opening the challenge page must not cost an Instagram request")
+        assertEquals(LoginViewModel.Status.Waiting, viewModel.status.value)
+    }
+
+    @Test
+    fun aChallengeScreenChecksAgainWhenTheOwnerAsks() = runTest {
+        session.fingerprint = "s1"
+        val viewModel = LoginViewModel(session, LoginPurpose.CHALLENGE)
+        viewModel.onCookiesMaybeReady()
+        viewModel.retry()
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(1, session.validations)
+        assertEquals(LoginViewModel.Status.Done(SessionState.Valid("tester")), viewModel.status.value)
+    }
+
+    @Test
+    fun aChallengeScreenChecksAnotherSessionThatAppears() = runTest {
+        session.fingerprint = "s1"
+        val viewModel = LoginViewModel(session, LoginPurpose.CHALLENGE)
+        viewModel.onCookiesMaybeReady()
+        session.fingerprint = "s2"
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(1, session.validations)
+    }
+
+    @Test
+    fun aCsrfScreenNeverValidatesAndWaitsForTheToken() = runTest {
+        session.fingerprint = "s1"
+        val viewModel = LoginViewModel(session, LoginPurpose.CSRF)
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        session.fingerprint = "s2"
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(0, session.validations, "the pasted session was just checked; this screen only fetches a csrftoken")
+        assertEquals(LoginViewModel.Status.Waiting, viewModel.status.value)
+
+        session.csrf = true
+        viewModel.onCookiesMaybeReady()
+        assertEquals(LoginViewModel.Status.CsrfReady, viewModel.status.value)
+        assertEquals(0, session.validations)
+    }
+
+    @Test
+    fun aCsrfScreenGivesUpAfterThirtySecondsWithoutAnError() = runTest {
+        session.fingerprint = "s1"
+        var clock = 1_000L
+        val viewModel = LoginViewModel(session, LoginPurpose.CSRF) { clock }
+        clock += 29_999
+        viewModel.onCookiesMaybeReady()
+        assertEquals(LoginViewModel.Status.Waiting, viewModel.status.value)
+        clock += 1
+        viewModel.onCookiesMaybeReady()
+        assertEquals(LoginViewModel.Status.CsrfReady, viewModel.status.value, "close anyway, nothing alarming")
+        assertEquals(0, session.validations)
+    }
+
     private class FakeLoginSession : LoginSession {
         var fingerprint: String? = null
+        var csrf = false
         var result: () -> SessionState = { SessionState.Valid("tester") }
         var gate: CompletableDeferred<Unit>? = null
         var validations = 0
@@ -150,6 +231,8 @@ class LoginViewModelTest {
         override fun currentSessionFingerprint(): String? = fingerprint
 
         override fun hasSessionCookies(): Boolean = fingerprint != null
+
+        override fun hasCsrfToken(): Boolean = csrf
 
         override suspend fun validate(): SessionState {
             validations++

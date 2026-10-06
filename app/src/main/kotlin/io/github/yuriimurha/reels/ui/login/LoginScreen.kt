@@ -1,6 +1,8 @@
 package io.github.yuriimurha.reels.ui.login
 
 import android.annotation.SuppressLint
+import android.net.Uri
+import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -38,14 +40,23 @@ import io.github.yuriimurha.reels.ui.LocalAppContainer
 import kotlinx.coroutines.delay
 
 private const val LOGIN_URL = "https://www.instagram.com/accounts/login/"
+private const val INSTAGRAM_HOME = "https://www.instagram.com/"
 
-/** Instagram's own login page in a WebView (spec 9.6). The session lands in CookieManager, shared with the API client. */
+/**
+ * Instagram's own login page in a WebView (spec 9.6). The session lands in CookieManager, shared with the API client.
+ * [purpose] says what the screen may spend an Instagram request on; see [LoginPurpose].
+ */
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LoginScreen(startUrl: String?, onDone: () -> Unit, onBack: () -> Unit) {
+fun LoginScreen(
+    startUrl: String?,
+    onDone: () -> Unit,
+    onBack: () -> Unit,
+    purpose: LoginPurpose = LoginPurpose.LOGIN,
+) {
     val container = LocalAppContainer.current
-    val viewModel = viewModel { LoginViewModel(container.session) }
+    val viewModel = viewModel { LoginViewModel(container.session, purpose) }
     val status by viewModel.status.collectAsStateWithLifecycle()
     var webView by remember { mutableStateOf<WebView?>(null) }
 
@@ -56,10 +67,18 @@ fun LoginScreen(startUrl: String?, onDone: () -> Unit, onBack: () -> Unit) {
         }
     }
     LaunchedEffect(status) {
+        if (status == LoginViewModel.Status.CsrfReady) {
+            onDone()
+            return@LaunchedEffect
+        }
         val done = status as? LoginViewModel.Status.Done ?: return@LaunchedEffect
         when (val state = done.state) {
             is SessionState.Valid -> onDone()
-            is SessionState.Challenge -> httpsUrlOrNull(state.challengeUrl)?.let { webView?.loadUrl(it) }
+            is SessionState.Challenge -> {
+                // Without a usable URL Instagram's home redirects to the checkpoint. Don't reload the page already shown.
+                val target = challengeTarget(state.challengeUrl)
+                webView?.let { if (needsLoad(it.url, target)) it.loadUrl(target) }
+            }
             SessionState.LoggedOut, is SessionState.Expired -> Unit
         }
     }
@@ -76,7 +95,8 @@ fun LoginScreen(startUrl: String?, onDone: () -> Unit, onBack: () -> Unit) {
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             when (val current = status) {
-                LoginViewModel.Status.Waiting -> Unit
+                LoginViewModel.Status.Waiting -> if (purpose == LoginPurpose.CSRF) LinearProgressIndicator(Modifier.fillMaxWidth())
+                LoginViewModel.Status.CsrfReady -> Unit
                 LoginViewModel.Status.Checking -> LinearProgressIndicator(Modifier.fillMaxWidth())
                 is LoginViewModel.Status.Failed -> RetryBar(current.message, viewModel::retry)
                 is LoginViewModel.Status.Done -> when (current.state) {
@@ -89,6 +109,10 @@ fun LoginScreen(startUrl: String?, onDone: () -> Unit, onBack: () -> Unit) {
             AndroidView(
                 factory = { context ->
                     WebView(context).apply {
+                        // Compose adds the view with a plain addView(view). Without LayoutParams it gets WRAP_CONTENT, and a
+                        // WebView with a WRAP_CONTENT height lays the page out at zero height: Instagram's height:100%
+                        // containers collapse and only the fixed backdrop paints.
+                        layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         CookieManager.getInstance().setAcceptCookie(true)
@@ -103,19 +127,39 @@ fun LoginScreen(startUrl: String?, onDone: () -> Unit, onBack: () -> Unit) {
     }
 }
 
-/** Where the WebView starts: the requested page when it is https, otherwise Instagram's login page. */
-internal fun loginTarget(startUrl: String?): String = httpsUrlOrNull(startUrl) ?: LOGIN_URL
+/** Where the WebView starts: the requested page when it is an allowed one, otherwise Instagram's login page. */
+internal fun loginTarget(startUrl: String?): String = allowedUrlOrNull(startUrl) ?: LOGIN_URL
 
-/** [url] when it is an https URL (the scheme is case-insensitive), else null: nothing else is ever loaded. */
-internal fun httpsUrlOrNull(url: String?): String? = url?.takeIf { it.startsWith("https://", ignoreCase = true) }
+/** What to load for a Challenge result: its URL when allowed, else Instagram's home, which redirects to the checkpoint. */
+internal fun challengeTarget(challengeUrl: String?): String = allowedUrlOrNull(challengeUrl) ?: INSTAGRAM_HOME
 
-/** Only https pages load (case-insensitive scheme). Anything else is dropped, not handed to another app. */
-internal fun isHttps(scheme: String?): Boolean = scheme.equals("https", ignoreCase = true)
+/** False when the WebView already shows [target]: reloading it would only throw away what the owner has done there. */
+internal fun needsLoad(currentUrl: String?, target: String): Boolean = currentUrl != target
 
-/** Keeps every page inside the WebView and never hands a link to another app (such as the Instagram app on another account). */
+private val ALLOWED_DOMAINS = listOf("instagram.com", "facebook.com", "meta.com")
+
+/**
+ * The login flow may only visit https pages on Instagram's own domains (and Facebook and Meta, which its login and
+ * verification use), where the host is the domain or a subdomain of it (dot boundary, so `evilinstagram.com` is out).
+ */
+internal fun isAllowedPage(scheme: String?, host: String?): Boolean {
+    if (!scheme.equals("https", ignoreCase = true) || host == null) return false
+    val lower = host.lowercase()
+    return ALLOWED_DOMAINS.any { lower == it || lower.endsWith(".$it") }
+}
+
+internal fun isAllowedPage(url: Uri): Boolean = isAllowedPage(url.scheme, url.host)
+
+/** [url] when it is an allowed page, else null: nothing else is ever loaded. */
+internal fun allowedUrlOrNull(url: String?): String? = url?.takeIf { it.isNotBlank() && isAllowedPage(Uri.parse(it)) }
+
+/**
+ * Keeps every page inside the WebView on Instagram's own domains, and never hands a link to another app (such as the
+ * Instagram app on another account). Returning true means "handled here": the navigation simply doesn't happen.
+ */
 internal class InstagramOnlyClient : WebViewClient() {
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
-        !isHttps(request.url.scheme)
+        !isAllowedPage(request.url)
 }
 
 @Composable

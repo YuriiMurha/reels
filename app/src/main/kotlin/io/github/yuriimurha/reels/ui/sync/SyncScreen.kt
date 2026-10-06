@@ -46,10 +46,11 @@ import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.sync.pacing.PacerStatus
 import io.github.yuriimurha.reels.ui.LocalAppContainer
+import io.github.yuriimurha.reels.ui.login.LoginPurpose
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SyncScreen(onBack: () -> Unit, onOpenLogin: (String?) -> Unit) {
+fun SyncScreen(onBack: () -> Unit, onOpenLogin: (url: String?, purpose: LoginPurpose) -> Unit) {
     val container = LocalAppContainer.current
     val context = LocalContext.current
     val viewModel = viewModel {
@@ -102,8 +103,8 @@ fun SyncScreen(onBack: () -> Unit, onOpenLogin: (String?) -> Unit) {
                 SessionSection(
                     state = sessionState,
                     message = sessionMessage,
-                    onLogin = { onOpenLogin(null) },
-                    onResolveChallenge = onOpenLogin,
+                    onLogin = { onOpenLogin(null, LoginPurpose.LOGIN) },
+                    onResolveChallenge = { url -> onOpenLogin(url, LoginPurpose.CHALLENGE) },
                     onLogout = viewModel::logout,
                     onCheck = viewModel::checkSession,
                     onPaste = { viewModel.clearPasteError(); pasting = true },
@@ -132,7 +133,7 @@ fun SyncScreen(onBack: () -> Unit, onOpenLogin: (String?) -> Unit) {
             onSubmit = { input ->
                 viewModel.paste(input) { needsCsrf ->
                     pasting = false
-                    if (needsCsrf) onOpenLogin("https://www.instagram.com/")
+                    if (needsCsrf) onOpenLogin("https://www.instagram.com/", LoginPurpose.CSRF)
                 }
             },
             onDismiss = { pasting = false },

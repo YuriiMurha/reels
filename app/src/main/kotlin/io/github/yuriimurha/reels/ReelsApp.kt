@@ -18,8 +18,8 @@ class ReelsApp : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
-        // Debug builds only: lets chrome://inspect show what the real Instagram site requests (spec 6.3).
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
+        // Debug builds only: lets chrome://inspect show what the real Instagram site requests (spec 6.3). Never in release.
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
         container = AppContainer(this)
         appScope.launch { container.syncController.recoverInterruptedRuns() }
     }

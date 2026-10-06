@@ -12,7 +12,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Spec 9.6: the login WebView loads https pages only and never hands a link to another app. */
+/** Spec 9.6: the login WebView stays on Instagram's own pages and never hands a link to another app. */
 @RunWith(AndroidJUnit4::class)
 class LoginNavigationTest {
     private val loginPage = "https://www.instagram.com/accounts/login/"
@@ -31,7 +31,7 @@ class LoginNavigationTest {
         InstagramOnlyClient().shouldOverrideUrlLoading(WebView(ApplicationProvider.getApplicationContext()), request(url))
 
     @Test
-    fun httpsPagesLoadInsideTheWebView() {
+    fun httpsPagesOnInstagramAndItsLoginPartnersLoadInsideTheWebView() {
         assertFalse(blocked("https://www.instagram.com/accounts/login/"))
         assertFalse(blocked("https://m.facebook.com/login/"))
     }
@@ -52,17 +52,51 @@ class LoginNavigationTest {
     }
 
     @Test
-    fun theSchemeCheckIgnoresCase() {
-        assertTrue(isHttps("HTTPS"))
-        assertFalse(isHttps("http"))
-        assertFalse(isHttps(null))
+    fun onlyInstagramFacebookAndMetaPagesLoad() {
+        for (url in listOf(
+            "https://www.instagram.com/accounts/login/",
+            "https://instagram.com/",
+            "https://l.instagram.com/?u=x",
+            "https://m.facebook.com/",
+            "https://facebook.com/login/",
+            "https://www.meta.com/",
+            "HTTPS://WWW.INSTAGRAM.COM/",
+        )) {
+            assertFalse(blocked(url), "$url is Instagram's own login flow and must load")
+        }
+        for (url in listOf(
+            "https://example.com/",
+            "https://evilinstagram.com/",
+            "https://instagram.com.evil.example/",
+            "https://www.instagram.com@evil.example/",
+            "https://notfacebook.com/",
+            "https://facebook.com.evil.example/",
+            "https://metaa.com/",
+            "http://www.instagram.com/",
+        )) {
+            assertTrue(blocked(url), "$url must not load in the login WebView")
+        }
     }
 
     @Test
-    fun theStartPageIsHttpsOrTheLoginPage() {
+    fun theHostCheckIsCaseInsensitiveAndHasADotBoundary() {
+        assertTrue(isAllowedPage("HTTPS", "WWW.Instagram.COM"))
+        assertTrue(isAllowedPage("https", "instagram.com"))
+        assertFalse(isAllowedPage("https", "evilinstagram.com"))
+        assertFalse(isAllowedPage("https", "instagram.com."))
+        assertFalse(isAllowedPage("http", "www.instagram.com"))
+        assertFalse(isAllowedPage("https", null))
+        assertFalse(isAllowedPage(null, "www.instagram.com"))
+    }
+
+    @Test
+    fun theStartPageIsAnAllowedPageOrTheLoginPage() {
         assertEquals(loginPage, loginTarget(null))
         assertEquals("https://www.instagram.com/", loginTarget("https://www.instagram.com/"))
         assertEquals("HTTPS://www.instagram.com/challenge/x/", loginTarget("HTTPS://www.instagram.com/challenge/x/"))
+        assertEquals("https://m.facebook.com/", loginTarget("https://m.facebook.com/"))
+        assertEquals(loginPage, loginTarget("https://example.com/"))
+        assertEquals(loginPage, loginTarget("https://evilinstagram.com/"))
         assertEquals(loginPage, loginTarget("http://www.instagram.com/"))
         assertEquals(loginPage, loginTarget("javascript:alert(1)"))
         assertEquals(loginPage, loginTarget("intent://instagram.com/#Intent;end"))
@@ -70,9 +104,24 @@ class LoginNavigationTest {
     }
 
     @Test
-    fun aChallengeUrlLoadsOnlyWhenItIsHttps() {
-        assertEquals("https://www.instagram.com/challenge/x/", httpsUrlOrNull("https://www.instagram.com/challenge/x/"))
-        assertNull(httpsUrlOrNull("http://www.instagram.com/challenge/x/"))
-        assertNull(httpsUrlOrNull(null))
+    fun aChallengeUrlLoadsOnlyWhenItIsAnAllowedPage() {
+        assertEquals("https://www.instagram.com/challenge/x/", allowedUrlOrNull("https://www.instagram.com/challenge/x/"))
+        assertNull(allowedUrlOrNull("http://www.instagram.com/challenge/x/"))
+        assertNull(allowedUrlOrNull("https://example.com/challenge/x/"))
+        assertNull(allowedUrlOrNull(null))
+    }
+
+    @Test
+    fun aChallengeWithoutAUsableUrlSendsTheWebViewToInstagramHome() {
+        assertEquals("https://www.instagram.com/", challengeTarget(null))
+        assertEquals("https://www.instagram.com/", challengeTarget("https://example.com/challenge/x/"))
+        assertEquals("https://www.instagram.com/challenge/x/", challengeTarget("https://www.instagram.com/challenge/x/"))
+    }
+
+    @Test
+    fun theWebViewIsNotReloadedOntoThePageItAlreadyShows() {
+        assertFalse(needsLoad("https://www.instagram.com/challenge/x/", "https://www.instagram.com/challenge/x/"))
+        assertTrue(needsLoad("https://www.instagram.com/accounts/login/", "https://www.instagram.com/challenge/x/"))
+        assertTrue(needsLoad(null, "https://www.instagram.com/"))
     }
 }
