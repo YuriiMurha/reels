@@ -134,7 +134,11 @@ class Pacer(
         )
     }
 
-    private suspend fun ensureAllowed() {
+    /**
+     * Throws the refusal an [interactive] or [sync] request would meet right now (cooldown, then the 24 h budget),
+     * without waiting or recording anything. Lets a caller refuse before it changes state for a request.
+     */
+    suspend fun ensureAllowed() {
         val t = now()
         cooldowns.activeUntil()?.let { until -> if (until > t) throw PacerRefusal.CoolingDown(until) }
         val since = t - DAY_MS

@@ -1,5 +1,6 @@
 package io.github.yuriimurha.reels.session
 
+import io.github.yuriimurha.reels.data.settings.REDACTED
 import io.github.yuriimurha.reels.data.settings.StoredSession
 
 sealed interface SessionState {
@@ -13,8 +14,10 @@ sealed interface SessionState {
 
     data class Expired(override val handle: String?) : SessionState
 
-    /** [challengeUrl] is where Instagram wants verification. Kept in app-private settings, never logged. */
-    data class Challenge(val challengeUrl: String?, override val handle: String?) : SessionState
+    /** [challengeUrl] is where Instagram wants verification. Kept in app-private settings; `toString()` never prints it. */
+    data class Challenge(val challengeUrl: String?, override val handle: String?) : SessionState {
+        override fun toString(): String = "Challenge(challengeUrl=${challengeUrl?.let { REDACTED }}, handle=$handle)"
+    }
 }
 
 fun SessionState.toStored(): StoredSession = when (this) {

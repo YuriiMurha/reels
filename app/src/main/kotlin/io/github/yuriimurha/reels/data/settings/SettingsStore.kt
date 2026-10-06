@@ -18,8 +18,17 @@ import kotlinx.coroutines.flow.map
 
 data class CooldownState(val until: Long?, val lastRateLimitAt: Long?)
 
-/** The persisted session state, encoded by the session package. The session itself lives only in CookieManager. */
-data class StoredSession(val kind: String?, val handle: String?, val challengeUrl: String?)
+/** What `toString()` prints in place of anything that must not reach a log or a crash report (two full blocks). */
+internal const val REDACTED = "\u2588\u2588"
+
+/**
+ * The persisted session state, encoded by the session package. The session itself lives only in CookieManager.
+ * [challengeUrl] is where Instagram wants verification: `toString()` never prints it.
+ */
+data class StoredSession(val kind: String?, val handle: String?, val challengeUrl: String?) {
+    override fun toString(): String =
+        "StoredSession(kind=$kind, handle=$handle, challengeUrl=${challengeUrl?.let { REDACTED }})"
+}
 
 /** Small app settings and state that must survive process death (spec 5.4). One instance per process. */
 class SettingsStore(private val store: DataStore<Preferences>) {

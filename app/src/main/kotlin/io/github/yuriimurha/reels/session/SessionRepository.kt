@@ -7,13 +7,19 @@ import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.cookieValue
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.Pacer
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.security.MessageDigest
 
 /** What the login screen needs; split out so its ViewModel can be tested without Android. */
 interface LoginSession {
-    fun currentSessionId(): String?
+    /** A short, non-reversible tag of the current sessionid (never the id itself), or null. Equal tags mean the same session. */
+    fun currentSessionFingerprint(): String?
     fun hasSessionCookies(): Boolean
     suspend fun validate(): SessionState
 }
@@ -27,51 +33,125 @@ class SessionRepository(
     /** The last known state, shown without a request (spec D7). */
     val state: Flow<SessionState> = settings.session.map { it.toState() }
 
-    override fun currentSessionId(): String? = cookies.cookieValue(INSTAGRAM, "sessionid")
+    /**
+     * Serialises everything that changes the cookie jar or the stored state. [validate] does not hold it while its
+     * request is in flight (logout must not wait for the network); it checks [sessionEpoch] afterwards instead.
+     */
+    private val lock = Mutex()
 
-    override fun hasSessionCookies(): Boolean =
-        currentSessionId() != null && cookies.cookieValue(INSTAGRAM, "ds_user_id") != null
+    /** Bumped, under [lock], whenever the jar's session is replaced or forgotten: logout, a paste and a paste's rollback. */
+    private var sessionEpoch = 0
+
+    override fun currentSessionFingerprint(): String? = sessionId()?.let(::fingerprintOf)
+
+    private fun sessionId(): String? = cookies.cookieValue(INSTAGRAM, "sessionid")
+
+    private fun userId(): String? = cookies.cookieValue(INSTAGRAM, "ds_user_id")
+
+    override fun hasSessionCookies(): Boolean = sessionId() != null && userId() != null
 
     fun hasCsrfToken(): Boolean = cookies.cookieValue(INSTAGRAM, "csrftoken") != null
 
-    /** One paced request on the interactive lane. Network, rate-limit and budget failures propagate unchanged. */
+    /**
+     * One paced request on the interactive lane. Network, rate-limit and budget failures propagate unchanged.
+     * Without session cookies there is nothing to check: the state becomes LoggedOut and no request is made.
+     * A result that arrives after a logout or a paste replaced the session is discarded.
+     */
     override suspend fun validate(): SessionState {
-        val handle = state.first().handle
-        val result = try {
-            SessionState.Valid(pacer.interactive { probe.currentUser() }.username)
-        } catch (e: InstagramException.LoginRequired) {
-            SessionState.Expired(handle)
-        } catch (e: InstagramException.ChallengeRequired) {
-            SessionState.Challenge(e.challengeUrl, handle)
+        val (epoch, handle) = lock.withLock {
+            if (!hasSessionCookies()) return store(SessionState.LoggedOut)
+            sessionEpoch to state.first().handle
         }
-        settings.setSession(result.toStored())
-        return result
+        val result = probeSession(handle)
+        return lock.withLock { if (epoch != sessionEpoch) state.first() else store(result) }
     }
 
-    /** Writes a pasted sessionid into the cookie store and validates it. Null (and no request) for anything else. */
+    /**
+     * Writes a pasted sessionid into the cookie store and validates it. Null (and no request) for anything else.
+     * Never strands the current session: a refusal by the Pacer comes before any cookie is written, and if the
+     * check fails in any way (or is cancelled) the previous cookies are put back and the stored state is untouched.
+     */
     suspend fun pasteSessionId(input: String): SessionState? {
         val parsed = SessionIdInput.parse(input) ?: return null
-        cookies.setCookie(INSTAGRAM, "sessionid=${parsed.sessionId}; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=31536000")
-        cookies.setCookie(INSTAGRAM, "ds_user_id=${parsed.userId}; Domain=.instagram.com; Path=/; Secure; Max-Age=7776000")
-        cookies.flush()
-        return validate()
+        return lock.withLock {
+            pacer.ensureAllowed()
+            val previousSession = sessionId()
+            val previousUser = userId()
+            sessionEpoch++
+            writeSessionCookies(sessionCookie(parsed.sessionId), userCookie(parsed.userId))
+            try {
+                store(probeSession(state.first().handle))
+            } catch (e: Throwable) {
+                withContext(NonCancellable) {
+                    writeSessionCookies(sessionCookie(previousSession), userCookie(previousUser))
+                    sessionEpoch++
+                }
+                throw e
+            }
+        }
     }
 
     /** Forgets the session. The library is kept (spec 9.5). */
     suspend fun logout() {
-        cookies.clearAll()
-        settings.setSession(SessionState.LoggedOut.toStored())
+        lock.withLock {
+            sessionEpoch++
+            cookies.clearAll()
+            settings.setSession(SessionState.LoggedOut.toStored())
+        }
     }
 
     override suspend fun loginRequired() {
-        settings.setSession(SessionState.Expired(state.first().handle).toStored())
+        lock.withLock {
+            store(if (hasSessionCookies()) SessionState.Expired(state.first().handle) else SessionState.LoggedOut)
+        }
     }
 
     override suspend fun challengeRequired(challengeUrl: String?) {
-        settings.setSession(SessionState.Challenge(challengeUrl, state.first().handle).toStored())
+        lock.withLock { store(SessionState.Challenge(challengeUrl, state.first().handle)) }
     }
+
+    private suspend fun probeSession(handle: String?): SessionState = try {
+        SessionState.Valid(pacer.interactive { probe.currentUser() }.username)
+    } catch (e: InstagramException.LoginRequired) {
+        SessionState.Expired(handle)
+    } catch (e: InstagramException.ChallengeRequired) {
+        SessionState.Challenge(e.challengeUrl, handle)
+    }
+
+    private suspend fun store(result: SessionState): SessionState {
+        settings.setSession(result.toStored())
+        return result
+    }
+
+    private fun writeSessionCookies(sessionCookie: String, userCookie: String) {
+        cookies.setCookie(INSTAGRAM, sessionCookie)
+        cookies.setCookie(INSTAGRAM, userCookie)
+        cookies.flush()
+    }
+
+    /** A null [value] expires the cookie: how a rollback removes what the paste added. */
+    private fun sessionCookie(value: String?): String =
+        if (value == null) {
+            "sessionid=; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=0"
+        } else {
+            "sessionid=$value; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=31536000"
+        }
+
+    private fun userCookie(value: String?): String =
+        if (value == null) {
+            "ds_user_id=; Domain=.instagram.com; Path=/; Secure; Max-Age=0"
+        } else {
+            "ds_user_id=$value; Domain=.instagram.com; Path=/; Secure; Max-Age=7776000"
+        }
 
     companion object {
         const val INSTAGRAM = "https://www.instagram.com"
+
+        /** First 12 hex characters of the SHA-256 of [sessionId]: enough to tell sessions apart, useless as a credential. */
+        internal fun fingerprintOf(sessionId: String): String =
+            MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
+                .take(FINGERPRINT_BYTES).joinToString("") { "%02x".format(it) }
+
+        private const val FINGERPRINT_BYTES = 6
     }
 }

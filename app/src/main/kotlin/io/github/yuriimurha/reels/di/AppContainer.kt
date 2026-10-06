@@ -14,6 +14,7 @@ import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
 import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
 import io.github.yuriimurha.reels.session.AndroidCookieStore
+import io.github.yuriimurha.reels.session.LazySessionProbe
 import io.github.yuriimurha.reels.session.SessionRepository
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.SyncController
@@ -53,8 +54,17 @@ class AppContainer(context: Context) {
         )
     }
 
+    /**
+     * Building this loads no WebView: the HTTP client (whose user agent comes from the WebView provider) is only built
+     * when the first request needs the probe, and the cookie store reaches CookieManager per call, not at construction.
+     */
     val session: SessionRepository by lazy {
-        SessionRepository(cookieStore, WebSessionProbe(instagramHttp, cookieStore), instagramPacer, settings)
+        SessionRepository(
+            cookies = cookieStore,
+            probe = LazySessionProbe { WebSessionProbe(instagramHttp, cookieStore) },
+            pacer = instagramPacer,
+            settings = settings,
+        )
     }
 
     fun syncEngine(): SyncEngine {
