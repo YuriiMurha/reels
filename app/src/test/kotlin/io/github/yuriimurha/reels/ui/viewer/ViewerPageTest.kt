@@ -61,4 +61,23 @@ class ViewerPageTest {
         show(mediaEntity("m1", MediaType.IMAGE))
         compose.onAllNodesWithText("Mute").assertCountEquals(0)
     }
+
+    @Test
+    fun carouselsShowTheCoverWithACountBadge() {
+        show(mediaEntity("m1", MediaType.CAROUSEL).copy(carouselCount = 5))
+        compose.onNodeWithText("1/5").assertIsDisplayed()
+    }
+
+    @Test
+    fun carouselWithoutACountStillShowsABadge() {
+        show(mediaEntity("m1", MediaType.CAROUSEL))
+        compose.onNodeWithText("1/1").assertIsDisplayed()
+    }
+
+    @Test
+    fun imagesHaveNoCountBadge() {
+        show(mediaEntity("m1", MediaType.IMAGE).copy(carouselCount = 5))
+        compose.onAllNodesWithText("1/5").assertCountEquals(0)
+        compose.onAllNodesWithText("1/1").assertCountEquals(0)
+    }
 }

@@ -83,11 +83,14 @@ fun MediaTile(media: MediaEntity?, onClick: () -> Unit, modifier: Modifier = Mod
     }
 }
 
+/** The "1/N" badge text for a carousel's cover; shared by the grid tile and the viewer. */
+internal fun carouselLabel(media: MediaEntity): String = "1/${media.carouselCount ?: 1}"
+
 @Composable
 private fun TypeBadge(media: MediaEntity, modifier: Modifier = Modifier) {
     val label = when (media.type) {
         MediaType.REEL, MediaType.VIDEO -> "▶"
-        MediaType.CAROUSEL -> "1/${media.carouselCount ?: 1}"
+        MediaType.CAROUSEL -> carouselLabel(media)
         MediaType.IMAGE -> return
     }
     Text(

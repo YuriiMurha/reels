@@ -61,6 +61,7 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Permalinks
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.Thumbnail
+import io.github.yuriimurha.reels.ui.common.carouselLabel
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /** Full-screen vertical pager over the same list the grid showed (spec 9.3). One player is reused across pages. */
@@ -158,6 +159,20 @@ fun ViewerPage(
                 "Not available on Instagram",
                 color = Color.White.copy(alpha = 0.7f),
                 modifier = Modifier.align(Alignment.Center),
+            )
+        }
+        if (media.type == MediaType.CAROUSEL) {
+            // Only the cover is shown (spec 9.3), so say how many slides the real post has.
+            Text(
+                carouselLabel(media),
+                color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(16.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
         Overlay(media, collections, isVideo, muted, onToggleMute, onOpenInstagram, Modifier.align(Alignment.BottomStart))
