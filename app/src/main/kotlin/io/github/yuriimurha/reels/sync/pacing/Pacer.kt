@@ -1,10 +1,12 @@
 package io.github.yuriimurha.reels.sync.pacing
 
 import io.github.yuriimurha.reels.instagram.InstagramException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
@@ -40,25 +42,60 @@ class Pacer(
 
     fun newRun(): RunBudget = RunBudget()
 
-    /** A sync request: waits its gap (and any break), yields to waiting interactive requests. */
+    /**
+     * A sync request. It samples its gap (and a break, if one is due) once, then waits for that moment WITHOUT
+     * holding the gate, so interactive requests are never queued behind a sync gap or break. Whenever it takes
+     * the gate it first yields to waiting interactive requests, and after any other request ran in the meantime
+     * it keeps at least [PacingPolicy.minGapMs] from that request's end.
+     */
     suspend fun <T> sync(run: RunBudget, request: suspend () -> T): T {
+        var planned = false
+        var plannedFrom: Long? = null // lastRequestEndedAt that notBefore was computed from
+        var notBefore = 0L
+        var includesBreak = false
         while (true) {
             ensureAllowed()
-            if (run.used >= policy.perRunBudget) throw PacerRefusal.RunBudgetReached()
+            ensureRunBudget(run)
             gate.lock()
-            if (interactiveWaiting.get() > 0) {
-                gate.unlock()
-                while (interactiveWaiting.get() > 0) delay(YIELD_MS)
-                continue
-            }
+            var holding = true
             try {
-                waitSinceLastRequest(policy.sampleGap(random))
-                takeBreakIfDue()
+                if (interactiveWaiting.get() > 0) {
+                    gate.unlock()
+                    holding = false
+                    while (interactiveWaiting.get() > 0) delay(YIELD_MS)
+                    continue
+                }
+                val last = lastRequestEndedAt
+                if (!planned) {
+                    val gap = policy.sampleGap(random) // drawn even for the first request: keeps the random stream stable
+                    includesBreak = breakIsDue()
+                    notBefore = (last?.plus(gap) ?: now()) + if (includesBreak) sampleBreakMs() else 0L
+                    plannedFrom = last
+                    planned = true
+                } else if (last != null && last != plannedFrom) {
+                    // Another request (an interactive one) ran while this one waited.
+                    notBefore = maxOf(notBefore, last + policy.minGapMs)
+                    plannedFrom = last
+                }
+                if (!includesBreak && breakIsDue()) {
+                    // Another sync request used up the slot while this one waited: the break is now owed here.
+                    includesBreak = true
+                    notBefore = maxOf(notBefore, now() + sampleBreakMs())
+                }
+                val wait = notBefore - now()
+                if (wait > 0) {
+                    gate.unlock()
+                    holding = false
+                    delay(wait)
+                    continue
+                }
                 ensureAllowed()
+                ensureRunBudget(run)
+                consumeBreakSlot()
                 run.used++
                 return execute(request)
             } finally {
-                gate.unlock()
+                if (holding) gate.unlock()
             }
         }
     }
@@ -112,12 +149,20 @@ class Pacer(
         if (remaining > 0) delay(remaining)
     }
 
-    private suspend fun takeBreakIfDue() {
+    private fun ensureRunBudget(run: RunBudget) {
+        if (run.used >= policy.perRunBudget) throw PacerRefusal.RunBudgetReached()
+    }
+
+    /** True when the next sync request is the one a break precedes. */
+    private fun breakIsDue(): Boolean = policy.breakEvery != null && syncRequestsUntilBreak <= 1
+
+    private fun sampleBreakMs(): Long = random.nextLong(policy.breakMs.first, policy.breakMs.last + 1)
+
+    /** Counts a sync request that is about to be sent; a due break has been waited out by now. */
+    private fun consumeBreakSlot() {
         if (policy.breakEvery == null) return
         syncRequestsUntilBreak -= 1
-        if (syncRequestsUntilBreak > 0) return
-        delay(random.nextLong(policy.breakMs.first, policy.breakMs.last + 1))
-        syncRequestsUntilBreak = sampleBreakInterval()
+        if (syncRequestsUntilBreak <= 0) syncRequestsUntilBreak = sampleBreakInterval()
     }
 
     private fun sampleBreakInterval(): Int =
@@ -128,7 +173,14 @@ class Pacer(
         try {
             return request()
         } catch (e: InstagramException.RateLimited) {
-            cooldowns.onRateLimited(now())
+            // The cooldown must survive the caller being cancelled right now, and must never mask the rate limit.
+            withContext(NonCancellable) {
+                try {
+                    cooldowns.onRateLimited(now())
+                } catch (failure: Exception) {
+                    e.addSuppressed(failure)
+                }
+            }
             throw e
         } finally {
             lastRequestEndedAt = now()

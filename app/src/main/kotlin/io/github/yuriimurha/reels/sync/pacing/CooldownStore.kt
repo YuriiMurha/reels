@@ -21,16 +21,18 @@ object Cooldowns {
     }
 }
 
+/** Thread-safe: a sync worker records a rate limit while the Sync screen reads the cooldown. */
 class InMemoryCooldownStore : CooldownStore {
+    private val lock = Any()
     private var until: Long? = null
     private var lastRateLimitAt: Long? = null
 
-    override suspend fun activeUntil(): Long? = until
+    override suspend fun activeUntil(): Long? = synchronized(lock) { until }
 
-    override suspend fun onRateLimited(now: Long): Long {
+    override suspend fun onRateLimited(now: Long): Long = synchronized(lock) {
         val next = Cooldowns.next(lastRateLimitAt, now)
         until = next
         lastRateLimitAt = now
-        return next
+        next
     }
 }

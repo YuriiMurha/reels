@@ -7,14 +7,17 @@ interface RequestLog {
     suspend fun oldestSince(since: Long): Long?
 }
 
+/** Thread-safe: a sync worker records while the Sync screen reads the status. */
 class InMemoryRequestLog(initial: List<Long> = emptyList()) : RequestLog {
+    private val lock = Any()
     private val times = initial.toMutableList()
 
     override suspend fun record(at: Long) {
-        times += at
+        synchronized(lock) { times += at }
     }
 
-    override suspend fun countSince(since: Long): Int = times.count { it > since }
+    override suspend fun countSince(since: Long): Int = synchronized(lock) { times.count { it > since } }
 
-    override suspend fun oldestSince(since: Long): Long? = times.filter { it > since }.minOrNull()
+    override suspend fun oldestSince(since: Long): Long? =
+        synchronized(lock) { times.filter { it > since }.minOrNull() }
 }

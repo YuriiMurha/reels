@@ -42,7 +42,7 @@ class PacingPolicy private constructor(
             minGapMs = 20, medianGapMs = 35, maxGapMs = 60,
             breakEvery = null, breakMs = 0L..0L,
             perRunBudget = 300, dailyBudget = 600,
-            interactiveMinGapMs = 0,
+            interactiveMinGapMs = 2_000,
             cdnConcurrency = 4, cdnJitterMs = 0L..0L,
         )
     }
