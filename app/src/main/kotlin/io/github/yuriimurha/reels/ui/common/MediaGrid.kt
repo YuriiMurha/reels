@@ -54,7 +54,9 @@ fun MediaGrid(
 
 @Composable
 fun MediaTile(media: MediaEntity?, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val ratio = media?.let { (it.width.toFloat() / it.height).coerceIn(0.5f, 1f) } ?: (9f / 16f)
+    // An item stored without dimensions (0x0) would give NaN, and aspectRatio(NaN) throws; fall back to 9:16.
+    val ratio = media?.takeIf { it.width > 0 && it.height > 0 }
+        ?.let { (it.width.toFloat() / it.height).coerceIn(0.5f, 1f) } ?: (9f / 16f)
     Column(modifier.testTag("tile").clickable(enabled = media != null, onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(ratio).clip(RoundedCornerShape(10.dp))) {
             Thumbnail(media?.thumbPath, Modifier.matchParentSize())
