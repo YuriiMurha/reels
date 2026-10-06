@@ -3,7 +3,9 @@ package io.github.yuriimurha.reels.di
 import android.content.Context
 import io.github.yuriimurha.reels.data.db.ReelsDatabase
 import io.github.yuriimurha.reels.data.library.LibraryRepository
+import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
+import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.sync.SyncController
 import io.github.yuriimurha.reels.sync.SyncEngine
@@ -18,6 +20,9 @@ class AppContainer(context: Context) {
     val backend: Backend by lazy { Backend.Fake() }
     val library: LibraryRepository by lazy { LibraryRepository(db) }
     val syncController: SyncController by lazy { SyncController(db, WorkManagerSyncScheduler(context)) }
+
+    /** M5 replaces this with the real resolver (link refresh on the interactive lane, pk-keyed cache). */
+    val videoResolver: VideoSourceResolver by lazy { FakeVideoSourceResolver(context.packageName) }
 
     fun syncEngine(): SyncEngine = SyncEngine(backend.client, backend.pacer, db, backend.fetcher, thumbnails)
 }

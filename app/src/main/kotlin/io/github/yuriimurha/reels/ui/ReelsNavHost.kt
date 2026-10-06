@@ -11,6 +11,7 @@ import androidx.navigation.toRoute
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.grid.GridScreen
 import io.github.yuriimurha.reels.ui.home.HomeScreen
+import io.github.yuriimurha.reels.ui.viewer.ViewerScreen
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -31,12 +32,20 @@ data object SyncRoute
 /** The viewer writes its current index here on the previous entry, so the grid scrolls back to it. */
 const val VIEWER_INDEX_KEY = "viewerIndex"
 
+/** Pops only when there is somewhere to go back to, so a stray Back can't empty the NavHost (blank screen). */
+fun NavHostController.popBackSafely() {
+    if (previousBackStackEntry != null) popBackStack()
+}
+
+/** [startDestination] is only overridden by tests. */
 @Composable
-fun ReelsNavHost(navController: NavHostController = rememberNavController()) {
-    NavHost(navController = navController, startDestination = HomeRoute) {
+fun ReelsNavHost(navController: NavHostController = rememberNavController(), startDestination: Any = HomeRoute) {
+    NavHost(navController = navController, startDestination = startDestination) {
         composable<HomeRoute> {
             HomeScreen(
-                onOpenSource = { source, title -> navController.navigate(GridRoute(source.encode(), title)) },
+                onOpenSource = { source, title ->
+                    navController.navigate(GridRoute(source.encode(), title)) { launchSingleTop = true }
+                },
                 onOpenSearch = {},
                 onOpenSync = {},
             )
@@ -49,8 +58,22 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController()) {
                 source = MediaSource.decode(route.source),
                 title = route.title,
                 returnedIndex = returnedIndex,
-                onBack = { navController.popBackStack() },
-                onOpenViewer = {},
+                onBack = { navController.popBackSafely() },
+                onOpenViewer = { index ->
+                    navController.navigate(ViewerRoute(route.source, index)) { launchSingleTop = true }
+                },
+                onReturnedIndexConsumed = { entry.savedStateHandle.remove<Int>(VIEWER_INDEX_KEY) },
+            )
+        }
+        composable<ViewerRoute> { entry ->
+            val route = entry.toRoute<ViewerRoute>()
+            ViewerScreen(
+                source = MediaSource.decode(route.source),
+                startIndex = route.index,
+                onIndexSettled = { index ->
+                    navController.previousBackStackEntry?.savedStateHandle?.set(VIEWER_INDEX_KEY, index)
+                },
+                onBack = { navController.popBackSafely() },
             )
         }
     }

@@ -28,13 +28,18 @@ fun GridScreen(
     returnedIndex: Int?,
     onBack: () -> Unit,
     onOpenViewer: (Int) -> Unit,
+    onReturnedIndexConsumed: () -> Unit,
 ) {
     val container = LocalAppContainer.current
     val viewModel = viewModel(key = "grid:${source.encode()}") { GridViewModel(source, container.library) }
     val items = viewModel.items.collectAsLazyPagingItems()
     val gridState = rememberLazyStaggeredGridState()
     LaunchedEffect(returnedIndex) {
-        if (returnedIndex != null) gridState.scrollToItem(returnedIndex)
+        if (returnedIndex != null) {
+            gridState.scrollToItem(returnedIndex)
+            // Consume it once, so a recreation of this entry doesn't jump back to a stale index.
+            onReturnedIndexConsumed()
+        }
     }
     Scaffold(
         topBar = {

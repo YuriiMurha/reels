@@ -25,6 +25,7 @@ this file describes only what exists.
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | Buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; foreground `dataSync` worker; orphaned RUNNING rows become PAUSED at app start. |
 | Wiring | `app/.../di/`, `ReelsApp.kt` | `AppContainer` (hand-wired, lazy), `Backend.Fake` (fake client + placeholder fetcher + its own fast Pacer with in-memory budgets), custom `WorkerFactory`. A test keeps `PacingPolicy.Fast` confined to `Backend.kt`. |
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home: collection cards (All Saved, Uncategorized, collections) and a sync status chip. Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
+| Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks`. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip). |
 
 ## Decided so far
 
