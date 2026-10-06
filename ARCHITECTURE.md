@@ -26,6 +26,7 @@ this file describes only what exists.
 | Wiring | `app/.../di/`, `ReelsApp.kt` | `AppContainer` (hand-wired, lazy), `Backend.Fake` (fake client + placeholder fetcher + its own fast Pacer with in-memory budgets), custom `WorkerFactory`. A test keeps `PacingPolicy.Fast` confined to `Backend.kt`. |
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home: collection cards (All Saved, Uncategorized, collections) and a sync status chip. Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks`. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip). |
+| Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
 
 ## Decided so far
 

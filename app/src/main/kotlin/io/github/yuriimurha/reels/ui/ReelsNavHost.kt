@@ -11,6 +11,7 @@ import androidx.navigation.toRoute
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.grid.GridScreen
 import io.github.yuriimurha.reels.ui.home.HomeScreen
+import io.github.yuriimurha.reels.ui.search.SearchScreen
 import io.github.yuriimurha.reels.ui.viewer.ViewerScreen
 import kotlinx.serialization.Serializable
 
@@ -46,7 +47,7 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
                 onOpenSource = { source, title ->
                     navController.navigate(GridRoute(source.encode(), title)) { launchSingleTop = true }
                 },
-                onOpenSearch = {},
+                onOpenSearch = { navController.navigate(SearchRoute) { launchSingleTop = true } },
                 onOpenSync = {},
             )
         }
@@ -74,6 +75,12 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
                     navController.previousBackStackEntry?.savedStateHandle?.set(VIEWER_INDEX_KEY, index)
                 },
                 onBack = { navController.popBackSafely() },
+            )
+        }
+        composable<SearchRoute> {
+            SearchScreen(
+                onBack = { navController.popBackSafely() },
+                onOpenViewer = { source, index -> navController.navigate(ViewerRoute(source.encode(), index)) { launchSingleTop = true } },
             )
         }
     }
