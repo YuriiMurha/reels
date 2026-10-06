@@ -4,8 +4,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.rememberNavController
@@ -131,5 +133,35 @@ class ReelsNavHostTest {
         compose.waitForIdle()
         assertEquals(gridEntry, navController.currentBackStackEntry)
         assertNull(gridEntry.savedStateHandle.get<Int>(VIEWER_INDEX_KEY), "the grid left the index behind")
+    }
+
+    @Test
+    fun searchViewerWritesItsIndexBackAndTheSearchConsumesItOnReturn() {
+        seed(30)
+        compose.setContent {
+            navController = rememberNavController()
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) {
+                    ReelsNavHost(navController, startDestination = SearchRoute)
+                }
+            }
+        }
+        compose.waitForIdle()
+        val searchEntry = navController.currentBackStackEntry!!
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithTag("searchField").performTextInput("m")
+        compose.mainClock.advanceTimeBy(200)
+        compose.mainClock.autoAdvance = true
+        compose.waitForIdle()
+        awaitTiles(atLeast = 1)
+        compose.onAllNodesWithTag("tile")[0].performClick()
+        compose.waitForIdle()
+        assertEquals(1, viewersOnTheStack())
+        val viewerIndex = navController.currentBackStackEntry!!.toRoute<ViewerRoute>().index
+        assertEquals(viewerIndex, searchEntry.savedStateHandle.get<Int>(VIEWER_INDEX_KEY), "the viewer never reported its index")
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.waitForIdle()
+        assertEquals(searchEntry, navController.currentBackStackEntry)
+        assertNull(searchEntry.savedStateHandle.get<Int>(VIEWER_INDEX_KEY), "the search left the index behind")
     }
 }

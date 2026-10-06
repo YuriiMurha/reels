@@ -77,10 +77,14 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
                 onBack = { navController.popBackSafely() },
             )
         }
-        composable<SearchRoute> {
+        composable<SearchRoute> { entry ->
+            val returnedIndex by entry.savedStateHandle.getStateFlow<Int?>(VIEWER_INDEX_KEY, null)
+                .collectAsStateWithLifecycle()
             SearchScreen(
                 onBack = { navController.popBackSafely() },
                 onOpenViewer = { source, index -> navController.navigate(ViewerRoute(source.encode(), index)) { launchSingleTop = true } },
+                returnedIndex = returnedIndex,
+                onReturnedIndexConsumed = { entry.savedStateHandle.remove<Int>(VIEWER_INDEX_KEY) },
             )
         }
     }

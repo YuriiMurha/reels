@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -30,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -43,7 +45,12 @@ import io.github.yuriimurha.reels.ui.common.MediaGrid
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchScreen(onBack: () -> Unit, onOpenViewer: (MediaSource, Int) -> Unit) {
+fun SearchScreen(
+    onBack: () -> Unit,
+    onOpenViewer: (MediaSource, Int) -> Unit,
+    returnedIndex: Int? = null,
+    onReturnedIndexConsumed: () -> Unit = {},
+) {
     val container = LocalAppContainer.current
     val viewModel = viewModel { SearchViewModel(container.library) }
     val query by viewModel.query.collectAsStateWithLifecycle()
@@ -53,7 +60,16 @@ fun SearchScreen(onBack: () -> Unit, onOpenViewer: (MediaSource, Int) -> Unit) {
     val source by viewModel.source.collectAsStateWithLifecycle()
     val results = viewModel.results.collectAsLazyPagingItems()
     val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
+    val gridState = rememberLazyStaggeredGridState()
+    LaunchedEffect(returnedIndex) {
+        if (returnedIndex != null) {
+            gridState.scrollToItem(returnedIndex)
+            onReturnedIndexConsumed()
+        }
+    }
+    LaunchedEffect(query) {
+        if (query.isEmpty()) focus.requestFocus()
+    }
 
     Scaffold(
         topBar = {
@@ -71,7 +87,7 @@ fun SearchScreen(onBack: () -> Unit, onOpenViewer: (MediaSource, Int) -> Unit) {
                             focusedContainerColor = Color.Transparent,
                             unfocusedContainerColor = Color.Transparent,
                         ),
-                        modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                        modifier = Modifier.fillMaxWidth().focusRequester(focus).testTag("searchField"),
                     )
                 },
             )
@@ -107,6 +123,8 @@ fun SearchScreen(onBack: () -> Unit, onOpenViewer: (MediaSource, Int) -> Unit) {
                     items = results,
                     onOpen = { index -> onOpenViewer(current, index) },
                     modifier = Modifier.padding(horizontal = 8.dp),
+                    state = gridState,
+                    contentPadding = padding,
                 )
             }
         }
