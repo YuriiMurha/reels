@@ -2,6 +2,7 @@
 # Plants session material in a throwaway repo and checks that .githooks/pre-commit blocks it.
 # Secret-looking strings are assembled at runtime so this file never contains one itself.
 set -euo pipefail
+export LC_ALL=C
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d)"
@@ -53,5 +54,28 @@ check blocked "JSON csrftoken export" "export/state.json" "{\"name\":\"$csrf_nam
 check blocked "Netscape cookie line" "export/jar.txt" "$(printf '.instagram.com\tTRUE\t/\tTRUE\t1999999999\t%s\t%s' "$sid_name" "abc")"
 check blocked "csrftoken value" "notes2.txt" "$csrf_name=$(printf 'Ab%.0s' $(seq 1 10))"
 check blocked "added line starting with ++" "pp.txt" "++token $planted_sid"
+check blocked "++ b/x line with sessionid" "pp2.txt" "++ b/file.txt $planted_sid"
+check blocked "++ /dev/null line with sessionid" "pp3.txt" "++ /dev/null $planted_sid"
+flat_json="{\"$sid_name\": \"1234567890%3A$(printf 'Ab%.0s' $(seq 1 12))\"}"
+check blocked "flat JSON sessionid in non-session file" "config.txt" "$flat_json"
+colon_sid="$sid_name: 1234567890%3A$(printf 'Ab%.0s' $(seq 1 12))"
+check blocked "colon-format sessionid" "notes3.txt" "$colon_sid"
+py_repr="{'"'"'$sid_name'"'"': '"'"'1234567890%3A$(printf 'Ab%.0s' $(seq 1 12))'"'"'}"
+check blocked "Python repr with sessionid" "config.py" "$py_repr"
+py_dict="{'"'"'name'"'"': '"'"'$sid_name'"'"', '"'"'value'"'"': '"'"'x'"'"'}"
+check blocked "Python dict with name and sessionid" "env.py" "$py_dict"
+csrf_token_long="$(printf 'Ab%.0s' $(seq 1 16))"
+check blocked "X-CSRFToken header" "headers.txt" "X-CSRFToken: $csrf_token_long"
+check blocked "JSON csrftoken with 32 chars" "state.json" "{\"$csrf_name\": \"$csrf_token_long$csrf_token_long\"}"
+# Binary files: UTF-16 BOM + sessionid
+utf16_file="$(printf '\xff\xfe' && printf '%s\n' "$planted_sid")"
+check blocked "UTF-16 file with sessionid" "binary.txt" "$utf16_file"
+# Binary file: sessionid + NUL bytes
+nul_file="$(printf '%s\n' "$planted_sid" && head -c 9000 /dev/zero && printf '%s' "end")"
+check blocked "sessionid followed by NUL bytes" "padded.bin" "$nul_file"
 check allowed "prose that mentions csrftoken" "docs/csrf.md" "The csrftoken cookie is read from the jar"
+check allowed "csrftoken with 15-char value (boundary)" "notes4.txt" "$csrf_name=$(printf 'Ab%.0s' $(seq 1 7))A"
+check allowed "prose sessionid colon" "docs/auth.md" "sessionid: authentication cookie"
+check allowed "X-CSRFToken in code" "Api.kt" ".header(\"X-CSRFToken\", it)"
+check allowed "csrftoken function call" "Cookies.kt" "cookies.cookieValue(url, \"csrftoken\")"
 echo "secret guard: all checks passed"
