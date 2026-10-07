@@ -16,7 +16,7 @@ while IFS= read -r -d '' file; do
 done < <(git diff --cached --name-only -z --diff-filter=ACMR)
 
 diff_out="$(git diff --cached --text -U0 --diff-filter=ACMR)"
-added="$(grep -aE '^\+' <<<"$diff_out" | grep -avE '^\+\+\+ [ab]/[^ ]*$' || true)"
+added="$(grep -aE '^\+' <<<"$diff_out" || true)"
 if grep -qaEi 'session_?id["'\'']*[[:space:]]*[:=][[:space:]]*["'\'']*[0-9]+(%3A|:)[A-Za-z0-9]{10,}' <<<"$added"; then
   echo "pre-commit: staged changes contain a sessionid value"
   fail=1
@@ -26,7 +26,7 @@ if grep -qaEi '(set-)?cookie: *[a-z0-9_-]+=' <<<"$added"; then
   fail=1
 fi
 
-if grep -qaEi '["'"'"']*name["'"'"']*[[:space:]]*:[[:space:]]*["'"'"']*(sessionid|csrftoken|ds_user_id)["'"'"']*' <<<"$added"; then
+if grep -qaEi '["'"'"']name["'"'"'][[:space:]]*:[[:space:]]*["'"'"'](sessionid|csrftoken|ds_user_id)["'"'"']' <<<"$added"; then
   echo "pre-commit: staged changes contain an exported cookie (JSON)"
   fail=1
 fi

@@ -2,7 +2,6 @@ package io.github.yuriimurha.reels.instagram
 
 import java.io.File
 import kotlin.io.path.createTempDirectory
-import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -33,29 +32,35 @@ class FixtureGuardTest {
     @Test
     fun nestedPlantedValueIsDetected() {
         val tempDir = createTempDirectory().toFile()
-        tempDir.deleteOnExit()
-        val nested = tempDir.resolve("subdir")
-        nested.mkdirs()
+        try {
+            val nested = tempDir.resolve("subdir")
+            nested.mkdirs()
 
-        val planted = "{\"" + "session" + "id" + "\": \"s1\"}"
-        nested.resolve("planted.json").writeText(planted)
+            val planted = "{\"" + "session" + "id" + "\": \"s1\"}"
+            nested.resolve("planted.json").writeText(planted)
 
-        val found = offenders(tempDir)
-        assertEquals(1, found.size, "should find exactly one offender")
-        assertTrue(found[0].contains("planted.json"), "should name the file")
-        assertTrue(found[0].contains("sessionid"), "should name the forbidden word")
+            val found = offenders(tempDir)
+            assertEquals(1, found.size, "should find exactly one offender")
+            assertTrue(found[0].contains("planted.json"), "should name the file")
+            assertTrue(found[0].contains("sessionid"), "should name the forbidden word")
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 
     @Test
     fun cleanFileIsNotDetected() {
         val tempDir = createTempDirectory().toFile()
-        tempDir.deleteOnExit()
-        val nested = tempDir.resolve("subdir")
-        nested.mkdirs()
+        try {
+            val nested = tempDir.resolve("subdir")
+            nested.mkdirs()
 
-        nested.resolve("clean.json").writeText("{\"name\": \"value\"}")
+            nested.resolve("clean.json").writeText("{\"name\": \"value\"}")
 
-        val found = offenders(tempDir)
-        assertEquals(0, found.size, "should not flag clean files")
+            val found = offenders(tempDir)
+            assertEquals(0, found.size, "should not flag clean files")
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 }
