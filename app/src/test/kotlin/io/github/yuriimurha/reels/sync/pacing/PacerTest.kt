@@ -2,6 +2,7 @@ package io.github.yuriimurha.reels.sync.pacing
 
 import io.github.yuriimurha.reels.instagram.InstagramException
 import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -23,6 +24,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class PacerTest {
     private fun TestScope.pacer(
         log: RequestLog = InMemoryRequestLog(),
@@ -165,6 +167,24 @@ class PacerTest {
         assertEquals(loggedBefore + 1, log.countSince(-1))
     }
 
+    /** A throwing precondition sent nothing, so it must not move "the end of the last request": the next gap counts from the real one. */
+    @Test
+    fun aThrowingPreconditionLeavesTheEndOfTheLastRequestAlone() = runTest {
+        val pacer = pacer()
+        pacer.sync(pacer.newRun()) {}
+        val lastRealEnd = testScheduler.currentTime
+
+        assertFailsWith<IllegalStateException> { pacer.interactive(precondition = { throw IllegalStateException("not ready") }) {} }
+        assertEquals(lastRealEnd + PacingPolicy.Conservative.interactiveMinGapMs, testScheduler.currentTime, "it waited its gap, then refused")
+        var startedAt = -1L
+        pacer.interactive { startedAt = testScheduler.currentTime }
+
+        assertEquals(
+            lastRealEnd + PacingPolicy.Conservative.interactiveMinGapMs, startedAt,
+            "the next request's gap is measured from the last real request, not from the refused attempt",
+        )
+    }
+
     @Test
     fun aRefusalComesBeforeThePrecondition() = runTest {
         val cooldowns = InMemoryCooldownStore()
@@ -175,6 +195,22 @@ class PacerTest {
         assertFailsWith<PacerRefusal.CoolingDown> { pacer.interactive(precondition = { checked = true }) {} }
 
         assertTrue(!checked, "a cooling-down Pacer refuses before it asks anything else")
+    }
+
+    /** The same for the LAST check: a cooldown that starts while the request waits for the gate is met before the precondition runs. */
+    @Test
+    fun aCooldownThatStartsWhileQueuedComesBeforeThePrecondition() = runTest {
+        val pacer = pacer()
+        var checked = false
+        launch { runCatching { pacer.interactive { delay(1_000); throw InstagramException.RateLimited() } } } // holds the gate, then arms the cooldown
+        runCurrent()
+        val queued = async { runCatching { pacer.interactive(precondition = { checked = true }) {} } } // passed its first check, waits for the gate
+        runCurrent()
+
+        advanceUntilIdle()
+
+        assertTrue(queued.await().exceptionOrNull() is PacerRefusal.CoolingDown, "refused by the check after the wait")
+        assertTrue(!checked, "and the precondition never ran")
     }
 
     @Test

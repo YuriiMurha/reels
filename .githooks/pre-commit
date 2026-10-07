@@ -13,6 +13,14 @@ while IFS= read -r -d '' file; do
       fail=1
       ;;
   esac
+  # Release signing material. .gitignore already keeps these out; this also refuses a force-added one (git add -f).
+  # Compared in lower case: macOS file systems don't tell Reels.JKS from reels.jks.
+  case "$(printf '%s' "$file" | tr '[:upper:]' '[:lower:]')" in
+    keystore.properties|*/keystore.properties|*.jks|*.keystore)
+      echo "pre-commit: refusing to commit $file (release signing material)"
+      fail=1
+      ;;
+  esac
 done < <(git diff --cached --name-only -z --diff-filter=ACMR)
 
 diff_out="$(git diff --cached --text -U0 --diff-filter=ACMR)"

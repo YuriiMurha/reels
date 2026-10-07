@@ -13,6 +13,7 @@ plugins {
 val keystoreProperties = rootProject.file("keystore.properties").takeIf { it.isFile }?.let { file ->
     Properties().apply { file.inputStream().use(::load) }
 }
+if (keystoreProperties == null) logger.lifecycle("release: no keystore.properties at the repo root; signing with the debug key")
 
 android {
     namespace = "io.github.yuriimurha.reels"
@@ -29,8 +30,9 @@ android {
 
     signingConfigs {
         if (keystoreProperties != null) {
-            // A key missing from the file fails here by name, not as a bare null further down.
-            fun required(key: String) = checkNotNull(keystoreProperties.getProperty(key)) { "keystore.properties has no '$key'" }
+            // A key that is missing or blank fails here by name (never by value), not as a bare null or an empty password further down.
+            fun required(key: String) =
+                checkNotNull(keystoreProperties.getProperty(key)?.takeIf { it.isNotBlank() }) { "keystore.properties has no (or an empty) '$key'" }
             create("release") {
                 storeFile = rootProject.file(required("storeFile"))
                 storePassword = required("storePassword")

@@ -268,19 +268,20 @@ build and keeps the app's data.
 ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installRelease
 ```
 
-To sign with your own key instead, do this once. The key and its passwords are yours to create: nothing in the repo
+To sign with your own key instead, do this once. The key and its password are yours to create: nothing in the repo
 generates or stores them, and both files below are gitignored.
 
-1. From the repo root (the folder with `gradlew`), create the key. `keytool` asks you to choose a keystore password and a
-   key password, and for some details about you (any answers will do). It writes `reels-release.jks` here. It uses the
-   `JAVA_HOME` from step 1.4:
+1. From the repo root (the folder with `gradlew`), create the key. `keytool` asks for **one** password (choose it; a
+   PKCS12 key store has no separate key password), then for some details about you (any answers will do), and finally
+   "Is ... correct?", to which you type `yes`. It writes `reels-release.jks` here:
 
    ```bash
-   "$JAVA_HOME/bin/keytool" -genkeypair -v -keystore reels-release.jks -keyalg RSA -keysize 4096 -validity 10000 -alias reels
+   "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/keytool" -genkeypair -v -keystore reels-release.jks -keyalg RSA -keysize 4096 -validity 10000 -alias reels
    ```
 
-2. Create `keystore.properties` in the same folder with these four keys, and fill in the two passwords you just chose
-   in that file. `storeFile` is relative to the repo root:
+2. Create `keystore.properties` in the same folder with these four keys, and fill in `storePassword` and `keyPassword`
+   in that file. Both get the **same** password, the one you just chose. A blank value is refused. `storeFile` is
+   relative to the repo root:
 
    ```properties
    storeFile=reels-release.jks
@@ -289,7 +290,7 @@ generates or stores them, and both files below are gitignored.
    keyPassword=
    ```
 
-3. Keep a copy of `reels-release.jks` and both passwords outside the repo. If they are lost, the app installed with that
+3. Keep a copy of `reels-release.jks` and its password outside the repo. If they are lost, the app installed with that
    key can't be updated: it has to be uninstalled first.
 4. A build signed with your key and a build signed with the debug key can't replace each other. **Switching between them
    needs an uninstall, which deletes the library and the session** (you log in and sync again):
@@ -304,8 +305,9 @@ generates or stores them, and both files below are gitignored.
    ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installRelease
    ```
 
-If `keystore.properties` lacks one of the four keys, Gradle stops and names it. A crash report from a release build
-shows short, meaningless names; `app/build/outputs/mapping/release/mapping.txt` (written by the build) maps them back.
+If `keystore.properties` lacks one of the four keys, or has it blank, Gradle stops and names the key (never its value).
+A crash report from a release build shows short, meaningless names; `app/build/outputs/mapping/release/mapping.txt`
+(written by the build) maps them back.
 
 ## Troubleshooting
 

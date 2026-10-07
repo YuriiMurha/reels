@@ -14,6 +14,8 @@ import io.github.yuriimurha.reels.data.media.videoLinkNeedsRefresh
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -36,11 +38,22 @@ class ViewerViewModel(
 
     /**
      * The settled item's source. If the next-item prefetch still has a request out for this very item, that request is
-     * waited for instead of sending a second one (R77).
+     * waited for instead of sending a second one (R77). If that prefetch is cancelled meanwhile (a newer prefetch replaces
+     * it, or a refresh makes way for the visible item), the settle is not: it asks the resolver itself, which costs one more
+     * request. The settle's own cancellation still propagates.
      */
-    suspend fun resolveVideo(media: MediaEntity): VideoSource? =
+    suspend fun resolveVideo(media: MediaEntity): VideoSource? {
         // Only while it is still out: a finished prefetch's answer ages, the resolver (which reads the renewed row) does not.
-        prefetch?.takeIf { it.pk == media.pk && it.answer.isActive }?.answer?.await() ?: resolver.resolve(media)
+        val pending = prefetch?.takeIf { it.pk == media.pk && it.answer.isActive }?.answer
+        val answer = try {
+            pending?.await()
+        } catch (e: CancellationException) {
+            // `await` throws this both when the prefetch was cancelled and when this caller was; only the second ends the settle.
+            currentCoroutineContext().ensureActive()
+            null
+        }
+        return answer ?: resolver.resolve(media)
+    }
 
     suspend fun collectionNames(pk: String): List<String> = library.collectionsOf(pk).map { it.name }
 

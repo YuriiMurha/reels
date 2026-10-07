@@ -59,6 +59,30 @@ check_bytes() {
 }
 
 check allowed "ordinary file" "README.md" "hello"
+# Release signing material, force-added past a .gitignore like the real one (git add -f), and prose that merely names it.
+printf '%s\n' 'keystore.properties' '*.jks' '*.keystore' > "$tmp/.gitignore"
+check_forced() {
+  local want="$1" what="$2" path="$3" content="$4" got
+  mkdir -p "$tmp/$(dirname "$path")"
+  printf '%s\n' "$content" > "$tmp/$path"
+  git -C "$tmp" add -f "$path"
+  if git -C "$tmp" commit -q -m "$what" >/dev/null 2>&1; then got=allowed; else got=blocked; fi
+  if [ "$got" = blocked ]; then
+    git -C "$tmp" reset -q
+    rm -f "$tmp/$path"
+  fi
+  if [ "$got" != "$want" ]; then
+    echo "FAIL: $what was $got, expected $want"
+    exit 1
+  fi
+  echo "ok: $what ($got)"
+}
+check_forced blocked "force-added keystore.properties" "keystore.properties" "storeFile=reels-release.jks"
+check_forced blocked "force-added keystore.properties in a subfolder" "app/keystore.properties" "storeFile=reels-release.jks"
+check_forced blocked "force-added .jks file" "reels-release.jks" "x"
+check_forced blocked "force-added .keystore file" "signing/upload.keystore" "x"
+check_forced blocked "force-added upper-case .JKS file" "Reels.JKS" "x"
+check allowed "prose that mentions keystore.properties and .jks" "README.md" "Create keystore.properties next to gradlew; reels-release.jks stays on your Mac"
 check allowed "prose that mentions sessionid" "docs/howto.md" "Paste your sessionid; never share the Cookie: header"
 check blocked "HAR capture" "captures/run.har" "{}"
 check blocked "session json" "app/session.json" "{}"

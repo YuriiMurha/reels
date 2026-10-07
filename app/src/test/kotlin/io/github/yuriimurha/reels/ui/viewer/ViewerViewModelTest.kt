@@ -199,6 +199,52 @@ class ViewerViewModelTest {
         assertEquals(listOf("m2"), resolver.calls, "one request in all")
     }
 
+    /**
+     * The prefetch a settle is waiting for can be cancelled (a newer prefetch replaces it, or a refresh makes way). That is the
+     * prefetch's cancellation, not the settle's: the settle must still get its source, from one more request.
+     */
+    @Test
+    fun aPrefetchCancelledWhileASettleWaitsForItDoesNotFailTheSettle() = runTest {
+        val viewModel = viewModel()
+        val gate = resolver.hold("m2")
+        val next = reel("m2", expiresAt = expired)
+        viewModel.prefetch(next)
+        runCurrent()
+        viewModel.onSettled(next)
+        val answer = async { viewModel.resolveVideo(next) }
+        runCurrent()
+        assertEquals(listOf("m2"), resolver.calls, "the settle is waiting for the prefetch")
+
+        viewModel.prefetch(reel("m3", expiresAt = expired)) // a newer prefetch replaces (cancels) the one the settle waits for
+        runCurrent()
+        assertEquals(listOf("m2"), resolver.cancelled, "the prefetch the settle was waiting for is gone")
+        gate.complete(Unit)
+        runCurrent()
+
+        assertEquals(VideoSource.Play(Uri.parse("https://video.example.test/m2.mp4"), "m2"), answer.await(), "the settle asked the resolver itself")
+        assertEquals(listOf("m2", "m3", "m2"), resolver.calls, "one more request, as the cost of the cancelled prefetch")
+    }
+
+    /** The settle's OWN cancellation is still a cancellation: it must not turn into a fallback request. */
+    @Test
+    fun aCancelledSettleDoesNotFallBackToARequest() = runTest {
+        val viewModel = viewModel()
+        resolver.hold("m2")
+        val next = reel("m2", expiresAt = expired)
+        viewModel.prefetch(next)
+        runCurrent()
+        viewModel.onSettled(next)
+        val answer = async { viewModel.resolveVideo(next) }
+        runCurrent()
+
+        answer.cancel()
+        runCurrent()
+
+        assertTrue(answer.isCancelled)
+        assertEquals(listOf("m2"), resolver.calls, "no second request for a settle nobody waits for")
+        resolver.releaseAll()
+    }
+
     @Test
     fun afterThePrefetchIsDoneASettleAsksTheResolverAgain() = runTest {
         val viewModel = viewModel()
@@ -385,7 +431,10 @@ class ViewerViewModelTest {
         assertEquals(listOf("m2", "m1"), resolver.calls)
     }
 
-    /** The prefetch of the very item that failed is not "another item": nothing to make way for, and its request is the one to reuse. */
+    /**
+     * A prefetch for the very item that failed is not "another item", so it is left alone (cancelling it would only throw away a
+     * renewal of the same link). The forced refresh is still its own request: recover never reuses a prefetch's.
+     */
     @Test
     fun aRefusedLinkLeavesAPrefetchForTheSameItemAlone() = runTest {
         val viewModel = viewModel()
