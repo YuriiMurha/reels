@@ -33,13 +33,36 @@ internal suspend fun Call.await(): Response = suspendCancellableCoroutine { cont
     )
 }
 
-/** GETs [url] and returns its JSON object, or throws the InstagramException the response signals. */
-internal suspend fun OkHttpClient.getJsonObject(url: HttpUrl): JsonObject {
-    val response = try {
+/** Sends one GET. A connection-level IOException becomes [InstagramException.Transient]; an HTTP error status is a response. */
+private suspend fun OkHttpClient.send(url: HttpUrl): Response =
+    try {
         newCall(Request.Builder().url(url).get().build()).await()
     } catch (e: IOException) {
         throw InstagramException.Transient(e)
     }
+
+/** One HTTP response with the headers a classifier needs. [toString] omits the body: it is never logged. */
+internal class RawResponse(val code: Int, val location: String?, val contentType: String?, val body: String) {
+    override fun toString(): String = "RawResponse(code=$code, body=<${body.length} chars>)"
+}
+
+/**
+ * GETs [url] and returns the response as it is, whatever the status: classifying it is the caller's job (the Adapter
+ * lab). Only an IOException, from connecting or from reading the body, throws, as [InstagramException.Transient].
+ */
+internal suspend fun OkHttpClient.getRaw(url: HttpUrl): RawResponse =
+    send(url).use {
+        val body = try {
+            it.body.string()
+        } catch (e: IOException) {
+            throw InstagramException.Transient(e)
+        }
+        RawResponse(it.code, it.header("Location"), it.header("Content-Type"), body)
+    }
+
+/** GETs [url] and returns its JSON object, or throws the InstagramException the response signals. */
+internal suspend fun OkHttpClient.getJsonObject(url: HttpUrl): JsonObject {
+    val response = send(url)
     response.use {
         val body = try {
             it.body.string()
