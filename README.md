@@ -205,7 +205,10 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
   run.
 - **Runs pause and resume.** Cancel, a lost connection, the 300-request budget, an Android kill and a few other stops
   leave the run with its place saved. The button turns into **Resume** and carries on from there (a resumed run gets a
-  fresh 300, but the 600 per 24 hours still holds). **Discard paused run** abandons it and the next tap starts a
+  fresh 300, but the 600 per 24 hours still holds). After an Android kill, Android may also restart the run by itself,
+  later and without a tap (it re-runs sync work it was holding). That is the same run carrying on from its place, paced
+  and budgeted like any other (gaps, breaks, 300 per run, 600 per 24 hours, cooldowns), and it sends nothing at all
+  unless the session is still valid: an expired or challenged session stops it before its first request. **Discard paused run** abandons it and the next tap starts a
   fresh run. Neither deletes anything. Items an abandoned run had already added stay in the library, but a later Full
   sync judges what it may remove against the library as of the last sync that finished, so those items can't make a
   large removal look small. Resume continues the same run with the same mode: a paused Full sync stays a Full sync.
@@ -477,6 +480,14 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 - [ ] **403 and 410 recovery.** It can't be forced. If a reel fails right after you open it, **look for:** one
   `.../api/v1/media/<id>/info/` request (the renewal) and then playback, or "Can't play this video" if the renewed
   link fails too. **Report:** the request lines and what the screen showed.
+- [ ] **A 403 on one reel's link renewal,** only if it happens. The app reads an HTTP 403 from Instagram as "the session
+  is gone", and can't tell it from a 403 about that one reel (a private or removed one, say). So after a 403 on a
+  `.../api/v1/media/<id>/info/` request, **Instagram session** reads "Session expired", the viewer says "Instagram
+  session needs attention (Sync screen)", and a sync that is running stops ("Session expired"). If you see that while
+  everything else worked, tap **Check now** before you log in again. **Look for:** whether Check now says "Logged in as
+  @handle" (then the session was fine and the 403 was about that reel; **Resume** a stopped sync). **Report:** the
+  logcat lines of that request (its id and the `403`), what Check now said, and the reel's link from **Open on
+  Instagram**.
 - [ ] **Smoothness on a `TextureView`.** The viewer draws on a `TextureView`, because the default surface often failed
   to show the picture of a page you swiped back to (audio played under the thumbnail). Swipe through at least 20
   reels, up and down and back. **Look for:** the right picture on every page, no sound with a still thumbnail, no black
