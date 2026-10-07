@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Reels</string>
+    <string name="sync_channel">Sync</string>
+    <string name="sync_notification_title">Syncing saved reels</string>
+</resources>

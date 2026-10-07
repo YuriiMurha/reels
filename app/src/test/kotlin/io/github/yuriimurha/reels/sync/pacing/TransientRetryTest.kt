@@ -1,0 +1,42 @@
+package io.github.yuriimurha.reels.sync.pacing
+
+import io.github.yuriimurha.reels.instagram.InstagramException
+import kotlinx.coroutines.test.runTest
+import kotlin.random.Random
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+
+class TransientRetryTest {
+    @Test
+    fun retriesWithGrowingWaitsThenSucceeds() = runTest {
+        var attempts = 0
+        val result = retryTransient(Random(1)) {
+            attempts++
+            if (attempts <= 4) throw InstagramException.Transient() else "ok"
+        }
+        assertEquals("ok", result)
+        assertEquals(5, attempts)
+        assertTrue(testScheduler.currentTime in 360_000L..540_000L, "waited ${testScheduler.currentTime} ms")
+    }
+
+    @Test
+    fun givesUpAfterTheFifthAttempt() = runTest {
+        var attempts = 0
+        assertFailsWith<InstagramException.Transient> {
+            retryTransient(Random(1)) { attempts++; throw InstagramException.Transient() }
+        }
+        assertEquals(5, attempts)
+    }
+
+    @Test
+    fun otherFailuresAreNeverRetried() = runTest {
+        var attempts = 0
+        assertFailsWith<InstagramException.ChallengeRequired> {
+            retryTransient { attempts++; throw InstagramException.ChallengeRequired(null) }
+        }
+        assertEquals(1, attempts)
+        assertEquals(0L, testScheduler.currentTime)
+    }
+}
