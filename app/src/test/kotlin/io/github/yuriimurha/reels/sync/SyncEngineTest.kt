@@ -62,6 +62,9 @@ class SyncEngineTest {
     @After
     fun close() = db.close()
 
+    /** The engine's clock, so a run's `startedAt` and the media's `firstSeenAt` come from the same source, as in the app. */
+    private var clock: () -> Long = { 0L }
+
     private fun TestScope.engine(
         client: InstagramClient,
         log: RequestLog = InMemoryRequestLog(),
@@ -70,14 +73,18 @@ class SyncEngineTest {
         store: ThumbnailStore = thumbs,
         sessionSignals: SessionSignals = signals,
     ): SyncEngine {
+        clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
         )
     }
 
-    private suspend fun newRun(mode: SyncMode): Long =
-        db.syncDao().insertRun(SyncRunEntity(mode = mode, status = SyncStatus.RUNNING, startedAt = 0))
+    /** A run starts after everything the earlier runs stored, as on a phone where runs are seconds apart. */
+    private suspend fun newRun(mode: SyncMode): Long {
+        delay(1)
+        return db.syncDao().insertRun(SyncRunEntity(mode = mode, status = SyncStatus.RUNNING, startedAt = clock()))
+    }
 
     private suspend fun runSync(engine: SyncEngine, mode: SyncMode): SyncRunEntity {
         val id = newRun(mode)
@@ -618,10 +625,22 @@ class SyncEngineTest {
         assertTrue(target in pks("c3"), "c3 was not in this run's list: its memberships are not this run's to rewrite")
     }
 
-    private class UnsavedLibrary(val everyone: List<String>, val gone: List<String>, val run: SyncRunEntity)
+    private class UnsavedLibrary(
+        val everyone: List<String>,
+        val gone: List<String>,
+        val fresh: List<String>,
+        /** The originals that had a thumbnail file before the FULL sync. */
+        val thumbnailed: List<String>,
+        val run: SyncRunEntity,
+    )
 
-    /** A library of [total] items, synced; then [unsaved] of them are unsaved on Instagram and a FULL sync runs. */
-    private suspend fun TestScope.fullSyncAfterUnsaving(total: Int, unsaved: Int): UnsavedLibrary {
+    private fun thumbnailFile(pk: String) = File(tmp.root, "thumbs/$pk.jpg")
+
+    /**
+     * A library of [total] items, synced; then [unsaved] of them are unsaved on Instagram, [fresh] items nobody has seen are
+     * saved on top, and a FULL sync runs.
+     */
+    private suspend fun TestScope.fullSyncAfterUnsaving(total: Int, unsaved: Int, fresh: Int = 0): UnsavedLibrary {
         val client = FakeInstagramClient(FakeLibrary(seed = 11, itemCount = total, collectionCount = 2))
         val engine = engine(client)
         assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
@@ -630,7 +649,9 @@ class SyncEngineTest {
         assertEquals(total, pks(ALL_SAVED_ID).size)
         val gone = everyone.shuffled(Random(5)).take(unsaved)
         gone.forEach(client.library::unsave)
-        return UnsavedLibrary(everyone, gone, runSync(engine, SyncMode.FULL))
+        val added = client.library.addNewSaves(fresh).map { it.pk }
+        val thumbnailed = everyone.filter { thumbnailFile(it).exists() }
+        return UnsavedLibrary(everyone, gone, added, thumbnailed, runSync(engine, SyncMode.FULL))
     }
 
     private suspend fun removedAmong(pks: List<String>) = db.mediaDao().byPks(pks).filter { it.removedAt != null }.map { it.pk }
@@ -676,27 +697,98 @@ class SyncEngineTest {
         assertEquals(emptyList(), removedAmong(library.everyone))
     }
 
+    /** The denominator is the library as it was BEFORE the run: items the feed adds do not enlarge it (R71). */
+    private class GuardCase(val total: Int, val unsaved: Int, val fresh: Int, val refused: Boolean)
+
     /** At least 20 AND more than half: 19 of 25 (too few), 20 of 40 (exactly half), 50 of 100 (exactly half) pass. */
     @Test
     fun reconcileGuardBoundaries() = runTest {
-        for ((total, unsaved, refused) in listOf(
-            Triple(25, 19, false),
-            Triple(30, 20, true),
-            Triple(40, 20, false),
-            Triple(40, 21, true),
-            Triple(100, 50, false),
-            Triple(100, 51, true),
+        for (case in listOf(
+            GuardCase(25, 19, 0, refused = false),
+            GuardCase(30, 20, 0, refused = true),
+            GuardCase(40, 20, 0, refused = false),
+            GuardCase(40, 21, 0, refused = true),
+            GuardCase(100, 50, 0, refused = false),
+            GuardCase(100, 51, 0, refused = true),
+            GuardCase(100, 50, 60, refused = false), // new saves don't turn exactly half into less than half
+            GuardCase(100, 51, 60, refused = true),
+            GuardCase(100, 100, 100, refused = true),
         )) {
             db.deleteLibrary()
-            val library = fullSyncAfterUnsaving(total, unsaved)
-            val expected = if (refused) SyncStatus.STOPPED_SHAPE else SyncStatus.DONE
-            assertEquals(expected, library.run.status, "removing $unsaved of $total")
+            val library = fullSyncAfterUnsaving(case.total, case.unsaved, case.fresh)
+            val label = "removing ${case.unsaved} of ${case.total} while ${case.fresh} items are new"
+            val expected = if (case.refused) SyncStatus.STOPPED_SHAPE else SyncStatus.DONE
+            assertEquals(expected, library.run.status, label)
             assertEquals(
-                if (refused) emptyList() else library.gone.sorted(),
+                if (case.refused) emptyList() else library.gone.sorted(),
                 removedAmong(library.everyone).sorted(),
-                "removing $unsaved of $total",
+                label,
             )
         }
+    }
+
+    /** A feed that is not this library (every pk new) must not be able to talk the guard into a mass removal with its own items. */
+    @Test
+    fun aFeedOfOnlyNewItemsIsNotThisLibraryAndRemovesNothing() = runTest {
+        val library = fullSyncAfterUnsaving(total = 100, unsaved = 100, fresh = 100)
+        val run = library.run
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, run.status)
+        assertEquals("Adapter needs repair: full sync would remove 100 of 100 items", run.lastError)
+        assertEquals(emptyList(), removedAmong(library.everyone), "no original was marked removed")
+        assertTrue(pks(ALL_SAVED_ID).containsAll(library.everyone), "every original is still in All Saved")
+        assertTrue(library.thumbnailed.size >= 99, "precondition: the originals had thumbnails")
+        assertEquals(emptyList(), library.thumbnailed.filter { !thumbnailFile(it).exists() }, "and their thumbnails were not deleted")
+    }
+
+    @Test
+    fun fortyOldPlusFiftyNewItemsRefusesTheRemovalOfSixty() = runTest {
+        val library = fullSyncAfterUnsaving(total = 100, unsaved = 60, fresh = 50)
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, library.run.status)
+        assertEquals("Adapter needs repair: full sync would remove 60 of 100 items", library.run.lastError)
+        assertEquals(emptyList(), removedAmong(library.everyone))
+        assertEquals(emptyList(), library.thumbnailed.filter { !thumbnailFile(it).exists() })
+    }
+
+    @Test
+    fun ninetyOldPlusFiftyNewItemsRemovesTheTenThatAreGone() = runTest {
+        val library = fullSyncAfterUnsaving(total = 100, unsaved = 10, fresh = 50)
+
+        assertEquals(SyncStatus.DONE, library.run.status)
+        assertEquals(library.gone.toSet(), removedAmong(library.everyone).toSet())
+        assertEquals(140, pks(ALL_SAVED_ID).size, "90 old and 50 new")
+        assertEquals(library.fresh.toSet(), pks(ALL_SAVED_ID).filter { it in library.fresh }.toSet())
+    }
+
+    /**
+     * R71: the reference is the run row's `startedAt`, which a resumed run keeps. Items first seen by an earlier attempt of
+     * the SAME run are new to the run, so they must not count as "the library before the run" in the attempt that finishes it.
+     */
+    @Test
+    fun aRunResumedAcrossTwoAttemptsStillCountsOnlyTheItemsThatExistedBeforeTheRun() = runTest {
+        val client = FakeInstagramClient(FakeLibrary(seed = 11, itemCount = 100, collectionCount = 2))
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        val originals = client.library.allSaved().map { it.pk }
+        originals.take(60).forEach(client.library::unsave)
+        val fresh = client.library.addNewSaves(60).map { it.pk } // the feed is now 60 new items, then 40 of the old ones
+        val failAt = client.calls.size + 5 // currentUser, collections, page 1, page 2, then page 3 is stopped
+        client.failures = FakeFailures { if (it == failAt) InstagramException.ChallengeRequired(null) else null }
+        val id = newRun(SyncMode.FULL)
+
+        engine.run(id)
+
+        assertEquals(SyncStatus.STOPPED_CHALLENGE, db.syncDao().run(id)!!.status)
+        assertEquals(40, db.mediaDao().byPks(fresh).size, "the first attempt stored two pages of new items")
+
+        client.failures = FakeFailures { null }
+        engine.run(id)
+
+        val run = db.syncDao().run(id)!!
+        assertEquals(SyncStatus.STOPPED_SHAPE, run.status)
+        assertEquals("Adapter needs repair: full sync would remove 60 of 100 items", run.lastError)
+        assertEquals(emptyList(), removedAmong(originals))
     }
 
     @Test

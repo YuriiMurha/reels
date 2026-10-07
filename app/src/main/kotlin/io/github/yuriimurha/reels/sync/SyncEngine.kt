@@ -46,7 +46,7 @@ class SyncEngine(
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     companion object {
-        /** P7: a FULL reconcile removing at least this many items AND more than half of the live ones is refused. */
+        /** P7: a FULL reconcile removing at least this many items AND more than half of those that existed before the run is refused. */
         internal const val RECONCILE_GUARD_MIN_ITEMS = 20
     }
 
@@ -228,26 +228,34 @@ class SyncEngine(
         )
         syncDao.upsertCursor(next)
 
-        val removed = if (mode == SyncMode.FULL && reachedEnd) reconcile(scope, runId) else emptyList()
+        val removed = if (mode == SyncMode.FULL && reachedEnd) reconcile(scope, runId, progress.run.startedAt) else emptyList()
         progress.update { r ->
             r.copy(newItems = r.newItems + page.items.count { it.pk !in existing }, seenItems = r.seenItems + page.items.size)
         }
         return PageOutcome(next, page.items.filter { existing[it.pk]?.thumbPath == null }, removed)
     }
 
-    /** Spec 7.2 step 5. Called only when a FULL walk of [scope] reached the end in this run. */
-    private suspend fun reconcile(scope: String, runId: Long): List<String> {
+    /**
+     * Spec 7.2 step 5. Called only when a FULL walk of [scope] reached the end in this run. [runStartedAt] is the run row's
+     * `startedAt`, which a resumed run keeps; both it and `firstSeenAt` come from the wall clock (`SyncController` and this
+     * engine each default to `System::currentTimeMillis`).
+     */
+    private suspend fun reconcile(scope: String, runId: Long, runStartedAt: Long): List<String> {
         if (scope != ALL_SAVED_ID) {
             collectionDao.deleteUnseen(scope, runId)
             return emptyList()
         }
         val unsaved = collectionDao.unseenPks(ALL_SAVED_ID, runId)
-        // P7: a walk that reached the end but saw a small part of the library is a broken or partial feed far more often than
-        // an account that unsaved most of what it had. Thrown inside the page's transaction, so the page and its cursor roll
-        // back and the run stops. If the owner really did unsave that much, Delete library then Full sync mirrors it.
-        val live = collectionDao.memberCount(ALL_SAVED_ID)
-        if (unsaved.size >= RECONCILE_GUARD_MIN_ITEMS && unsaved.size * 2 > live) {
-            throw InstagramException.ShapeChanged("full sync would remove ${unsaved.size} of $live items")
+        // P7 (amended by R71): a walk that reached the end but would remove at least RECONCILE_GUARD_MIN_ITEMS items AND more
+        // than half of the library is a broken, partial or foreign feed far more often than an account that unsaved that much.
+        // "The library" is what existed BEFORE this run: counting the members this run's own pages added would let a feed of
+        // all-new items (another account's, say) enlarge the denominator until it passed. Items first seen by an earlier
+        // attempt of this same run are new to the run too: they were first seen after its `startedAt`. Thrown inside the page's
+        // transaction, so the page and its cursor roll back and the run stops. If the owner really did unsave (and save) that
+        // much, Delete library then Full sync mirrors it.
+        val before = collectionDao.memberCountSeenBefore(ALL_SAVED_ID, runStartedAt)
+        if (unsaved.size >= RECONCILE_GUARD_MIN_ITEMS && unsaved.size * 2 > before) {
+            throw InstagramException.ShapeChanged("full sync would remove ${unsaved.size} of $before items")
         }
         unsaved.chunked(500).forEach { chunk ->
             mediaDao.markRemoved(chunk, now())

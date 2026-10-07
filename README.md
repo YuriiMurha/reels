@@ -61,8 +61,9 @@ library.
 ## 2. Connect the phone
 
 1. On the phone: **Settings → About phone →** tap **Build number** seven times to unlock Developer options.
-2. **Settings → System → Developer options →** turn on **USB debugging** (or **Wireless debugging**).
-3. Plug the phone in by USB and accept the "Allow USB debugging?" prompt. The `adb -d` commands below need the cable.
+2. **Settings → System → Developer options →** turn on **USB debugging**. Use a USB cable for all the steps below:
+   the `adb -d` commands only see a phone attached by USB.
+3. Plug the phone in by USB and accept the "Allow USB debugging?" prompt.
 4. Confirm the Mac sees it:
 
    ```bash
@@ -76,9 +77,6 @@ can be passed to Gradle:
 ```bash
 ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installDebug
 ```
-
-(With Wireless debugging the phone is not a USB device, so `-d` finds nothing: stop the emulator and run plain
-`./gradlew installDebug`.)
 
 Never log into Instagram on an emulator: the account should only ever see your phone.
 
@@ -94,8 +92,10 @@ Then open **Reels** on the phone.
 - **Grid**: tap a tile for the full-screen viewer; swipe up and down; **Back** returns to the same tile.
 - **Search** (magnifier, top right) searches captions, authors and collection names, and can narrow to reels or
   posts.
-- **Sync** (the status chip, top right): **Sync** fetches what's new, **Full sync** also mirrors unsaves, **Delete library**
-  wipes the local copy (your login is kept). Progress, budgets and any cooldown show here.
+- **Sync** (the status chip, top right): **Sync** fetches what's new, **Full sync** also mirrors unsaves and fetches any
+  thumbnails an earlier sync skipped, **Delete library** wipes the local copy (your login is kept). Progress, budgets and
+  any cooldown show here. If Instagram's image servers rate-limit the app, the sync still ends Done but stops
+  downloading thumbnails for the rest of that run, so some tiles stay blank until the next **Full sync**.
 
 ### Mock mode (debug builds)
 
@@ -194,7 +194,7 @@ mkdir -p ~/reels-lab && cd ~/reels-lab
 ```
 
 One command per file, with the phone connected by USB. `adb -d` talks to the one USB-attached device, so these work
-with an emulator running too. (With Wireless debugging, stop the emulator and drop the `-d`.)
+with an emulator running too.
 
 ```bash
 adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/current_user.json > current_user.json
@@ -241,9 +241,13 @@ get recorded in `ARCHITECTURE.md` and `TODO.md`, and the files you have read bec
   ```
 
 - **`Adapter needs repair: full sync would remove N of M items`**: the Full sync reached the end of the feed, but
-  Instagram returned far fewer saved items than the library holds, so applying it would have removed N of the M
-  items. That is usually a broken or partial answer, so nothing was removed and the run stopped. If you really did
-  unsave that much, use **Delete library**, then **Full sync**: that mirrors Instagram exactly.
+  applying it would have removed N of the M items the library held before the run (at least 20, and more than half).
+  That is usually a broken, partial or foreign answer, so nothing was removed and the run stopped. It can also happen
+  for real: if you unsaved more than half of your library and saved new items in the same stretch, the new ones don't
+  count towards M. If that is what happened, use **Delete library**, then **Full sync**: that mirrors Instagram exactly.
+- **A sync ended Done but some thumbnails are missing**: Instagram's image servers told the app to slow down (a
+  rate limit), so the app stopped downloading thumbnails for the rest of that run. The items are all in the library.
+  A later **Full sync** fetches the missing thumbnails.
 - **`Adapter needs repair: empty collection list`**: Instagram listed no collections although the library has some.
   Nothing was changed. Try **Sync** again later. If you really did delete every collection on Instagram, use
   **Delete library**, then **Sync**.

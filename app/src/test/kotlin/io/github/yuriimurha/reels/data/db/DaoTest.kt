@@ -108,12 +108,37 @@ class DaoTest {
         assertEquals(0, collections.liveCollectionCount())
     }
 
+    /** R71: the share a FULL reconcile removes is measured against the members that existed before the run began. */
     @Test
-    fun memberCountCountsOneCollectionsMembershipRows() = runTest {
-        givenLibrary()
-        assertEquals(4, collections.memberCount(ALL_SAVED_ID))
-        assertEquals(1, collections.memberCount("c1"))
-        assertEquals(0, collections.memberCount("no-such-collection"))
+    fun memberCountSeenBeforeCountsOnlyMembersWhoseMediaWasFirstSeenEarlier() = runTest {
+        collections.upsert(
+            listOf(
+                CollectionEntity(ALL_SAVED_ID, "All Saved", coverPk = null, position = -1),
+                CollectionEntity("c1", "Workouts", coverPk = null, position = 0),
+            ),
+        )
+        media.upsert(
+            listOf(
+                mediaEntity("m1").copy(firstSeenAt = 5),
+                mediaEntity("m2").copy(firstSeenAt = 10),
+                mediaEntity("m3").copy(firstSeenAt = 20),
+                mediaEntity("m4").copy(firstSeenAt = 1), // first seen early, but a member of c1 only
+            ),
+        )
+        collections.upsertMemberships(
+            listOf(
+                CollectionMediaEntity(ALL_SAVED_ID, "m1", sortKey = 1, lastSeenRunId = 2),
+                CollectionMediaEntity(ALL_SAVED_ID, "m2", sortKey = 2, lastSeenRunId = 2),
+                CollectionMediaEntity(ALL_SAVED_ID, "m3", sortKey = 3, lastSeenRunId = 2),
+                CollectionMediaEntity("c1", "m4", sortKey = 4, lastSeenRunId = 2),
+            ),
+        )
+        assertEquals(0, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 5), "strictly before: m1 was first seen AT 5")
+        assertEquals(1, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 6))
+        assertEquals(2, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 11))
+        assertEquals(3, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 21))
+        assertEquals(1, collections.memberCountSeenBefore("c1", before = 21), "only that collection's rows")
+        assertEquals(0, collections.memberCountSeenBefore("no-such-collection", before = 21))
     }
 
     /** Strategy A (P3's alternative): the rewrite is limited to the collections this run listed. */

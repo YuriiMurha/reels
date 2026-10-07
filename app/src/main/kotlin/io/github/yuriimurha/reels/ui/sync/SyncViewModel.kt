@@ -121,10 +121,12 @@ class SyncViewModel(
 
     /**
      * Off until the latest run has loaded, and while it is RUNNING. A restart then could leave WorkManager holding a run
-     * of this library for a process that runs the other one (R67), and a run the screen hasn't seen yet may be one.
+     * of this library for a process that runs the other one (R67), and a run the screen hasn't seen yet may be one. Like
+     * [loadedRun] it forgets its value once the screen has been gone for the grace period, so a returning screen never
+     * shows the old "enabled" before the run has been read again.
      */
-    val mockSwitchEnabled: StateFlow<Boolean> =
-        loadedRun.map { it != null && it.run?.status != SyncStatus.RUNNING }.stateIn(viewModelScope, sharing, false)
+    val mockSwitchEnabled: StateFlow<Boolean> = loadedRun.map { it != null && it.run?.status != SyncStatus.RUNNING }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), false)
 
     private var mockChange: Job? = null
 
