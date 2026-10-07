@@ -45,6 +45,22 @@ class HttpClientFactoryCdnTest {
         assertEquals(30_000, client.readTimeoutMillis)
     }
 
+    /**
+     * Only a NETWORK interceptor sees a 503 or a 421 before OkHttp's own follow-up logic can re-send the request; an
+     * application interceptor sits above that logic and would see the answer too late. So both rules must be network
+     * interceptors, by identity, and neither may be registered a second time as an application one.
+     */
+    @Test
+    fun the503And421RulesAreNetworkInterceptorsNotApplicationOnes() {
+        assertEquals(2, client.networkInterceptors.size, "exactly the two re-send rules: ${client.networkInterceptors}")
+        assertTrue(client.networkInterceptors.any { it === noRetryAfterOn503 }, "the 503 Retry-After rule must be a network interceptor")
+        assertTrue(client.networkInterceptors.any { it === misdirectedIsAFailure }, "the 421 rule must be a network interceptor")
+        assertFalse(
+            client.interceptors.any { it === noRetryAfterOn503 || it === misdirectedIsAFailure },
+            "an application interceptor sees the response only after OkHttp has re-sent",
+        )
+    }
+
     /** With retries off OkHttp can't recover from a thrown 421: the exception is the end of the call. */
     @Test
     fun a421BecomesAnIOExceptionAfterOneRequest() {

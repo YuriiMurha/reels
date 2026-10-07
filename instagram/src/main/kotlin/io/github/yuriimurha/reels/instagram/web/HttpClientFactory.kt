@@ -39,7 +39,7 @@ private val crashGuard = Interceptor { chain ->
  * the Pacer would count one request while two go out. Without the header OkHttp makes no follow-up. Registered before
  * the logging interceptor so the debug log (closer to the wire) still shows what Instagram really sent.
  */
-private val noRetryAfterOn503 = Interceptor { chain ->
+internal val noRetryAfterOn503 = Interceptor { chain ->
     val response = chain.proceed(chain.request())
     if (response.code == 503 && response.header("Retry-After") != null) {
         response.newBuilder().removeHeader("Retry-After").build()
@@ -54,7 +54,7 @@ private val noRetryAfterOn503 = Interceptor { chain ->
  * counted. As a network interceptor this sees the 421 before OkHttp's follow-up logic does; thrown as an IOException,
  * and with `retryOnConnectionFailure(false)`, OkHttp has nothing left to recover with.
  */
-private val misdirectedIsAFailure = Interceptor { chain ->
+internal val misdirectedIsAFailure = Interceptor { chain ->
     val response = chain.proceed(chain.request())
     if (response.code == 421) {
         response.close()
@@ -64,13 +64,6 @@ private val misdirectedIsAFailure = Interceptor { chain ->
 }
 
 object HttpClientFactory {
-    /**
-     * The client for Instagram API calls. Redirects are not followed, so a bounce to /challenge/ or
-     * /accounts/login reaches ErrorClassifier. Pass [logger] only in debug builds; secrets are redacted (spec 4.4):
-     * cookies, the CSRF token, Instagram's ig-set-* session headers and Location (challenge URLs carry a nonce).
-     * OkHttp's silent re-sends (failed connection, 503 with Retry-After: 0) are off: every request must go through the
-     * Pacer.
-     */
     /**
      * The client for Instagram's CDN (thumbnails). It sends no cookie and nothing of Instagram's: no jar at all, only the
      * WebView user agent (reduced to printable ASCII, so the header can never throw). Every request reaches the wire
@@ -97,6 +90,13 @@ object HttpClientFactory {
             .build()
     }
 
+    /**
+     * The client for Instagram API calls. Redirects are not followed, so a bounce to /challenge/ or
+     * /accounts/login reaches ErrorClassifier. Pass [logger] only in debug builds; secrets are redacted (spec 4.4):
+     * cookies, the CSRF token, Instagram's ig-set-* session headers and Location (challenge URLs carry a nonce).
+     * OkHttp's silent re-sends (failed connection, 503 with Retry-After: 0) are off: every request must go through the
+     * Pacer.
+     */
     fun create(cookies: CookieStore, userAgent: String, logger: ((String) -> Unit)? = null): OkHttpClient {
         val builder = OkHttpClient.Builder()
             .cookieJar(CookieStoreJar(cookies))

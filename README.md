@@ -62,7 +62,7 @@ library.
 
 1. On the phone: **Settings → About phone →** tap **Build number** seven times to unlock Developer options.
 2. **Settings → System → Developer options →** turn on **USB debugging** (or **Wireless debugging**).
-3. Plug the phone in (or pair it over Wi-Fi with `adb pair`) and accept the "Allow USB debugging?" prompt.
+3. Plug the phone in by USB and accept the "Allow USB debugging?" prompt. The `adb -d` commands below need the cable.
 4. Confirm the Mac sees it:
 
    ```bash
@@ -134,11 +134,11 @@ Watch the app's Instagram requests in a second terminal while you test (debug bu
 cookie and token redacted):
 
 ```bash
-adb logcat -c
+adb -d logcat -c
 ```
 
 ```bash
-adb logcat -s InstagramHttp
+adb -d logcat -s InstagramHttp
 ```
 
 1. Install, open **Sync → Log in**, log into the throwaway account and finish any 2FA.
@@ -237,7 +237,7 @@ get recorded in `ARCHITECTURE.md` and `TODO.md`, and the files you have read bec
   also deletes the local library and session):
 
   ```bash
-  adb uninstall io.github.yuriimurha.reels
+  adb -d uninstall io.github.yuriimurha.reels
   ```
 
 - **The login page is blank**: report it. Note whether a cookie/consent dialog is visible, and look at the page in

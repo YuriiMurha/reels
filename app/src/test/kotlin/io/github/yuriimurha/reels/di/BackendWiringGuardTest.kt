@@ -40,6 +40,18 @@ class BackendWiringGuardTest {
         assertFalse("HttpClientFactory.create(" in definition, "cdnHttp must not be the cookie-carrying API client: $definition")
     }
 
+    /**
+     * `cancel()` only asks WorkManager to cancel; the Mock mode switch must not restart before WorkManager has recorded it
+     * (R67), and under the test WorkManager's synchronous executors the two are indistinguishable at runtime. The cancel
+     * itself and the backend kind stamp are run, not read, in `ContainerSyncWiringTest`.
+     */
+    @Test
+    fun theMockSwitchWaitsForTheCancelToBeRecorded() {
+        val switches = callArguments(main("di/AppContainer.kt"), "MockModeSwitch(")
+        assertEquals(1, switches.size, "expected exactly one MockModeSwitch in AppContainer: $switches")
+        assertTrue("syncScheduler.cancelAndAwait()" in switches.single(), "cancelSync must await the cancel: ${switches.single()}")
+    }
+
     @Test
     fun theSyncScreenShowsTheBackendsPacer() {
         val screen = main("ui/sync/SyncScreen.kt")

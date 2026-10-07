@@ -347,6 +347,28 @@ class SyncViewModelTest {
         assertEquals(listOf("cancel", "restart(useFake=false)"), switchEvents, "the queued sync is cancelled, then the mode stored, then the restart")
     }
 
+    /**
+     * R70 (d): a screen that was stopped for longer than the 5 s grace period must not replay the run it had loaded. A run may
+     * have started meanwhile, and a tap before the run has been read again would restart the app under it.
+     */
+    @Test
+    fun aStoppedScreenDoesNotReplayAStaleLoadedRun() = runTest {
+        val viewModel = viewModel(mockSwitch(usesFake = true))
+        val screen = launch { viewModel.mockSwitchEnabled.collect {} }
+        viewModel.mockSwitchEnabled.first { it } // loaded: there is no run, so the switch is on
+        screen.cancel()
+        runCurrent()
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START)) // while stopped
+        advanceTimeBy(11_000) // the switch flow's 5 s grace period, then the loaded-run flow's
+        runCurrent()
+
+        backgroundScope.launch { viewModel.mockSwitchEnabled.collect {} } // the screen is back; nothing has been read yet
+        viewModel.setMockMode(false)
+        advanceUntilIdle()
+
+        assertEquals(emptyList(), switchEvents, "refused: the stale 'no run' must not be replayed")
+    }
+
     @Test
     fun theMockModeIsNotChangedWhileARunIsRunning() = runTest {
         val viewModel = viewModel(mockSwitch(usesFake = true))

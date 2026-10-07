@@ -111,7 +111,13 @@ class SyncViewModel(
     /** The latest run once it has been READ: [run] alone can't tell "no run" from "not loaded yet" (both are null). */
     private class LoadedRun(val run: SyncRunEntity?)
 
-    private val loadedRun: StateFlow<LoadedRun?> = controller.latestRun.map(::LoadedRun).stateIn(viewModelScope, sharing, null)
+    /**
+     * `replayExpirationMillis = 0`: once nothing has collected it for 5 s the cached value is dropped (back to null), so
+     * a stopped screen can't replay a "loaded" run that went stale while no one was watching, and the switch stays off
+     * until the run has been read again.
+     */
+    private val loadedRun: StateFlow<LoadedRun?> = controller.latestRun.map(::LoadedRun)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), null)
 
     /**
      * Off until the latest run has loaded, and while it is RUNNING. A restart then could leave WorkManager holding a run
