@@ -62,3 +62,25 @@ Append-only log. Newest entry at the bottom; never edit past entries.
 - `:app` no longer spells out Instagram URLs, the login host allowlist or cookie attributes: they moved to `:instagram` (`WebEndpoints`, `WebSessionCookies`), strings byte-identical.
 - Sync screen: "Requests this run" is now "Requests (all attempts)" without a per-run denominator, which a resumed run could exceed.
 - `TODO.md` ticked and given M3/M4/M5 gates and two owner checks for the M2 phone checklist; `ARCHITECTURE.md` brought up to date (settings keys, RELOGIN, where the Instagram strings live).
+
+## 2026-10-07: M3–M6 code complete (real sync, Adapter lab, video, release build)
+
+Every line was written and tested without any agent contacting Instagram (MockWebServer and fakes only; the emulator stayed in Mock mode or logged out).
+
+- **Real adapter.** `WebInstagramClient` with `WebParsers`, `MediaLinks` and `WebEndpoints` for the four candidate endpoints (shapes from instaloader and instagrapi, pinned by synthetic fixtures), a no-redirect API client with a session guard, and a separate cookieless CDN client that makes one request per download.
+- **Adapter lab (M3).** A pure-JVM core (one request per call, a redacted shape, a scrubbed copy) and a debug-only screen under Sync → Developer. Spec 6.4's "a redacted shape dump is saved for the Adapter lab" on a sync shape change is not built: the lab reproduces the call instead.
+- **Real sync (M4).** `Backend.Real` on the one Conservative pacer; a debug-only Mock mode (default on) with separate libraries (`reels.db` fake, `library.db` real) and a shared request log; the engine's delete-safety gates and the session gates from the M0–M2 final review; truncated rather than clamped gaps, and the gap seeded from the persisted request log.
+- **Video (M5).** Links renewed on the interactive lane only when expired and only under a valid session, a `pk`-keyed 512 MB cache, one refresh after a 403/410, next-item prefetch, and the viewer on a `TextureView`.
+- **Release (M6).** Signing from `keystore.properties` with a debug-key fallback, `androidx.profileinstaller` plus a hand-written baseline profile, and an R8 build smoke-tested on the emulator.
+- **Docs.** `README.md` rewritten as one guide (setup, first real sync, the Adapter lab, the on-phone checklist, release build, troubleshooting); `ARCHITECTURE.md` restructured to the current state; `TODO.md` ticked, with the owner's steps listed.
+- **Safety fixes the reviews found,** each a real defect in a first version:
+  - The parser silently skipped an item with a missing or mistyped `media`, which would have let a Full sync delete it; a page without a real `more_available` boolean is now a shape change, never "last page".
+  - The lab treated a 429 whose body could not be read as a network error, so the cooldown would not start; such answers are now classified from their headers.
+  - A future-dated row in the request log could stall the pacer for days; the restart gap is now seeded from the log and clamped to now.
+  - The CDN client silently re-sent after a 503 `Retry-After: 0` or a 421, a second request the pacer never counted; it now follows no redirects, retries nothing, strips the header, and turns a 421 into a failure.
+  - The reconcile guard's denominator counted the feed's own new items, so a foreign feed of 100 new items over a 100-item library would have wiped it; it now counts only items that existed before the run.
+  - The session guard read the old session from the jar after the connection was up, so a logout during the handshake could write it back; it now compares the cookie the request actually sent. Logout now always forgets the session, even if cancelling the run fails.
+  - A Mock mode restart could have replayed the other library's queued run, and the 24 h request log would have been orphaned in `reels.db`; work now carries its library, the switch cancels queued work first, and the log is copied once.
+  - The video path could send a link request, a prefetch included, with no valid or a challenged session; it now sends nothing unless the session is valid, checks again inside the pacer's gate, and plays a fully cached video with no request.
+  - The release build crashed on launch under R8 (an enum navigation argument); a keep rule fixes it, exception names are kept so `lastError` stays readable, the pre-commit guard now refuses signing files, and the README's keytool step was corrected to one password.
+- **Left for the owner** (all on the phone, in the order of README sections 5, 7, 8 and 9): run the M2 checklist and confirm `X-IG-App-ID`; turn Mock mode off, log in and run the Adapter lab, then hand back the seven spike answers (and flip `SAVED_COLLECTION_IDS_CONFIRMED` only if Q2 says so); the first real Sync, then the first real Full sync, checking that each collection feed ends correctly; video playback and offline cache; and `installRelease`, with a real keystore if wanted, plus the release-build checks. Also decide the repo's visibility.
