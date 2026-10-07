@@ -25,8 +25,17 @@ interface CollectionDao {
     @Query("SELECT MAX(sortKey) FROM collection_media WHERE collectionId = :collectionId")
     suspend fun maxSortKey(collectionId: String): Long?
 
-    @Query("DELETE FROM collection_media WHERE mediaPk = :pk AND collectionId != '$ALL_SAVED_ID' AND collectionId NOT IN (:keep)")
-    suspend fun deleteRealMembershipsExcept(pk: String, keep: List<String>)
+    @Query("SELECT COUNT(*) FROM collection WHERE removedAt IS NULL AND id != '$ALL_SAVED_ID'")
+    suspend fun liveCollectionCount(): Int
+
+    @Query("SELECT COUNT(*) FROM collection_media WHERE collectionId = :collectionId")
+    suspend fun memberCount(collectionId: String): Int
+
+    /** Strategy A: rewrites [pk]'s memberships only among [known] collections; others are left alone. */
+    @Query(
+        "DELETE FROM collection_media WHERE mediaPk = :pk AND collectionId != '$ALL_SAVED_ID' AND collectionId IN (:known) AND collectionId NOT IN (:keep)",
+    )
+    suspend fun deleteRealMembershipsExcept(pk: String, keep: List<String>, known: List<String>)
 
     @Query("SELECT mediaPk FROM collection_media WHERE collectionId = :collectionId AND lastSeenRunId != :runId")
     suspend fun unseenPks(collectionId: String, runId: Long): List<String>

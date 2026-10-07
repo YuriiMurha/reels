@@ -133,7 +133,7 @@ class SearchAndQueryTest {
         assertNull(collections.maxSortKey("none"))
         assertEquals(setOf("m1"), collections.memberships("c1", listOf("m1", "m2")).map { it.mediaPk }.toSet())
 
-        collections.deleteRealMembershipsExcept("m1", keep = listOf("c1"))
+        collections.deleteRealMembershipsExcept("m1", keep = listOf("c1"), known = listOf("c1", "c2"))
         assertEquals(listOf("c1"), collections.collectionsOf("m1").map { it.id })
         assertEquals(
             listOf("m1"),

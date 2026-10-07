@@ -11,6 +11,7 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.db.ThumbnailTarget
+import io.github.yuriimurha.reels.data.media.CdnRateLimited
 import io.github.yuriimurha.reels.data.media.MediaFetcher
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.InstagramClient
@@ -23,9 +24,12 @@ import io.github.yuriimurha.reels.sync.pacing.PacerRefusal
 import io.github.yuriimurha.reels.sync.pacing.retryTransient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
@@ -41,6 +45,11 @@ class SyncEngine(
     private val random: Random = Random.Default,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
+    companion object {
+        /** P7: a FULL reconcile removing at least this many items AND more than half of the live ones is refused. */
+        internal const val RECONCILE_GUARD_MIN_ITEMS = 20
+    }
+
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
     private val syncDao = db.syncDao()
@@ -121,6 +130,9 @@ class SyncEngine(
             remote += page.items
             cursor = page.nextCursor
         } while (cursor != null)
+        // An empty list over a library that has collections is a broken answer, not an account that deleted them all: marking
+        // them removed would hide every collection. Thrown before the transaction, so nothing has been touched.
+        if (remote.isEmpty() && collectionDao.liveCollectionCount() > 0) throw InstagramException.ShapeChanged("empty collection list")
         val live = remote.mapIndexed { index, c -> CollectionEntity(c.id, c.name, c.coverMediaPk, position = index) }
         db.withTransaction {
             collectionDao.upsert(live + CollectionEntity(ALL_SAVED_ID, "All Saved", coverPk = null, position = -1))
@@ -194,7 +206,8 @@ class SyncEngine(
             page.items.zip(memberships).forEach { (item, member) ->
                 // null means "the response doesn't say" (RemoteMedia): keep what we have, never treat it as "none".
                 val ids = item.savedCollectionIds?.filter { it in knownCollections } ?: return@forEach
-                collectionDao.deleteRealMembershipsExcept(item.pk, ids)
+                // Only among the collections this run listed: a membership in one it did not list is left alone.
+                collectionDao.deleteRealMembershipsExcept(item.pk, ids, knownCollections.toList())
                 collectionDao.upsertMemberships(ids.map { CollectionMediaEntity(it, item.pk, member.sortKey, runId) })
             }
         }
@@ -229,11 +242,29 @@ class SyncEngine(
             return emptyList()
         }
         val unsaved = collectionDao.unseenPks(ALL_SAVED_ID, runId)
+        // P7: a walk that reached the end but saw a small part of the library is a broken or partial feed far more often than
+        // an account that unsaved most of what it had. Thrown inside the page's transaction, so the page and its cursor roll
+        // back and the run stops. If the owner really did unsave that much, Delete library then Full sync mirrors it.
+        val live = collectionDao.memberCount(ALL_SAVED_ID)
+        if (unsaved.size >= RECONCILE_GUARD_MIN_ITEMS && unsaved.size * 2 > live) {
+            throw InstagramException.ShapeChanged("full sync would remove ${unsaved.size} of $live items")
+        }
         unsaved.chunked(500).forEach { chunk ->
             mediaDao.markRemoved(chunk, now())
             collectionDao.deleteAllMembershipsOf(chunk)
         }
         return unsaved
+    }
+
+    /** What became of one thumbnail. */
+    private sealed interface Thumb {
+        data class Stored(val path: String) : Thumb
+
+        /** Unavailable (the fetcher said so) or the download, decoding or disk write failed. Counts as a failure. */
+        data object Failed : Thumb
+
+        /** Not tried: the CDN had already said 429 in this run. Not a failure; the item has no thumbnail yet. */
+        data object Skipped : Thumb
     }
 
     /**
@@ -243,26 +274,51 @@ class SyncEngine(
     private suspend fun cacheThumbnails(progress: Progress, items: List<ThumbnailTarget>, countFailures: Boolean = true) {
         if (items.isEmpty()) return
         val results = coroutineScope {
-            items.map { item ->
-                async {
-                    val path = try {
-                        val bytes = pacer.cdn { fetcher.fetch(item.url) }
-                        bytes?.let { withContext(Dispatchers.IO) { thumbnails.write(item.pk, it) } }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        null // network, decoding or disk trouble: this thumbnail counts as failed, the sync goes on
-                    }
-                    item.pk to path
-                }
-            }.awaitAll()
+            items.map { item -> async { item.pk to cacheThumbnail(progress, item) } }.awaitAll()
         }
-        results.forEach { (pk, path) -> if (path != null) mediaDao.setThumbPath(pk, path) }
+        results.forEach { (pk, thumb) -> if (thumb is Thumb.Stored) mediaDao.setThumbPath(pk, thumb.path) }
         progress.update { r ->
             r.copy(
-                thumbsCached = r.thumbsCached + results.count { it.second != null },
-                failures = if (countFailures) r.failures + results.count { it.second == null } else r.failures,
+                thumbsCached = r.thumbsCached + results.count { it.second is Thumb.Stored },
+                failures = if (countFailures) r.failures + results.count { it.second == Thumb.Failed } else r.failures,
             )
+        }
+    }
+
+    /**
+     * One thumbnail. After the CDN's first 429 of this run ([Progress.cdnBlocked]) nothing more is requested: checked again
+     * once the download holds a CDN permit, because it may have queued behind the one that got the 429. At most the
+     * downloads already in flight (the policy's CDN concurrency, less the one that failed) still complete.
+     */
+    private suspend fun cacheThumbnail(progress: Progress, item: ThumbnailTarget): Thumb {
+        if (progress.cdnBlocked) return Thumb.Skipped
+        return try {
+            var skipped = false
+            val bytes = pacer.cdn {
+                if (progress.cdnBlocked) {
+                    skipped = true
+                    null
+                } else {
+                    fetcher.fetch(item.url)
+                }
+            }
+            if (skipped) {
+                Thumb.Skipped
+            } else {
+                bytes?.let { Thumb.Stored(withContext(Dispatchers.IO) { thumbnails.write(item.pk, it) }) } ?: Thumb.Failed
+            }
+        } catch (e: CdnRateLimited) {
+            progress.cdnBlocked = true
+            Thumb.Failed // this download did fail; the ones skipped after it did not
+        } catch (e: TimeoutCancellationException) {
+            // A TimeoutCancellationException is a CancellationException, but one out of a download's own timeout is a failed
+            // download, not a cancelled run. If it is this scope that is being cancelled, that still propagates.
+            currentCoroutineContext().ensureActive()
+            Thumb.Failed
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Thumb.Failed // network, decoding or disk trouble: this thumbnail counts as failed, the sync goes on
         }
     }
 
@@ -289,6 +345,13 @@ class SyncEngine(
     /** The run row plus this invocation's request budget; every change is written straight through. */
     private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget) {
         private val requestsBefore = run.requestsUsed
+
+        /**
+         * Set by the first CDN 429 of this invocation; from then on no thumbnail is requested. Not persisted: a resume or the
+         * next run tries again. Written by download coroutines that may run on different threads.
+         */
+        @Volatile
+        var cdnBlocked = false
 
         suspend fun save() = syncDao.updateRun(run)
 

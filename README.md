@@ -240,6 +240,13 @@ get recorded in `ARCHITECTURE.md` and `TODO.md`, and the files you have read bec
   adb -d uninstall io.github.yuriimurha.reels
   ```
 
+- **`Adapter needs repair: full sync would remove N of M items`**: the Full sync reached the end of the feed, but
+  Instagram returned far fewer saved items than the library holds, so applying it would have removed N of the M
+  items. That is usually a broken or partial answer, so nothing was removed and the run stopped. If you really did
+  unsave that much, use **Delete library**, then **Full sync**: that mirrors Instagram exactly.
+- **`Adapter needs repair: empty collection list`**: Instagram listed no collections although the library has some.
+  Nothing was changed. Try **Sync** again later. If you really did delete every collection on Instagram, use
+  **Delete library**, then **Sync**.
 - **The login page is blank**: report it. Note whether a cookie/consent dialog is visible, and look at the page in
   `chrome://inspect`.
 - **A commit is refused with `pre-commit: ... session material` or `... sessionid value`**: the secret guard

@@ -99,6 +99,58 @@ class DaoTest {
     }
 
     @Test
+    fun liveCollectionCountSkipsAllSavedAndRemovedCollections() = runTest {
+        givenLibrary() // All Saved, c1, c2
+        assertEquals(2, collections.liveCollectionCount(), "All Saved is not a real collection")
+        collections.markRemovedExcept(keep = listOf("c1"), at = 9)
+        assertEquals(1, collections.liveCollectionCount())
+        collections.markRemovedExcept(keep = emptyList(), at = 10)
+        assertEquals(0, collections.liveCollectionCount())
+    }
+
+    @Test
+    fun memberCountCountsOneCollectionsMembershipRows() = runTest {
+        givenLibrary()
+        assertEquals(4, collections.memberCount(ALL_SAVED_ID))
+        assertEquals(1, collections.memberCount("c1"))
+        assertEquals(0, collections.memberCount("no-such-collection"))
+    }
+
+    /** Strategy A (P3's alternative): the rewrite is limited to the collections this run listed. */
+    @Test
+    fun deleteRealMembershipsExceptOnlyTouchesKnownCollections() = runTest {
+        givenLibrary()
+        collections.upsertMemberships(
+            listOf(
+                CollectionMediaEntity("c2", "m2", sortKey = 30, lastSeenRunId = 1),
+                CollectionMediaEntity("c3", "m2", sortKey = 30, lastSeenRunId = 1), // a collection this run did not list
+            ),
+        )
+        suspend fun scopesOfM2() = listOf(ALL_SAVED_ID, "c1", "c2", "c3").filter { collections.memberships(it, listOf("m2")).isNotEmpty() }
+        assertEquals(listOf(ALL_SAVED_ID, "c1", "c2", "c3"), scopesOfM2())
+
+        // m2 is now only in c2, as far as the response says; this run listed c1 and c2.
+        collections.deleteRealMembershipsExcept("m2", keep = listOf("c2"), known = listOf("c1", "c2"))
+
+        assertEquals(listOf(ALL_SAVED_ID, "c2", "c3"), scopesOfM2(), "c1 went; c2 stays; c3 is not known so it is left alone")
+    }
+
+    @Test
+    fun deleteRealMembershipsExceptNeverTouchesAllSavedEvenIfListedAsKnown() = runTest {
+        givenLibrary()
+        collections.deleteRealMembershipsExcept("m1", keep = emptyList(), known = listOf(ALL_SAVED_ID, "c1", "c2"))
+        assertEquals(listOf("m1"), collections.memberships(ALL_SAVED_ID, listOf("m1")).map { it.mediaPk })
+        assertEquals(emptyList(), collections.memberships("c2", listOf("m1")), "a known real collection is rewritten")
+    }
+
+    @Test
+    fun deleteRealMembershipsExceptWithNothingKnownDeletesNothing() = runTest {
+        givenLibrary()
+        collections.deleteRealMembershipsExcept("m2", keep = emptyList(), known = emptyList())
+        assertEquals(listOf("m2"), collections.memberships("c1", listOf("m2")).map { it.mediaPk })
+    }
+
+    @Test
     fun deleteLibraryKeepsTheRequestLog() = runTest {
         givenLibrary()
         db.apiRequestDao().insert(ApiRequestEntity(at = 1_000))

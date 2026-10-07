@@ -25,16 +25,16 @@
 - [ ] M3 Adapter spike on the phone: seven questions answered, scrubbed fixtures, real parsers
   - [x] Gate: the pre-commit hook catches JSON/Netscape cookie dumps, `csrftoken` and `++` diff lines before scrubbed fixtures are committed (with the spec-10 fixture guard test)
   - [ ] Gate: offset-cursor stability
-  - [ ] Gate (M3/M4, strategy A): limit `deleteRealMembershipsExcept` to `collectionId IN (:known)`; an empty `collections()` list while live collections exist means `STOPPED_SHAPE`
+  - [x] Gate (M3/M4, strategy A): limit `deleteRealMembershipsExcept` to `collectionId IN (:known)`; an empty `collections()` list while live collections exist means `STOPPED_SHAPE`
 - [ ] M4 Real sync: quick and full, resume, budgets, cooldowns, challenge hard stop, thumbnails
   - [x] Gate: truncated-resampling gaps instead of clamping (today about 18 % of gaps are exactly 4,000 ms)
   - [x] Gate: seed `lastRequestEndedAt` from `RequestLog`
   - [x] Gate: `Backend.Real` reuses `AppContainer.instagramPacer`, with a guard test, and the Sync screen shows that Pacer
-  - [ ] Gate: a proportional reconcile guard (refuse to mark more than X % of All Saved removed in one run)
+  - [x] Gate: a proportional reconcile guard (P7: a FULL All Saved reconcile that would remove at least 20 items and more than half of the live ones is refused as `STOPPED_SHAPE`)
   - [ ] Gate: engine signals carry the session epoch
   - [ ] Gate: logout stops a running sync
   - [ ] Gate: a "session OK" signal from a sync's `currentUser`
-  - [ ] Gate: CDN `RateLimited`/timeout handling inside the thumbnail try
+  - [x] Gate: CDN `RateLimited`/timeout handling inside the thumbnail try (a 429 stops thumbnail fetches for the rest of the run; a download timeout is one failed thumbnail)
   - [x] Gate: 421 coalesced-connection re-send. API client: one host per client (P6, pinned in Task 3). CDN client (many hosts, so P6 doesn't cover it): `HttpClientFactory.createCdn` turns a 421 into an IOException, strips a 503 `Retry-After`, follows no redirects and does no connection retries, so every download is one request (pinned by MockWebServer tests)
   - [ ] Gate: redact request lines if a challenge URL is ever requested through OkHttp
 - [ ] M5 Video: on-demand playback, link refresh, `pk`-keyed cache

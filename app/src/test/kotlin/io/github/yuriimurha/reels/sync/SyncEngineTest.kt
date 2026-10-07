@@ -5,12 +5,14 @@ import io.github.yuriimurha.reels.data.db.ALL_SAVED_ID
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.data.media.CdnRateLimited
 import io.github.yuriimurha.reels.data.media.MediaFetcher
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.Account
 import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.Page
+import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import io.github.yuriimurha.reels.instagram.fake.FakeFailures
 import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
@@ -26,9 +28,12 @@ import io.github.yuriimurha.reels.testutil.loadAll
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -546,6 +551,224 @@ class SyncEngineTest {
         val run = runSync(engine(client), SyncMode.FULL)
         assertEquals(SyncStatus.DONE, run.status)
         assertEquals(emptyList(), pks(ALL_SAVED_ID))
+    }
+
+    // ---- M4 safety gates (Task 8) ----
+
+    /** A response that lost its `items`: every page of collections is empty. */
+    private class NoCollections(private val delegate: InstagramClient) : InstagramClient by delegate {
+        override suspend fun collections(cursor: String?): Page<RemoteCollection> = Page(emptyList(), null)
+    }
+
+    /** The collection list of a run in which [hiddenId] is missing, while saved items still say they belong to it. */
+    private class WithoutCollection(private val delegate: InstagramClient, private val hiddenId: String) : InstagramClient by delegate {
+        override suspend fun collections(cursor: String?): Page<RemoteCollection> {
+            val page = delegate.collections(cursor)
+            return page.copy(items = page.items.filter { it.id != hiddenId })
+        }
+    }
+
+    private fun removedCollectionCount(): Int =
+        db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM collection WHERE removedAt IS NOT NULL")
+            .use { cursor -> cursor.moveToFirst(); cursor.getInt(0) }
+
+    @Test
+    fun emptyCollectionListWithLiveCollectionsStopsWithoutMarkingRemoved() = runTest {
+        val fake = smallClient()
+        runSync(engine(fake), SyncMode.QUICK)
+        val before = db.collectionDao().liveCollections().first().map { it.id }
+        assertEquals(listOf("c1", "c2", "c3"), before.sorted(), "precondition: the first run listed three collections")
+        assertEquals(0, removedCollectionCount())
+        val callsBefore = fake.calls.size
+
+        val run = runSync(engine(NoCollections(fake)), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, run.status)
+        assertEquals("Adapter needs repair: empty collection list", run.lastError)
+        assertEquals(before, db.collectionDao().liveCollections().first().map { it.id })
+        assertEquals(0, removedCollectionCount(), "no collection, All Saved included, was marked removed")
+        assertEquals(listOf("currentUser"), fake.calls.drop(callsBefore), "the run stopped before walking anything")
+    }
+
+    @Test
+    fun anAccountWithoutCollectionsIsNotABrokenListing() = runTest {
+        val client = FakeInstagramClient(FakeLibrary(itemCount = 30, collectionCount = 0))
+        val engine = engine(client)
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status, "still no collections, still not an error")
+        assertEquals(client.library.allSaved().map { it.pk }, pks(ALL_SAVED_ID))
+    }
+
+    @Test
+    fun strategyAOnlyRewritesKnownCollections() = runTest {
+        val fake = smallClient()
+        val target = fake.library.allSaved().first().pk
+        fake.library.setCollections(target, setOf("c1", "c3"))
+        runSync(engine(fake), SyncMode.QUICK)
+        assertTrue(target in pks("c1") && target in pks("c3"), "precondition")
+        // The item moves from c1 to c2 and stays in c3, but this run's list does not mention c3.
+        fake.library.setCollections(target, setOf("c2", "c3"))
+
+        val run = runSync(engine(WithoutCollection(fake, "c3")), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertFalse(target in pks("c1"), "c1 is listed, so the rewrite removes the item from it")
+        assertTrue(target in pks("c2"), "and adds it to c2")
+        assertTrue(target in pks("c3"), "c3 was not in this run's list: its memberships are not this run's to rewrite")
+    }
+
+    private class UnsavedLibrary(val everyone: List<String>, val gone: List<String>, val run: SyncRunEntity)
+
+    /** A library of [total] items, synced; then [unsaved] of them are unsaved on Instagram and a FULL sync runs. */
+    private suspend fun TestScope.fullSyncAfterUnsaving(total: Int, unsaved: Int): UnsavedLibrary {
+        val client = FakeInstagramClient(FakeLibrary(seed = 11, itemCount = total, collectionCount = 2))
+        val engine = engine(client)
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
+        val everyone = client.library.allSaved().map { it.pk }
+        assertEquals(total, everyone.size)
+        assertEquals(total, pks(ALL_SAVED_ID).size)
+        val gone = everyone.shuffled(Random(5)).take(unsaved)
+        gone.forEach(client.library::unsave)
+        return UnsavedLibrary(everyone, gone, runSync(engine, SyncMode.FULL))
+    }
+
+    private suspend fun removedAmong(pks: List<String>) = db.mediaDao().byPks(pks).filter { it.removedAt != null }.map { it.pk }
+
+    @Test
+    fun reconcileGuardRefusesMassRemoval() = runTest {
+        val library = fullSyncAfterUnsaving(total = 100, unsaved = 70)
+        val run = library.run
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, run.status)
+        assertTrue("would remove 70 of 100" in run.lastError.orEmpty(), "lastError: ${run.lastError}")
+        assertEquals("Adapter needs repair: full sync would remove 70 of 100 items", run.lastError)
+        assertEquals(emptyList(), removedAmong(library.everyone), "every item has removedAt == null")
+        assertEquals(library.everyone.toSet(), pks(ALL_SAVED_ID).toSet(), "and every item is still in All Saved")
+
+        // The page that reached the end rolls back with its cursor, so the run can only ever resume from the page before.
+        val cursor = checkNotNull(db.syncDao().cursor(run.id, ALL_SAVED_ID))
+        assertFalse(cursor.done)
+        assertEquals("o:20", cursor.nextCursor)
+        val lastPage = library.everyone.filter { it !in library.gone }.drop(20)
+        assertEquals(10, lastPage.size)
+        assertTrue(
+            db.collectionDao().memberships(ALL_SAVED_ID, lastPage).all { it.lastSeenRunId != run.id },
+            "the rolled-back page left no membership stamped with this run",
+        )
+    }
+
+    @Test
+    fun reconcileGuardLetsASmallRemovalThrough() = runTest {
+        val library = fullSyncAfterUnsaving(total = 100, unsaved = 19)
+
+        assertEquals(SyncStatus.DONE, library.run.status)
+        assertEquals(library.gone.toSet(), removedAmong(library.everyone).toSet())
+        assertEquals(81, pks(ALL_SAVED_ID).size)
+    }
+
+    @Test
+    fun reconcileGuardRefusesRemovingSixtyOfAHundred() = runTest {
+        val library = fullSyncAfterUnsaving(total = 100, unsaved = 60)
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, library.run.status)
+        assertEquals("Adapter needs repair: full sync would remove 60 of 100 items", library.run.lastError)
+        assertEquals(emptyList(), removedAmong(library.everyone))
+    }
+
+    /** At least 20 AND more than half: 19 of 25 (too few), 20 of 40 (exactly half), 50 of 100 (exactly half) pass. */
+    @Test
+    fun reconcileGuardBoundaries() = runTest {
+        for ((total, unsaved, refused) in listOf(
+            Triple(25, 19, false),
+            Triple(30, 20, true),
+            Triple(40, 20, false),
+            Triple(40, 21, true),
+            Triple(100, 50, false),
+            Triple(100, 51, true),
+        )) {
+            db.deleteLibrary()
+            val library = fullSyncAfterUnsaving(total, unsaved)
+            val expected = if (refused) SyncStatus.STOPPED_SHAPE else SyncStatus.DONE
+            assertEquals(expected, library.run.status, "removing $unsaved of $total")
+            assertEquals(
+                if (refused) emptyList() else library.gone.sorted(),
+                removedAmong(library.everyone).sorted(),
+                "removing $unsaved of $total",
+            )
+        }
+    }
+
+    @Test
+    fun cdnRateLimitStopsThumbnailFetchesForTheRun() = runTest {
+        val client = smallClient() // 50 items, so three pages
+        val fetches = AtomicInteger()
+        val fetchesWhenAPageWasRequested = mutableListOf<Int>()
+        val spy = object : InstagramClient by client {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                fetchesWhenAPageWasRequested += fetches.get()
+                return client.savedMedia(collectionId, cursor)
+            }
+        }
+        val limited = MediaFetcher {
+            val number = fetches.incrementAndGet()
+            delay(10) // the answer takes a while, so the downloads started before the 429 arrives are in flight when it does
+            if (number == 3) throw CdnRateLimited()
+            byteArrayOf(1)
+        }
+
+        val run = runSync(engine(spy, mediaFetcher = limited), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertTrue(fetches.get() >= 3, "the third fetch is the one that got the 429")
+        assertTrue(fetchesWhenAPageWasRequested.first() == 0, "nothing was fetched before the first page came in")
+        assertTrue(
+            fetches.get() <= PacingPolicy.Fast.cdnConcurrency,
+            "after the 429 only the downloads already in flight may still happen, not ${fetches.get()} fetches",
+        )
+        assertEquals(3, fetchesWhenAPageWasRequested.size)
+        assertEquals(
+            listOf(fetches.get(), fetches.get()),
+            fetchesWhenAPageWasRequested.drop(1),
+            "every later page made no fetch at all",
+        )
+        assertEquals(1, run.failures, "only the download that really failed counts, not the ones that were never tried")
+        assertEquals(fetches.get() - 1, run.thumbsCached)
+        val withoutThumbnail = db.mediaDao().byPks(client.library.allSaved().map { it.pk }).count { it.thumbPath == null }
+        assertEquals(50 - run.thumbsCached, withoutThumbnail, "the rest simply have no thumbnail yet")
+        assertEquals(50, run.newItems, "the items themselves were all imported")
+    }
+
+    @Test
+    fun theNextFullSyncFetchesTheThumbnailsACdnRateLimitSkipped() = runTest {
+        val client = smallClient()
+        val limited = MediaFetcher { throw CdnRateLimited() }
+        val first = runSync(engine(client, mediaFetcher = limited), SyncMode.QUICK)
+        assertEquals(SyncStatus.DONE, first.status)
+        assertEquals(0, first.thumbsCached)
+
+        val second = runSync(engine(client), SyncMode.FULL)
+
+        assertEquals(SyncStatus.DONE, second.status)
+        assertEquals(0, second.failures)
+        assertTrue(db.mediaDao().byPks(client.library.allSaved().map { it.pk }).all { it.thumbPath != null })
+    }
+
+    @Test
+    fun downloadTimeoutDoesNotCancelTheRun() = runTest {
+        val client = smallClient()
+        val slowPk = client.library.allSaved()[7].pk
+        val timingOut = MediaFetcher { url ->
+            if (url.endsWith("/$slowPk")) withTimeout(1) { delay(10) }
+            byteArrayOf(1)
+        }
+
+        val run = runSync(engine(client, mediaFetcher = timingOut), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(1, run.failures)
+        assertEquals(49, run.thumbsCached)
+        assertNull(db.mediaDao().byPks(listOf(slowPk)).single().thumbPath)
     }
 
     private class ThrowingSignals : SessionSignals {
