@@ -6,6 +6,8 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -45,6 +47,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -133,7 +136,7 @@ class DeveloperSectionTest {
     }
 
     /** Each restart as it happened, with the stored choice at that moment: the new process must read the NEW choice. */
-    private val restarts = mutableListOf<Boolean>()
+    private val restarts = CopyOnWriteArrayList<Boolean>() // the switch runs off the main thread
 
     private fun showSyncScreen(usesFake: Boolean, runStatus: SyncStatus?) {
         if (runStatus != null) {
@@ -149,7 +152,7 @@ class DeveloperSectionTest {
             LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
             pacer,
             SessionRepository(RecordingCookieStore(), probe, pacer, settings),
-            mockSwitch = MockModeSwitch(usesFake, choice) { restarts += choice.useFake },
+            mockSwitch = MockModeSwitch(usesFake, choice, cancelSync = {}) { restarts += choice.useFake },
         )
         compose.setContent {
             ReelsTheme { SyncScreen(onBack = {}, onOpenLogin = { _, _ -> }, onOpenLab = {}, viewModel = viewModel) }
@@ -173,11 +176,23 @@ class DeveloperSectionTest {
         assertTrue(choice.useFake, "the stored choice is untouched")
     }
 
+    /** The switch stays off until the latest run has been read (R67), so tests wait for it to come on. */
+    private fun awaitSwitchEnabled() = compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitForIdle()
+        compose.onAllNodes(hasText("Mock mode (fake library)") and isEnabled()).fetchSemanticsNodes().isNotEmpty()
+    }
+
+    private fun awaitRestart() = compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitForIdle()
+        restarts.isNotEmpty()
+    }
+
     @Test
     fun mockSwitchOnTheSyncScreenStoresTheChoiceAndRestartsOnce() {
         showSyncScreen(usesFake = true, runStatus = null)
-        compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsOn().assertIsEnabled().performClick()
-        compose.waitForIdle()
+        awaitSwitchEnabled()
+        compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsOn().performClick()
+        awaitRestart()
         assertEquals(listOf(false), restarts, "one restart, after the new choice was stored")
         assertFalse(choice.useFake)
     }
@@ -185,9 +200,10 @@ class DeveloperSectionTest {
     @Test
     fun theSwitchShowsTheModeTheProcessRunsIn() {
         showSyncScreen(usesFake = false, runStatus = null)
+        awaitSwitchEnabled()
         // Off means real: the switch reads off, and one tap asks for the fake library.
         compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsOff().performClick()
-        compose.waitForIdle()
+        awaitRestart()
         assertEquals(listOf(true), restarts)
     }
 
@@ -195,6 +211,6 @@ class DeveloperSectionTest {
     fun aFinishedRunDoesNotDisableTheSwitch() {
         showSyncScreen(usesFake = true, runStatus = SyncStatus.DONE)
         awaitText("Last run")
-        compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsEnabled()
+        awaitSwitchEnabled()
     }
 }

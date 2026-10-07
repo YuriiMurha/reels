@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import android.webkit.WebSettings
 import io.github.yuriimurha.reels.BuildConfig
+import io.github.yuriimurha.reels.data.db.LegacyRequestLogCopy
 import io.github.yuriimurha.reels.data.db.ReelsDatabase
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
@@ -22,6 +23,7 @@ import io.github.yuriimurha.reels.session.SessionRepository
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.SyncController
 import io.github.yuriimurha.reels.sync.SyncEngine
+import io.github.yuriimurha.reels.sync.SyncWorker
 import io.github.yuriimurha.reels.sync.WorkManagerSyncScheduler
 import io.github.yuriimurha.reels.sync.pacing.DataStoreCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.Pacer
@@ -35,23 +37,29 @@ class AppContainer(context: Context) {
     val settings: SettingsStore by lazy { SettingsStore.create(context) }
 
     /** Which library this process runs on (P1). Changing it takes effect on the next start. */
-    val backendChoice = BackendChoice(context.getSharedPreferences(BackendChoice.PREFS, Context.MODE_PRIVATE), BuildConfig.DEBUG)
+    private val backendPrefs = context.getSharedPreferences(BackendChoice.PREFS, Context.MODE_PRIVATE)
+    val backendChoice = BackendChoice(backendPrefs, BuildConfig.DEBUG)
 
     /** Read once per process, so the library, its thumbnails and the backend can never disagree within one run. */
     val usesFake: Boolean = backendChoice.useFake
 
     /**
      * `library.db`: the real library, and the `api_request` log behind the real 24 h budget even in Mock mode, so session
-     * checks and lab calls made in Mock mode still count (P2).
+     * checks and lab calls made in Mock mode still count (P2). The first time it is opened, the last 24 h of requests are
+     * copied out of the old `reels.db`, where that log lived before (R68).
      */
-    val requestLogDb: ReelsDatabase by lazy { ReelsDatabase.build(context, "library.db") }
+    val requestLogDb: ReelsDatabase by lazy { ReelsDatabase.build(context, "library.db", LegacyRequestLogCopy(context, backendPrefs)) }
 
     /** The library the screens and the sync engine use: the fake one keeps `reels.db`, the real one is [requestLogDb]. */
     val db: ReelsDatabase by lazy { if (usesFake) ReelsDatabase.build(context, "reels.db") else requestLogDb }
 
     val thumbnails: ThumbnailStore by lazy { ThumbnailStore(File(context.filesDir, if (usesFake) "thumbs" else "library-thumbs")) }
     val library: LibraryRepository by lazy { LibraryRepository(db, thumbnails) }
-    val syncController: SyncController by lazy { SyncController(db, WorkManagerSyncScheduler(context)) }
+
+    /** Queued work names a run id only, so it also carries which library it belongs to (R67). */
+    private val syncScheduler: WorkManagerSyncScheduler by lazy { WorkManagerSyncScheduler(context, SyncWorker.kindOf(usesFake)) }
+
+    val syncController: SyncController by lazy { SyncController(db, syncScheduler) }
 
     /** M5 replaces this with the real resolver (link refresh on the interactive lane, pk-keyed cache). */
     val videoResolver: VideoSourceResolver by lazy { FakeVideoSourceResolver(context.packageName) }
@@ -87,7 +95,8 @@ class AppContainer(context: Context) {
     }
 
     /** The Developer section's Mock mode switch; [restart] is [ProcessRestart.restart] in the app. */
-    fun mockModeSwitch(restart: () -> Unit) = MockModeSwitch(usesFake, backendChoice, restart)
+    fun mockModeSwitch(restart: () -> Unit) =
+        MockModeSwitch(usesFake, backendChoice, cancelSync = { syncScheduler.cancelAndAwait() }, restart = restart)
 
     /** The debug Adapter lab. Built without the HTTP client: that is only built when a lab call reaches the network. */
     val adapterLab: AdapterLab by lazy { AdapterLab({ instagramHttp }, cookieStore) }

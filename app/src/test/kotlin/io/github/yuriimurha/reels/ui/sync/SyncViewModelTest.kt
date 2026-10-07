@@ -99,6 +99,7 @@ class SyncViewModelTest {
             session,
             mockSwitch = mockSwitch,
             now = clock,
+            io = StandardTestDispatcher(testScheduler),
         )
     }
 
@@ -308,10 +309,13 @@ class SyncViewModelTest {
         assertFalse(session.hasSessionCookies())
     }
 
-    private fun mockSwitch(usesFake: Boolean, restarts: MutableList<Boolean>): MockModeSwitch {
+    /** Every step the switch took, in order, with the stored mode at that moment. */
+    private val switchEvents = mutableListOf<String>()
+
+    private fun mockSwitch(usesFake: Boolean): MockModeSwitch {
         val prefs = ApplicationProvider.getApplicationContext<Context>().getSharedPreferences(BackendChoice.PREFS, Context.MODE_PRIVATE)
         val choice = BackendChoice(prefs, debugBuild = true)
-        return MockModeSwitch(usesFake, choice) { restarts += choice.useFake }
+        return MockModeSwitch(usesFake, choice, cancelSync = { switchEvents += "cancel" }) { switchEvents += "restart(useFake=${choice.useFake})" }
     }
 
     @Test
@@ -323,29 +327,53 @@ class SyncViewModelTest {
 
     @Test
     fun theMockModeIsTheOneTheProcessRunsIn() = runTest {
-        assertEquals(true, viewModel(mockSwitch(usesFake = true, mutableListOf())).mockMode)
-        assertEquals(false, viewModel(mockSwitch(usesFake = false, mutableListOf())).mockMode)
+        assertEquals(true, viewModel(mockSwitch(usesFake = true)).mockMode)
+        assertEquals(false, viewModel(mockSwitch(usesFake = false)).mockMode)
     }
 
+    /** R67 (b): until the latest run has been read, "no run" can't be told from "not loaded yet", so the switch is off. */
     @Test
-    fun changingTheMockModeStoresItAndRestartsOnce() = runTest {
-        val restarts = mutableListOf<Boolean>()
-        val viewModel = viewModel(mockSwitch(usesFake = true, restarts))
+    fun theMockSwitchIsDisabledUntilTheLatestRunHasLoaded() = runTest {
+        val viewModel = viewModel(mockSwitch(usesFake = true))
+        assertFalse(viewModel.mockSwitchEnabled.value, "nothing has been read yet")
         viewModel.setMockMode(false)
-        assertEquals(listOf(false), restarts)
+        advanceUntilIdle()
+        assertEquals(emptyList(), switchEvents, "refused while the run is loading")
+
+        backgroundScope.launch { viewModel.mockSwitchEnabled.collect {} }
+        assertTrue(viewModel.mockSwitchEnabled.first { it }, "loaded, and there is no run: enabled")
+        viewModel.setMockMode(false)
+        advanceUntilIdle()
+        assertEquals(listOf("cancel", "restart(useFake=false)"), switchEvents, "the queued sync is cancelled, then the mode stored, then the restart")
     }
 
     @Test
     fun theMockModeIsNotChangedWhileARunIsRunning() = runTest {
-        val restarts = mutableListOf<Boolean>()
-        val viewModel = viewModel(mockSwitch(usesFake = true, restarts))
-        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START))
-        backgroundScope.launch { viewModel.run.collect {} }
-        viewModel.run.first { it != null }
+        val viewModel = viewModel(mockSwitch(usesFake = true))
+        val id = db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = START))
+        backgroundScope.launch { viewModel.mockSwitchEnabled.collect {} }
+        viewModel.mockSwitchEnabled.first { it }
+
+        db.syncDao().updateRun(db.syncDao().run(id)!!.copy(status = SyncStatus.RUNNING))
+        viewModel.mockSwitchEnabled.first { !it }
+        viewModel.setMockMode(false)
+        advanceUntilIdle()
+
+        assertEquals(emptyList(), switchEvents, "a restart would kill the run's process: the screen disables the switch and so does the ViewModel")
+    }
+
+    /** A double tap is one change: the second is ignored while the first is working. */
+    @Test
+    fun aDoubleTapOnTheMockSwitchChangesTheModeOnce() = runTest {
+        val viewModel = viewModel(mockSwitch(usesFake = true))
+        backgroundScope.launch { viewModel.mockSwitchEnabled.collect {} }
+        viewModel.mockSwitchEnabled.first { it }
 
         viewModel.setMockMode(false)
+        viewModel.setMockMode(false)
+        advanceUntilIdle()
 
-        assertEquals(emptyList(), restarts, "a restart would kill the run's process: the screen disables the switch and so does the ViewModel")
+        assertEquals(listOf("cancel", "restart(useFake=false)"), switchEvents)
     }
 
     private class FakeProbe : SessionProbe {

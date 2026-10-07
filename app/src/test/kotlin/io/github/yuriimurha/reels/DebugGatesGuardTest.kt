@@ -1,5 +1,7 @@
 package io.github.yuriimurha.reels
 
+import io.github.yuriimurha.reels.testutil.KotlinSource.code
+import io.github.yuriimurha.reels.testutil.KotlinSource.skeleton
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -49,6 +51,28 @@ class DebugGatesGuardTest {
         )
     }
 
+    // --- The scanner itself: what it must and must not mistake for a comment ---
+
+    /** A `//` inside a string literal is text, not a comment: it must not swallow the brace that follows it. */
+    @Test
+    fun aUrlInAStringDoesNotHideTheBraceThatClosesTheGate() {
+        val beforeCall = "if (BuildConfig.DEBUG) {\n    Text(\"https://x\") }\nrun {\n"
+        assertFalse(isInsideGate(beforeCall), "the gate's block was closed on the first line, so the call is outside it")
+    }
+
+    @Test
+    fun aRealCommentCannotHideOrFakeABrace() {
+        assertTrue(isInsideGate("if (BuildConfig.DEBUG) {\n    // } closes nothing\n    /* } */\n"))
+        assertFalse(isInsideGate("run {\n    // if (BuildConfig.DEBUG) { in a comment only\n"))
+    }
+
+    @Test
+    fun anEscapedQuoteRawStringOrBraceInAStringDoesNotConfuseIt() {
+        assertTrue(isInsideGate("if (BuildConfig.DEBUG) {\n    val a = \"say \\\"//\\\" }\"\n"))
+        assertTrue(isInsideGate("if (BuildConfig.DEBUG) {\n    val b = \"\"\"https://x }\"\"\"\n"))
+        assertFalse(isInsideGate("if (BuildConfig.DEBUG) {\n}\nval c = \"{\"\n"))
+    }
+
     // The gate is the `{` that directly follows `if (BuildConfig.DEBUG)`. Walking back from the call, a `}` means we are
     // leaving a sibling block, so its `{` is skipped; a `{` at depth 0 opens a block that encloses the call, and the call
     // is gated when one of those blocks is the gate. An `else` branch of the gate does not count: its `{` follows `else`.
@@ -66,7 +90,7 @@ class DebugGatesGuardTest {
     }
 
     private fun isInsideGate(textBeforeCall: String): Boolean {
-        val before = code(textBeforeCall)
+        val before = skeleton(textBeforeCall)
         var closed = 0
         for (i in before.indices.reversed()) {
             when (before[i]) {
@@ -80,10 +104,6 @@ class DebugGatesGuardTest {
         }
         return false
     }
-
-    /** Comments blanked out (same length), so a brace or a gate named in a comment can't count. */
-    private fun code(text: String): String =
-        text.replace(Regex("""/\*[\s\S]*?\*/|//[^\n]*""")) { match -> match.value.map { if (it == '\n') '\n' else ' ' }.joinToString("") }
 
     private class Source(val path: String, val text: String)
 

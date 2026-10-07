@@ -13,6 +13,8 @@ import io.github.yuriimurha.reels.session.userMessage
 import io.github.yuriimurha.reels.sync.SyncController
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacerStatus
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,6 +60,8 @@ class SyncViewModel(
     /** The Developer section's Mock mode switch (debug builds); null offers none. */
     private val mockSwitch: MockModeSwitch? = null,
     private val now: () -> Long = System::currentTimeMillis,
+    /** Where the Mock mode switch works: it waits for WorkManager and writes a file. */
+    private val io: CoroutineDispatcher = Dispatchers.IO,
 ) : ViewModel() {
     private val sharing = SharingStarted.WhileSubscribed(5_000)
 
@@ -104,10 +108,27 @@ class SyncViewModel(
     /** The mode this process runs in (true: the fake library), or null when there is no switch. */
     val mockMode: Boolean? = mockSwitch?.usesFake
 
-    /** Stores [useFake] and restarts the app. Refused while a run is RUNNING: a restart would kill its process. */
+    /** The latest run once it has been READ: [run] alone can't tell "no run" from "not loaded yet" (both are null). */
+    private class LoadedRun(val run: SyncRunEntity?)
+
+    private val loadedRun: StateFlow<LoadedRun?> = controller.latestRun.map(::LoadedRun).stateIn(viewModelScope, sharing, null)
+
+    /**
+     * Off until the latest run has loaded, and while it is RUNNING. A restart then could leave WorkManager holding a run
+     * of this library for a process that runs the other one (R67), and a run the screen hasn't seen yet may be one.
+     */
+    val mockSwitchEnabled: StateFlow<Boolean> =
+        loadedRun.map { it != null && it.run?.status != SyncStatus.RUNNING }.stateIn(viewModelScope, sharing, false)
+
+    private var mockChange: Job? = null
+
+    /** Changes the mode and restarts the app. Refused while the run is loading or RUNNING, and while a change is under way. */
     fun setMockMode(useFake: Boolean) {
-        if (run.value?.status == SyncStatus.RUNNING) return
-        mockSwitch?.change(useFake)
+        val switch = mockSwitch ?: return
+        val loaded = loadedRun.value ?: return
+        if (loaded.run?.status == SyncStatus.RUNNING) return
+        if (mockChange?.isActive == true) return
+        mockChange = viewModelScope.launch(io) { switch.change(useFake) }
     }
 
     /** The stored session state; null until it has been read (the screen offers no session button before that). */

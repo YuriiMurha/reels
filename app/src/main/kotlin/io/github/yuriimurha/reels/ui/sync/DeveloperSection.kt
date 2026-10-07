@@ -16,8 +16,10 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 
 /**
- * Debug builds only (the Sync screen decides): developer tools. [mockMode] is null while nothing wires the Mock mode
- * switch, which hides it; otherwise the whole row toggles it. [labEnabled] gates the Adapter lab button.
+ * Debug builds only (the Sync screen decides): developer tools. [mockMode] is the mode this process runs in (true: the
+ * fake library), or null when there is no Mock mode switch, which hides the row; otherwise the whole row toggles it, and
+ * [mockSwitchEnabled] is false while a run is RUNNING or the latest run has not loaded yet. [labEnabled] gates the Adapter
+ * lab button.
  */
 @Composable
 fun DeveloperSection(

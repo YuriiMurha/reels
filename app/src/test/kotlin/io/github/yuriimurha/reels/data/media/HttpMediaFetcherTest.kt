@@ -140,12 +140,48 @@ class HttpMediaFetcherTest {
     }
 
     @Test
-    fun theCdnClientHasNoJarNoRetriesAndTheAgreedTimeouts() {
+    fun theCdnClientHasNoJarNoRetriesNoRedirectsAndTheAgreedTimeouts() {
         assertSame(CookieJar.NO_COOKIES, cdn.cookieJar, "no cookie jar at all")
         assertFalse(cdn.retryOnConnectionFailure, "OkHttp must not silently re-send a download")
         assertEquals(15_000, cdn.connectTimeoutMillis)
         assertEquals(30_000, cdn.readTimeoutMillis)
+        assertFalse(cdn.followRedirects, "a redirect is a failed download, never a second request")
         assertFalse(cdn.followSslRedirects, "an https URL must not be bounced to cleartext http")
-        assertTrue(cdn.followRedirects, "an https redirect (a CDN moving a file) is followed")
+    }
+
+    // --- R66: OkHttp's own follow-ups are not covered by retryOnConnectionFailure(false) ---
+
+    /** OkHttp re-sends after a 503 that says "Retry-After: 0" by itself. The 200 queued behind it must stay unused. */
+    @Test
+    fun aRetryAfterZero503IsOneRequestAndAnIOException() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(503).addHeader("Retry-After", "0").build())
+        respond(200, bytes)
+
+        val failure = assertFailsWith<IOException> { fetcher().fetch(url()) }
+
+        assertFalse(failure is CdnRateLimited)
+        assertEquals(1, server.requestCount, "one download, one request: nothing is re-sent behind the pacer's back")
+    }
+
+    @Test
+    fun aRedirectIsAFailedDownloadAndItsTargetIsNeverRequested() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(302).addHeader("Location", server.url("/elsewhere").toString()).build())
+        respond(200, bytes)
+
+        val failure = assertFailsWith<IOException> { fetcher().fetch(url("/v/t51/1.jpg")) }
+
+        assertEquals("CDN returned HTTP 302", failure.message, "the code only: never the URL")
+        assertEquals(1, server.requestCount)
+        assertEquals("/v/t51/1.jpg", server.takeRequest().url.encodedPath, "the redirect target was never requested")
+    }
+
+    @Test
+    fun aMisdirected421IsOneRequestAndAnIOException() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(421).build())
+        respond(200, bytes)
+
+        assertFailsWith<IOException> { fetcher().fetch(url()) }
+
+        assertEquals(1, server.requestCount)
     }
 }

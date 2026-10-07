@@ -123,19 +123,6 @@ class BackendSelectionTest {
         assertFalse(File(context.filesDir, "thumbs/p2.jpg").exists())
     }
 
-    @Test
-    fun changingTheMockModeStoresTheChoiceAndThenRestarts() {
-        val choice = BackendChoice(prefs(), debugBuild = true)
-        val restarts = mutableListOf<Boolean>()
-        val switch = MockModeSwitch(usesFake = true, choice = choice) { restarts += choice.useFake }
-
-        assertTrue(switch.usesFake)
-        switch.change(false)
-
-        assertEquals(listOf(false), restarts, "the restart happens once, and only after the new choice is stored")
-        assertFalse(prefs().getBoolean(BackendChoice.KEY_USE_FAKE, true))
-    }
-
     private fun lazyIsInitialised(container: AppContainer, property: String): Boolean =
         (AppContainer::class.java.getDeclaredField("$property\$delegate").apply { isAccessible = true }.get(container) as Lazy<*>)
             .isInitialized()

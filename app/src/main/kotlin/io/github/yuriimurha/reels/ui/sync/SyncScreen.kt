@@ -83,6 +83,7 @@ fun SyncScreen(
     val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
     val sessionMessage by viewModel.sessionMessage.collectAsStateWithLifecycle()
     val pasteError by viewModel.pasteError.collectAsStateWithLifecycle()
+    val mockSwitchEnabled by viewModel.mockSwitchEnabled.collectAsStateWithLifecycle()
     var pasting by remember { mutableStateOf(false) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -134,7 +135,7 @@ fun SyncScreen(
                 if (BuildConfig.DEBUG) {
                     DeveloperSection(
                         mockMode = viewModel.mockMode,
-                        mockSwitchEnabled = !ui.running,
+                        mockSwitchEnabled = mockSwitchEnabled,
                         onMockModeChange = viewModel::setMockMode,
                         onOpenLab = onOpenLab,
                         labEnabled = sessionState is SessionState.Valid,

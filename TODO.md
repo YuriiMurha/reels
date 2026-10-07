@@ -35,7 +35,7 @@
   - [ ] Gate: logout stops a running sync
   - [ ] Gate: a "session OK" signal from a sync's `currentUser`
   - [ ] Gate: CDN `RateLimited`/timeout handling inside the thumbnail try
-  - [x] Gate: 421 coalesced-connection re-send (P6: one host per client, pinned in Task 3; the CDN has its own cookieless client)
+  - [x] Gate: 421 coalesced-connection re-send. API client: one host per client (P6, pinned in Task 3). CDN client (many hosts, so P6 doesn't cover it): `HttpClientFactory.createCdn` turns a 421 into an IOException, strips a 503 `Retry-After`, follows no redirects and does no connection retries, so every download is one request (pinned by MockWebServer tests)
   - [ ] Gate: redact request lines if a challenge URL is ever requested through OkHttp
 - [ ] M5 Video: on-demand playback, link refresh, `pk`-keyed cache
   - [ ] Gate: `mediaInfo` needs a not-found outcome

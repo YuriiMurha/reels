@@ -70,11 +70,15 @@ library.
    ```
 
 `./gradlew installDebug` installs to **every** connected device. If an emulator is running too, stop it, or
-install to the phone only by giving its serial from `adb devices`:
+install to the phone only. `adb -d` means "the one device attached by USB", so it skips an emulator, and its serial
+can be passed to Gradle:
 
 ```bash
-ANDROID_SERIAL=<serial from adb devices> ./gradlew installDebug
+ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installDebug
 ```
+
+(With Wireless debugging the phone is not a USB device, so `-d` finds nothing: stop the emulator and run plain
+`./gradlew installDebug`.)
 
 Never log into Instagram on an emulator: the account should only ever see your phone.
 
@@ -101,8 +105,8 @@ and never contacts Instagram. A release build has no such switch and always uses
 - **Where:** Sync (status chip, top right), scroll to **Developer**, **Mock mode (fake library)**. It is **on by
   default**.
 - **For real sync, on the phone:** switch it **off**. The app restarts on the real library, which is empty until its
-  first sync. Log in (section 4) and sync from there. The switch is disabled while a sync is running. Never turn it off
-  on an emulator.
+  first sync. Log in (section 4) and sync from there. The switch is disabled while a sync is running (and for a moment
+  after the screen opens, until it has read the latest run). Never turn it off on an emulator.
 - **Nothing is lost by switching back and forth.** The fake library and the real one are kept separately (fake:
   `reels.db`, real: `library.db`; their thumbnails too). Only the request log behind the 600-per-24-hour budget is
   shared: session checks and lab calls count against it even in Mock mode.
@@ -189,34 +193,27 @@ captions and links) on the phone, and the path shows under the result.
 mkdir -p ~/reels-lab && cd ~/reels-lab
 ```
 
-One command per file, with the phone connected. If an emulator or a second device is attached too, `adb` stops with
-`error: more than one device/emulator`. Unplug the other devices or stop the emulator, or name the phone by its serial
-from `adb devices` on every command, for example:
+One command per file, with the phone connected by USB. `adb -d` talks to the one USB-attached device, so these work
+with an emulator running too. (With Wireless debugging, stop the emulator and drop the `-d`.)
 
 ```bash
-ANDROID_SERIAL=<serial from adb devices> adb exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_all.json > saved_all.json
-```
-
-With only the phone attached, the plain commands are:
-
-```bash
-adb exec-out run-as io.github.yuriimurha.reels cat files/lab/current_user.json > current_user.json
+adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/current_user.json > current_user.json
 ```
 
 ```bash
-adb exec-out run-as io.github.yuriimurha.reels cat files/lab/collections.json > collections.json
+adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/collections.json > collections.json
 ```
 
 ```bash
-adb exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_all.json > saved_all.json
+adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_all.json > saved_all.json
 ```
 
 ```bash
-adb exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_collection.json > saved_collection.json
+adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_collection.json > saved_collection.json
 ```
 
 ```bash
-adb exec-out run-as io.github.yuriimurha.reels cat files/lab/media_info.json > media_info.json
+adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/media_info.json > media_info.json
 ```
 
 If an exported file contains an error such as `No such file or directory`, that button has no scrubbed copy (never tapped, or its latest answer was not JSON).
