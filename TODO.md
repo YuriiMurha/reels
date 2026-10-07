@@ -23,7 +23,7 @@
 - [x] M1 Mock app: home, grid, viewer, search on the fake library; fake sync through the real worker and Pacer
 - [ ] M2 Session: WebView login, cookie bridge, `currentUser()`, paste fallback, session states
 - [ ] M3 Adapter spike on the phone: seven questions answered, scrubbed fixtures, real parsers
-  - [ ] Gate: the pre-commit hook catches JSON/Netscape cookie dumps, `csrftoken` and `++` diff lines before scrubbed fixtures are committed (with the spec-10 fixture guard test)
+  - [x] Gate: the pre-commit hook catches JSON/Netscape cookie dumps, `csrftoken` and `++` diff lines before scrubbed fixtures are committed (with the spec-10 fixture guard test)
   - [ ] Gate: offset-cursor stability
   - [ ] Gate (M3/M4, strategy A): limit `deleteRealMembershipsExcept` to `collectionId IN (:known)`; an empty `collections()` list while live collections exist means `STOPPED_SHAPE`
 - [ ] M4 Real sync: quick and full, resume, budgets, cooldowns, challenge hard stop, thumbnails
