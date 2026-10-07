@@ -13,7 +13,7 @@
 - [x] Install Android Studio (bundles the JDK, Android SDK and emulator)
 - [ ] Decide repo visibility (currently public on GitHub)
 - [x] Decide the integration flow: PRs on GitHub (PR #1)
-- [ ] Log in on the phone and run the M2 checklist (task-18 report)
+- [ ] Log in on the phone and run the M2 checklist (README section 5)
   - [ ] In `chrome://inspect`, see whether the WebView sends `X-Requested-With: io.github.yuriimurha.reels`
   - [ ] Note whether `sessionid` changes during a checkpoint flow
 
