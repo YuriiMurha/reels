@@ -604,9 +604,10 @@ class SyncViewModelTest {
         viewModel.mockSwitchEnabled.first { it } // loaded: there is no run, so the switch is on
         screen.cancel()
         runCurrent()
-        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START)) // while stopped
         advanceTimeBy(11_000) // the switch flow's 5 s grace period, then the loaded-run flow's
         runCurrent()
+        // Only now, with both flows stopped and no Room query in flight: a run starts while the screen is stopped.
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START))
         assertFalse(viewModel.mockSwitchEnabled.value, "the stopped screen's 'enabled' is not replayed either")
 
         backgroundScope.launch { viewModel.mockSwitchEnabled.collect {} } // the screen is back; nothing has been read yet

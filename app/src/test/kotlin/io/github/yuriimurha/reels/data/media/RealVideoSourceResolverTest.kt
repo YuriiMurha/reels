@@ -24,11 +24,14 @@ import io.github.yuriimurha.reels.testutil.cacheWholeFile
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
@@ -41,6 +44,7 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.IOException
 import java.time.Instant
+import kotlin.coroutines.CoroutineContext
 import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -245,6 +249,97 @@ class RealVideoSourceResolverTest {
         sessionState = SessionState.Valid("tester")
         assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m2"), resolver.resolve(uncached), "a valid session asks again")
         assertEquals(listOf("m2"), client.calls)
+    }
+
+    /**
+     * R79: the interactive lane can wait seconds for the gate (a request in flight holds it, then the 2 s gap), and the session
+     * can turn bad meanwhile (a challenge). The resolver checked before it queued, so the Pacer re-checks from inside the gate:
+     * nothing may go out. Runs [media]'s resolve while another interactive request holds the gate, turns the session to
+     * [afterwards] once the resolve is queued behind it, and only then lets the gate go. (A latch, not a delay: while the test
+     * waits for a real I/O thread the virtual clock runs on by itself, so a delay could end before the resolve has queued.)
+     */
+    private suspend fun TestScope.resolveWhileTheGateIsBusy(media: MediaEntity, afterwards: SessionState, forceRefresh: Boolean = false): VideoSource? {
+        val clock = { START + testScheduler.currentTime }
+        val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
+        val asked = CompletableDeferred<Unit>()
+        val resolver = RealVideoSourceResolver(
+            client, pacer, db.mediaDao(), videoCache, signals,
+            isSessionReady = { sessionIsValid().also { asked.complete(Unit) } },
+            now = clock,
+        )
+        val release = CompletableDeferred<Unit>()
+        launch { pacer.interactive { release.await() } } // a request of the owner's holds the gate
+        runCurrent()
+        var outcome: VideoSource? = null
+        val job = launch { outcome = resolver.resolve(media, forceRefresh) }
+
+        // The resolver reads the row first (a real I/O thread). Once it has passed its own readiness check it queues for the gate.
+        withContext(Dispatchers.Default) { withTimeout(5_000) { asked.await() } }
+        sessionState = afterwards
+        release.complete(Unit)
+        advanceUntilIdle() // the holder finishes, then the queued resolve takes the gate and waits out the 2 s gap
+        // What follows touches Room again (a real I/O thread), so the end is awaited in real time.
+        withContext(Dispatchers.Default) { withTimeout(5_000) { job.join() } }
+        return outcome
+    }
+
+    @Test
+    fun aSessionThatTurnsBadWhileTheRequestWaitsForTheGateSendsNothing() = runTest {
+        val media = stored(expiresAt = START - 1)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        val source = resolveWhileTheGateIsBusy(media, afterwards = SessionState.Challenge("https://example.test/challenge/1/", "tester"))
+
+        assertEquals(emptyList(), client.calls, "the session changed while the request waited: mediaInfo must not be called")
+        assertEquals(VideoSource.Unavailable("Instagram session needs attention (Sync screen)"), source)
+        assertEquals(OLD_URL, row().videoUrl, "nothing was stored")
+        assertEquals(emptyList(), signals.events, "and nothing is signalled to the session layer: the resolver itself declined")
+    }
+
+    @Test
+    fun aSessionThatTurnsBadWhileWaitingStillPlaysACachedVideo() = runTest {
+        cacheFully("m1")
+        val media = stored("m1", expiresAt = START + 3_600_000)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        val source = resolveWhileTheGateIsBusy(media, afterwards = SessionState.Expired("tester"), forceRefresh = true)
+
+        assertEquals(emptyList(), client.calls)
+        assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), source, "the bytes are on disk, so they play")
+    }
+
+    /** `SimpleCache` synchronises with its own file commits: asking it about a video must never happen on the main thread. */
+    @Test
+    fun theCacheIsOnlyCheckedOnTheInjectedIoDispatcher() = runTest {
+        val io = RecordingDispatcher(StandardTestDispatcher(testScheduler))
+        val clock = { START + testScheduler.currentTime }
+        val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
+        val resolver = RealVideoSourceResolver(client, pacer, db.mediaDao(), videoCache, signals, ::sessionIsValid, clock, io)
+        cacheFully("m1")
+        val cached = stored("m1", expiresAt = START - 1)
+        val uncached = stored("m2", expiresAt = START - 1)
+        val fresh = stored("m3", expiresAt = START + 3_600_000)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), resolver.resolve(cached))
+        val afterCached = io.dispatches
+        assertTrue(afterCached > 0, "a cached video was looked up through the IO dispatcher")
+
+        assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m2"), resolver.resolve(uncached))
+        assertTrue(io.dispatches > afterCached, "an uncached one was looked up through it too, before the request")
+
+        val before = io.dispatches
+        assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m3"), resolver.resolve(fresh))
+        assertEquals(before, io.dispatches, "a fresh link needs no cache check at all")
+    }
+
+    private class RecordingDispatcher(private val delegate: CoroutineDispatcher) : CoroutineDispatcher() {
+        var dispatches = 0
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            dispatches++
+            delegate.dispatch(context, block)
+        }
     }
 
     @Test

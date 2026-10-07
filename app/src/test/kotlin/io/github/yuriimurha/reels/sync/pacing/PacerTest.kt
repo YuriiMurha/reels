@@ -15,6 +15,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -119,6 +120,61 @@ class PacerTest {
         var startedAt = -1L
         pacer.interactive { startedAt = testScheduler.currentTime }
         assertEquals(previousEnd + 2_000, startedAt)
+    }
+
+    /**
+     * R79: the interactive lane can wait seconds for the gate. A caller whose condition (a valid session) may have changed
+     * meanwhile checks it from inside the gate: if it fails, nothing is sent, nothing is logged, and the gate is let go.
+     */
+    @Test
+    fun aThrowingPreconditionSendsAndLogsNothingAndReleasesTheGate() = runTest {
+        val log = InMemoryRequestLog()
+        val pacer = pacer(log = log)
+        var sent = 0
+
+        assertFailsWith<IllegalStateException> {
+            pacer.interactive(precondition = { throw IllegalStateException("not ready") }) { sent++ }
+        }
+        assertEquals(0, sent, "the request was never run")
+        assertEquals(0, log.countSince(-1), "and never logged: it did not count against the budget")
+
+        // The gate is free again: a second request goes through (a held gate would never answer, and the timeout says so).
+        withTimeout(60_000) { pacer.interactive { sent++ } }
+        assertEquals(1, sent)
+        assertEquals(1, log.countSince(-1))
+    }
+
+    /** The precondition is the LAST check before the request: after the gap has been waited out, before the request is logged. */
+    @Test
+    fun thePreconditionRunsAfterTheGapAndBeforeTheRequestIsLogged() = runTest {
+        val log = InMemoryRequestLog()
+        val pacer = pacer(log = log)
+        pacer.sync(pacer.newRun()) {}
+        val previousEnd = testScheduler.currentTime
+        val loggedBefore = log.countSince(-1)
+        var checkedAt = -1L
+        var loggedWhenChecked = -1
+
+        pacer.interactive(precondition = {
+            checkedAt = testScheduler.currentTime
+            loggedWhenChecked = log.countSince(-1)
+        }) {}
+
+        assertEquals(previousEnd + PacingPolicy.Conservative.interactiveMinGapMs, checkedAt, "checked after the 2 s gap, not before it")
+        assertEquals(loggedBefore, loggedWhenChecked, "checked before this request was recorded")
+        assertEquals(loggedBefore + 1, log.countSince(-1))
+    }
+
+    @Test
+    fun aRefusalComesBeforeThePrecondition() = runTest {
+        val cooldowns = InMemoryCooldownStore()
+        cooldowns.onRateLimited(testScheduler.currentTime)
+        val pacer = pacer(cooldowns = cooldowns)
+        var checked = false
+
+        assertFailsWith<PacerRefusal.CoolingDown> { pacer.interactive(precondition = { checked = true }) {} }
+
+        assertTrue(!checked, "a cooling-down Pacer refuses before it asks anything else")
     }
 
     @Test

@@ -11,6 +11,9 @@ import io.github.yuriimurha.reels.session.userMessage
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacerRefusal
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -32,10 +35,12 @@ class RealVideoSourceResolver(
     private val signals: SessionSignals,
     /**
      * True only while the stored session is valid. Without one (logged out, expired, a challenge) nothing is sent to
-     * Instagram, however the resolve was started: spec 6.4 allows no automatic request after a challenge (R76).
+     * Instagram, however the resolve was started: spec 6.4 allows no automatic request after a challenge (R76). Asked twice:
+     * before the request queues, and again from inside the Pacer's gate, because the wait for the gate can take seconds (R79).
      */
     private val isSessionReady: suspend () -> Boolean,
     private val now: () -> Long = System::currentTimeMillis,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : VideoSourceResolver {
     override suspend fun resolve(media: MediaEntity, forceRefresh: Boolean): VideoSource? {
         if (!media.isVideo) return null
@@ -52,7 +57,13 @@ class RealVideoSourceResolver(
             }
             // Nothing may go to Instagram without a usable session (R76); cached bytes still play.
             if (!isSessionReady()) return current.cachedPlay() ?: NEEDS_ATTENTION
-            val fresh = pacer.interactive { client.mediaInfo(current.pk) }
+            val fresh = try {
+                // The request may wait seconds for the gate and the 2 s gap, and a challenge can arrive meanwhile: the Pacer asks
+                // again from inside the gate, right before it would send and log anything (R79).
+                pacer.interactive(precondition = { if (!isSessionReady()) throw SessionNotReady() }) { client.mediaInfo(current.pk) }
+            } catch (e: SessionNotReady) {
+                return current.cachedPlay() ?: NEEDS_ATTENTION
+            }
             val url = fresh?.videoUrl ?: return GONE
             // A link whose URL names no expiry is assumed good for an hour, so it cannot cost a request on every settle (R78).
             val expiresAt = fresh.videoUrlExpiresAt?.toEpochMilli() ?: (now() + ASSUMED_LIFETIME_MS)
@@ -85,14 +96,22 @@ class RealVideoSourceResolver(
     /** The stored link, unchanged: it was just judged fresh enough, so it is not null. */
     private fun MediaEntity.stored(): VideoSource = VideoSource.Play(checkNotNull(videoUrl).toUri(), pk)
 
-    /** The stored link when the whole video is cached and the link can still name it (the player needs a URI), else null. */
-    private fun MediaEntity.cachedPlay(): VideoSource? {
-        val url = videoUrl
-        return if (url != null && cache.isFullyCached(pk)) VideoSource.Play(url.toUri(), pk) else null
+    /**
+     * The stored link when the whole video is cached and the link can still name it (the player needs a URI), else null.
+     * Off the caller's thread: `SimpleCache` synchronises its reads with its file commits, which can hold a lock for as long
+     * as a download is being finished, and the viewer calls this from the main thread.
+     */
+    private suspend fun MediaEntity.cachedPlay(): VideoSource? {
+        val url = videoUrl ?: return null
+        val pk = pk
+        return if (withContext(ioDispatcher) { cache.isFullyCached(pk) }) VideoSource.Play(url.toUri(), pk) else null
     }
 
     /** [cachedPlay], or [otherwise] when the request failed and nothing is cached. */
-    private inline fun MediaEntity.cachedOrElse(otherwise: () -> VideoSource): VideoSource = cachedPlay() ?: otherwise()
+    private suspend inline fun MediaEntity.cachedOrElse(otherwise: () -> VideoSource): VideoSource = cachedPlay() ?: otherwise()
+
+    /** The Pacer's precondition says the session is no longer usable: thrown inside the gate, caught right outside it. */
+    private class SessionNotReady : Exception()
 
     /** A failing receiver must not change what the viewer shows; cancellation still propagates. */
     private suspend fun notify(signal: suspend () -> Unit) {

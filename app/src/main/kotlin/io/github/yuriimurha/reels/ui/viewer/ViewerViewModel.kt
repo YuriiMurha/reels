@@ -119,6 +119,9 @@ class ViewerViewModel(
      */
     suspend fun recover(media: MediaEntity, error: Throwable): VideoSource {
         if (!isExpiredLinkError(error) || !refreshed.add(media.pk)) return VideoSource.Unavailable(CANT_PLAY)
+        // The prefetch for the NEXT item may still be out in the interactive lane's FIFO: the visible item's refresh must not
+        // queue behind it (R77, R79). A prefetch for this very item is left alone.
+        prefetch?.takeIf { it.pk != media.pk }?.answer?.cancel()
         return resolver.resolve(media, forceRefresh = true) ?: VideoSource.Unavailable(CANT_PLAY)
     }
 }

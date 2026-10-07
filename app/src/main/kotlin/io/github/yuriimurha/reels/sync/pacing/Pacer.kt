@@ -106,8 +106,15 @@ class Pacer(
         }
     }
 
-    /** A request the owner is waiting for (viewer link refresh, session check): short gap, goes first. */
-    suspend fun <T> interactive(request: suspend () -> T): T {
+    /**
+     * A request the owner is waiting for (viewer link refresh, session check): short gap, goes first.
+     *
+     * Waiting for the gate and for the gap can take seconds, and what the caller checked before queueing (a valid session)
+     * can change meanwhile. So [precondition] runs once everything else has been waited for and checked, holding the gate,
+     * right before the request would be recorded and sent: if it throws, nothing is sent, nothing is logged (so no budget is
+     * used), the gate is released and the exception reaches the caller. The sync lane has no such hook.
+     */
+    suspend fun <T> interactive(precondition: (suspend () -> Unit)? = null, request: suspend () -> T): T {
         ensureAllowed()
         interactiveWaiting.incrementAndGet()
         var holding = false
@@ -118,6 +125,7 @@ class Pacer(
             seedLastRequestEnd()
             waitSinceLastRequest(policy.interactiveMinGapMs)
             ensureAllowed()
+            precondition?.invoke()
             return execute(request)
         } finally {
             if (holding) gate.unlock() else interactiveWaiting.decrementAndGet()

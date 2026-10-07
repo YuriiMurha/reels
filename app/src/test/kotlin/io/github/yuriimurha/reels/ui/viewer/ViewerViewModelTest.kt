@@ -330,7 +330,7 @@ class ViewerViewModelTest {
             val viewModel = viewModel(real)
 
             viewModel.prefetch(next)
-            val source = viewModel.resolveVideo(next) // waits for the prefetch, then asks again: both are refused locally
+            val source = viewModel.resolveVideo(next) // the prefetch is still active, so its answer is reused: one refusal, locally
 
             assertEquals(VideoSource.Unavailable("Instagram session needs attention (Sync screen)"), source)
             assertEquals(emptyList(), client.calls, "no request without a usable session")
@@ -356,6 +356,69 @@ class ViewerViewModelTest {
         assertEquals(listOf("m1"), resolver.calls, "one refresh")
         assertEquals(listOf(true), resolver.forced, "and it was forced, because the link only looked fresh")
         assertEquals(VideoSource.Unavailable(CANT_PLAY), second, "the second error on the same item gives up")
+    }
+
+    /** R79: the visible item's forced refresh must not queue behind the next item's prefetch in the interactive lane. */
+    @Test
+    fun aRefusedLinkCancelsThePrefetchForAnotherItemBeforeItsRefresh() = runTest {
+        val viewModel = viewModel()
+        val visible = reel("m1", fresh)
+        resolver.hold("m2")
+        resolver.forcedAnswer = VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "m1")
+        viewModel.onSettled(visible)
+        val scopeJob = viewModel.viewModelScope.coroutineContext[Job]!!
+        val before = scopeJob.children.toSet() // the scope has other children (the paging cache); the prefetch is the new one
+        viewModel.prefetch(reel("m2", expiresAt = expired))
+        runCurrent()
+        assertEquals(listOf("m2"), resolver.calls, "the prefetch for the next item is out")
+        val prefetchJob = scopeJob.children.single { it !in before }
+        assertTrue(prefetchJob.isActive)
+        var prefetchStillActiveWhenTheRefreshStarted: Boolean? = null
+        resolver.onResolve = { _, forced -> if (forced) prefetchStillActiveWhenTheRefreshStarted = prefetchJob.isActive }
+
+        val source = viewModel.recover(visible, playbackFailure(403))
+        runCurrent()
+
+        assertEquals(VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "m1"), source)
+        assertEquals(false, prefetchStillActiveWhenTheRefreshStarted, "the prefetch was already cancelled when the forced refresh was asked for")
+        assertEquals(listOf("m2"), resolver.cancelled, "and it really ended")
+        assertEquals(listOf("m2", "m1"), resolver.calls)
+    }
+
+    /** The prefetch of the very item that failed is not "another item": nothing to make way for, and its request is the one to reuse. */
+    @Test
+    fun aRefusedLinkLeavesAPrefetchForTheSameItemAlone() = runTest {
+        val viewModel = viewModel()
+        val media = reel("m2", expiresAt = expired)
+        val gate = resolver.hold("m2")
+        resolver.forcedAnswer = VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "m2")
+        viewModel.prefetch(media)
+        runCurrent()
+
+        val answer = async { viewModel.recover(media, playbackFailure(410)) }
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+
+        assertEquals(VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "m2"), answer.await())
+        assertEquals(emptyList(), resolver.cancelled, "the item's own prefetch was not cancelled")
+    }
+
+    /** An error that is not a refused link refreshes nothing, so it has no reason to disturb the prefetch either. */
+    @Test
+    fun anErrorThatIsNotARefusedLinkLeavesThePrefetchAlone() = runTest {
+        val viewModel = viewModel()
+        val visible = reel("m1", fresh)
+        val gate = resolver.hold("m2")
+        viewModel.onSettled(visible)
+        viewModel.prefetch(reel("m2", expiresAt = expired))
+        runCurrent()
+
+        assertEquals(VideoSource.Unavailable(CANT_PLAY), viewModel.recover(visible, playbackFailure(500)))
+        runCurrent()
+
+        assertEquals(emptyList(), resolver.cancelled)
+        gate.complete(Unit)
     }
 
     @Test
@@ -571,6 +634,9 @@ class ViewerViewModelTest {
         val cancelled = mutableListOf<String>()
         var failWith: Exception? = null
         var forcedAnswer: VideoSource? = null
+
+        /** Called as a resolve starts, before it waits for its gate. */
+        var onResolve: ((media: MediaEntity, forced: Boolean) -> Unit)? = null
         private val gates = mutableMapOf<String, CompletableDeferred<Unit>>()
 
         /** The resolve of [pk] waits until the returned gate is completed. */
@@ -582,6 +648,7 @@ class ViewerViewModelTest {
         override suspend fun resolve(media: MediaEntity, forceRefresh: Boolean): VideoSource? {
             calls += media.pk
             forced += forceRefresh
+            onResolve?.invoke(media, forceRefresh)
             failWith?.let { throw it }
             gates[media.pk]?.let { gate ->
                 try {
