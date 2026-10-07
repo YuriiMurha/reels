@@ -93,6 +93,11 @@ check blocked "JSON csrftoken with 32 chars" "state.json" "{\"$csrf_name\": \"$c
 write_invalid_utf8() { printf '\xff\xfe%s\n' "$planted_sid"; }
 write_utf16le() { printf '%s\n' "$planted_sid" | iconv -f UTF-8 -t UTF-16LE; }
 write_nul_first() { head -c 16 /dev/zero; printf '%s\n' "$planted_sid"; }
+# check_bytes commits under en_US.UTF-8; without that locale the invalid-UTF-8 case can't catch a hook that lost LC_ALL=C.
+if [ "$(LC_ALL=en_US.UTF-8 locale charmap 2>/dev/null)" != "UTF-8" ]; then
+  echo "FAIL: the en_US.UTF-8 locale is not available; the locale regression case would test nothing"
+  exit 1
+fi
 check_bytes blocked "invalid UTF-8 with sessionid" "binary-utf8.txt" write_invalid_utf8
 check_bytes blocked "real UTF-16LE sessionid" "utf16le.txt" write_utf16le
 check_bytes blocked "NUL inside git's binary-detection window, then sessionid" "nul-first.bin" write_nul_first
