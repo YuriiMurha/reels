@@ -208,10 +208,12 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
   fresh 300, but the 600 per 24 hours still holds). After an Android kill, Android may also restart the run by itself,
   later and without a tap (it re-runs sync work it was holding). That is the same run carrying on from its place, paced
   and budgeted like any other (gaps, breaks, 300 per run, 600 per 24 hours, cooldowns), and it sends nothing at all
-  unless the session is still valid: an expired or challenged session stops it before its first request. **Discard paused run** abandons it and the next tap starts a
-  fresh run. Neither deletes anything. Items an abandoned run had already added stay in the library, but a later Full
-  sync judges what it may remove against the library as of the last sync that finished, so those items can't make a
-  large removal look small. Resume continues the same run with the same mode: a paused Full sync stays a Full sync.
+  unless the session is still valid: an expired or challenged session stops it before its first request.
+  **Discard paused run** abandons it and the next tap starts a fresh run. Neither deletes anything. Items an abandoned
+  run had already added stay in the library. Until another sync finishes, a Full sync judges what it may remove against
+  the library as of the last sync that finished, so those items can't make a large removal look small; once a later
+  Sync finishes, they count as part of the library. Resume continues the same run with the same mode: a paused Full
+  sync stays a Full sync.
 - **Nothing is deleted** except by a Full sync whose walk of a feed reached the end in that same run, and by
   **Delete library**.
 
