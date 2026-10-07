@@ -25,7 +25,7 @@ internal object MediaLinks {
     fun chooseThumbnail(candidates: List<ImageCandidate>): ImageCandidate? =
         candidates.filter { it.width >= THUMBNAIL_MIN_WIDTH }.minByOrNull { it.width } ?: candidates.maxByOrNull { it.width }
 
-    /** Instagram CDN links carry their expiry as hex Unix seconds in `oe` (spec 6.3 Q7). Null when absent or malformed. */
+    /** Instagram CDN links carry their expiry as hex Unix seconds in `oe` (spec 6.3 Q7). Null when absent, malformed or out of range. */
     fun expiresAt(url: String): Instant? =
-        url.toHttpUrlOrNull()?.queryParameter("oe")?.toLongOrNull(16)?.let(Instant::ofEpochSecond)
+        url.toHttpUrlOrNull()?.queryParameter("oe")?.toLongOrNull(16)?.let { runCatching { Instant.ofEpochSecond(it) }.getOrNull() }
 }

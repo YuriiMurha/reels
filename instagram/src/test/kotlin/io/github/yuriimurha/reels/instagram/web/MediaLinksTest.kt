@@ -24,4 +24,7 @@ class MediaLinksTest {
         assertNull(MediaLinks.expiresAt("https://cdn.example.invalid/a.mp4?oe=zz"))
         assertNull(MediaLinks.expiresAt("not a url"))
     }
+
+    @Test fun anExpiryOutsideTheInstantRangeIsNullNotAnException() =
+        assertNull(MediaLinks.expiresAt("https://cdn.example.invalid/a.mp4?oe=FFFFFFFFFFFFFFF"))
 }

@@ -6,10 +6,10 @@ import io.github.yuriimurha.reels.instagram.Page
 import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.contentOrNull
 import java.time.Instant
 
 /**
@@ -25,7 +25,8 @@ internal object WebParsers {
             RemoteCollection(
                 id = o.idString("collection_id") ?: throw ShapeChanged("items[$i].collection_id"),
                 name = o.string("collection_name") ?: throw ShapeChanged("items[$i].collection_name"),
-                coverMediaPk = (o["cover_media"] as? JsonObject)?.idString("pk"),
+                // Only a cover: a pk that isn't plain digits means no cover, not a failed page.
+                coverMediaPk = (o["cover_media"] as? JsonObject)?.idString("pk")?.takeIf(::isPk),
             )
         }
         return Page(collections, nextCursor(json))
@@ -34,9 +35,11 @@ internal object WebParsers {
     fun savedPage(json: JsonObject): Page<RemoteMedia> {
         val media = json.items().mapIndexedNotNull { i, element ->
             val wrapper = element as? JsonObject ?: throw ShapeChanged("items[$i]")
-            // An item Instagram can no longer show has no media object: nothing to store, not a shape change.
-            val m = wrapper["media"] as? JsonObject ?: return@mapIndexedNotNull null
-            media(m, "items[$i].media")
+            // Only an explicit `"media": null` means Instagram can no longer show the item (R60): nothing to store.
+            // A missing key or any other type is a shape change; skipping it would let a FULL reconcile delete the item.
+            val raw = wrapper["media"]
+            if (raw is JsonNull) return@mapIndexedNotNull null
+            media(raw as? JsonObject ?: throw ShapeChanged("items[$i].media"), "items[$i].media")
         }
         return Page(media, nextCursor(json))
     }
@@ -50,13 +53,15 @@ internal object WebParsers {
 
     /** Spec 6.3 Q4. A page that says nothing about more pages is a shape change, never "last page" (P5). */
     private fun nextCursor(json: JsonObject): String? {
-        val more = (json["more_available"] as? JsonPrimitive)?.booleanOrNull ?: throw ShapeChanged("more_available")
+        // A real JSON boolean only: the string "false" must not read as "last page".
+        val more = (json["more_available"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull
+            ?: throw ShapeChanged("more_available")
         if (!more) return null
         return json.idString("next_max_id") ?: throw ShapeChanged("next_max_id")
     }
 
     private fun media(o: JsonObject, path: String): RemoteMedia {
-        val pk = o.idString("pk") ?: throw ShapeChanged("$path.pk")
+        val pk = o.idString("pk")?.takeIf(::isPk) ?: throw ShapeChanged("$path.pk")
         val code = o.string("code") ?: throw ShapeChanged("$path.code")
         val type = when (o.int("media_type")) {
             1 -> MediaType.IMAGE
@@ -66,7 +71,8 @@ internal object WebParsers {
         }
         val user = o["user"] as? JsonObject ?: throw ShapeChanged("$path.user")
         val author = user.string("username") ?: throw ShapeChanged("$path.user.username")
-        val takenAt = o.long("taken_at") ?: throw ShapeChanged("$path.taken_at")
+        val takenAt = o.long("taken_at")?.let { runCatching { Instant.ofEpochSecond(it) }.getOrNull() }
+            ?: throw ShapeChanged("$path.taken_at")
         val carousel = o["carousel_media"] as? JsonArray
         val imageSource = if (o["image_versions2"] is JsonObject) o else carousel?.firstOrNull() as? JsonObject
         val thumb = imageSource?.let { MediaLinks.chooseThumbnail(MediaLinks.imageCandidates(it)) }
@@ -77,14 +83,26 @@ internal object WebParsers {
             type = type,
             author = author,
             caption = (o["caption"] as? JsonObject)?.string("text"),
-            takenAt = Instant.ofEpochSecond(takenAt),
+            takenAt = takenAt,
             width = o.int("original_width") ?: thumb?.width ?: 0,
             height = o.int("original_height") ?: thumb?.height ?: 0,
             carouselCount = if (type == MediaType.CAROUSEL) o.int("carousel_media_count") ?: carousel?.size else null,
             thumbnailUrl = thumb?.url.orEmpty(),
             videoUrl = videoUrl,
             videoUrlExpiresAt = videoUrl?.let(MediaLinks::expiresAt),
-            savedCollectionIds = (o["saved_collection_ids"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull },
+            savedCollectionIds = savedCollectionIds(o),
         )
+    }
+
+    /** Media pks are plain digits (spec 6): a float literal such as 3.1E18, or text, means the shape changed. */
+    private val PK = Regex("[0-9]{1,30}")
+
+    private fun isPk(value: String): Boolean = PK.matches(value)
+
+    /** Null ("the response doesn't say") unless every entry is a string: a shorter list would read as "not saved there". */
+    private fun savedCollectionIds(o: JsonObject): List<String>? {
+        val ids = o["saved_collection_ids"] as? JsonArray ?: return null
+        val strings = ids.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
+        return if (strings.any { it == null }) null else strings.filterNotNull()
     }
 }
