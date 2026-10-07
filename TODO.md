@@ -29,13 +29,13 @@
 - [ ] M4 Real sync: quick and full, resume, budgets, cooldowns, challenge hard stop, thumbnails
   - [x] Gate: truncated-resampling gaps instead of clamping (today about 18 % of gaps are exactly 4,000 ms)
   - [x] Gate: seed `lastRequestEndedAt` from `RequestLog`
-  - [ ] Gate: `Backend.Real` reuses `AppContainer.instagramPacer`, with a guard test, and the Sync screen shows that Pacer
+  - [x] Gate: `Backend.Real` reuses `AppContainer.instagramPacer`, with a guard test, and the Sync screen shows that Pacer
   - [ ] Gate: a proportional reconcile guard (refuse to mark more than X % of All Saved removed in one run)
   - [ ] Gate: engine signals carry the session epoch
   - [ ] Gate: logout stops a running sync
   - [ ] Gate: a "session OK" signal from a sync's `currentUser`
   - [ ] Gate: CDN `RateLimited`/timeout handling inside the thumbnail try
-  - [ ] Gate: 421 coalesced-connection re-send
+  - [x] Gate: 421 coalesced-connection re-send (P6: one host per client, pinned in Task 3; the CDN has its own cookieless client)
   - [ ] Gate: redact request lines if a challenge URL is ever requested through OkHttp
 - [ ] M5 Video: on-demand playback, link refresh, `pk`-keyed cache
   - [ ] Gate: `mediaInfo` needs a not-found outcome

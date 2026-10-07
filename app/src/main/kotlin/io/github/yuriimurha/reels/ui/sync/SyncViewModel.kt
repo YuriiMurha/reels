@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.library.LibraryRepository
+import io.github.yuriimurha.reels.di.MockModeSwitch
 import io.github.yuriimurha.reels.session.SessionRepository
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.session.userMessage
@@ -54,6 +55,8 @@ class SyncViewModel(
     private val library: LibraryRepository,
     private val pacer: Pacer,
     private val session: SessionRepository,
+    /** The Developer section's Mock mode switch (debug builds); null offers none. */
+    private val mockSwitch: MockModeSwitch? = null,
     private val now: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     private val sharing = SharingStarted.WhileSubscribed(5_000)
@@ -96,6 +99,15 @@ class SyncViewModel(
     fun deleteLibrary() {
         if (run.value?.status == SyncStatus.RUNNING) return
         viewModelScope.launch { library.deleteLibrary() }
+    }
+
+    /** The mode this process runs in (true: the fake library), or null when there is no switch. */
+    val mockMode: Boolean? = mockSwitch?.usesFake
+
+    /** Stores [useFake] and restarts the app. Refused while a run is RUNNING: a restart would kill its process. */
+    fun setMockMode(useFake: Boolean) {
+        if (run.value?.status == SyncStatus.RUNNING) return
+        mockSwitch?.change(useFake)
     }
 
     /** The stored session state; null until it has been read (the screen offers no session button before that). */

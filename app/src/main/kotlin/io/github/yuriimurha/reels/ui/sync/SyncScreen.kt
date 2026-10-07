@@ -45,6 +45,7 @@ import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.di.ProcessRestart
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.sync.pacing.PacerStatus
@@ -59,7 +60,17 @@ fun SyncScreen(
     onOpenLab: () -> Unit,
     // A parameter only so tests can give the screen a fake session; the app always uses the default.
     viewModel: SyncViewModel = LocalAppContainer.current.let { container ->
-        viewModel { SyncViewModel(container.syncController, container.library, container.backend.pacer, container.session) }
+        // The ViewModel outlives the Activity: the restart must only hold the application context.
+        val appContext = LocalContext.current.applicationContext
+        viewModel {
+            SyncViewModel(
+                container.syncController,
+                container.library,
+                container.backend.pacer,
+                container.session,
+                mockSwitch = container.mockModeSwitch { ProcessRestart.restart(appContext) }.takeIf { BuildConfig.DEBUG },
+            )
+        }
     },
 ) {
     val context = LocalContext.current
@@ -122,9 +133,9 @@ fun SyncScreen(
                 // Debug builds only. The lab sends real requests, so it needs a valid session.
                 if (BuildConfig.DEBUG) {
                     DeveloperSection(
-                        mockMode = null,
-                        mockSwitchEnabled = false,
-                        onMockModeChange = {},
+                        mockMode = viewModel.mockMode,
+                        mockSwitchEnabled = !ui.running,
+                        onMockModeChange = viewModel::setMockMode,
                         onOpenLab = onOpenLab,
                         labEnabled = sessionState is SessionState.Valid,
                     )

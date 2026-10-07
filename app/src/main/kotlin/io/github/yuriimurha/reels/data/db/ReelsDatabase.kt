@@ -30,8 +30,11 @@ abstract class ReelsDatabase : RoomDatabase() {
     }
 
     companion object {
-        /** No destructive fallback: a lost library costs a full, paced re-sync (spec 5.4). */
-        fun build(context: Context): ReelsDatabase =
-            Room.databaseBuilder(context, ReelsDatabase::class.java, "reels.db").build()
+        /**
+         * [name] is the database file: `reels.db` for the fake library, `library.db` for the real one and for the request
+         * log behind the 24 h budget (P2). No destructive fallback: a lost library costs a full, paced re-sync (spec 5.4).
+         */
+        fun build(context: Context, name: String): ReelsDatabase =
+            Room.databaseBuilder(context, ReelsDatabase::class.java, name).build()
     }
 }

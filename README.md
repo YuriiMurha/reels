@@ -18,10 +18,12 @@ Current state: [`ARCHITECTURE.md`](ARCHITECTURE.md). Plan: [`TODO.md`](TODO.md).
 |---|---|
 | M0 Skeleton, M1 Mock app | Done. Home, grid, viewer, search and sync work on a built-in fake library of 2,000 items. |
 | M2 Session | Code done. Logging in through Instagram's own page (or pasting a `sessionid`) needs your on-phone check (see below). |
-| M3–M6 (real sync, video, release build) | In progress. |
+| M3–M4 Real sync | In progress. The real backend and its thumbnail downloader are wired in, behind **Mock mode** (debug builds, see section 3). It has not been run against Instagram yet, and the engine's safety gates in [`TODO.md`](TODO.md) are not all in. |
+| M5–M6 (video, release build) | Not started. |
 
-Until real sync lands, the library you see comes from the fake backend: tapping **Sync** fills it with generated
-placeholder items and never contacts Instagram.
+A debug build starts in Mock mode: the library you see comes from the fake backend, and tapping **Sync** fills it with
+generated placeholder items and never contacts Instagram. Turning Mock mode off (on the phone only) switches to the real
+library.
 
 ## 1. One-time setup on the Mac
 
@@ -90,6 +92,22 @@ Then open **Reels** on the phone.
   posts.
 - **Sync** (the status chip, top right): **Sync** fetches what's new, **Full sync** also mirrors unsaves, **Delete library**
   wipes the local copy (your login is kept). Progress, budgets and any cooldown show here.
+
+### Mock mode (debug builds)
+
+A debug build starts on the **fake library**, so an emulator, or a phone before you have logged in, never needs a login
+and never contacts Instagram. A release build has no such switch and always uses the real library.
+
+- **Where:** Sync (status chip, top right), scroll to **Developer**, **Mock mode (fake library)**. It is **on by
+  default**.
+- **For real sync, on the phone:** switch it **off**. The app restarts on the real library, which is empty until its
+  first sync. Log in (section 4) and sync from there. The switch is disabled while a sync is running. Never turn it off
+  on an emulator.
+- **Nothing is lost by switching back and forth.** The fake library and the real one are kept separately (fake:
+  `reels.db`, real: `library.db`; their thumbnails too). Only the request log behind the 600-per-24-hour budget is
+  shared: session checks and lab calls count against it even in Mock mode.
+- Real sync is still being finished (the unticked M4 gates in [`TODO.md`](TODO.md)). Until they are in, use **Sync**
+  (it only adds) and hold off on **Full sync** (it removes unsaves).
 
 ## 4. Log in (on the phone only)
 

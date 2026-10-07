@@ -1,23 +1,70 @@
 package io.github.yuriimurha.reels.ui.sync
 
+import android.content.Context
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.yuriimurha.reels.data.db.SyncMode
+import io.github.yuriimurha.reels.data.db.SyncRunEntity
+import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.data.library.LibraryRepository
+import io.github.yuriimurha.reels.data.media.ThumbnailStore
+import io.github.yuriimurha.reels.data.settings.SettingsStore
+import io.github.yuriimurha.reels.di.BackendChoice
+import io.github.yuriimurha.reels.di.MockModeSwitch
+import io.github.yuriimurha.reels.instagram.Account
+import io.github.yuriimurha.reels.instagram.SessionProbe
+import io.github.yuriimurha.reels.session.RecordingCookieStore
+import io.github.yuriimurha.reels.session.SessionRepository
+import io.github.yuriimurha.reels.sync.SyncController
+import io.github.yuriimurha.reels.sync.SyncScheduler
+import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
+import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
+import io.github.yuriimurha.reels.sync.pacing.Pacer
+import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import java.io.File
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 @RunWith(AndroidJUnit4::class)
 class DeveloperSectionTest {
     @get:Rule
     val compose = createComposeRule()
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private val db = inMemoryDb()
+    private val storeScope = CoroutineScope(Dispatchers.IO + Job())
+
+    @After
+    fun tearDown() {
+        db.close()
+        storeScope.cancel()
+    }
 
     private var opened = 0
     private val mockChanges = mutableListOf<Boolean>()
@@ -49,7 +96,7 @@ class DeveloperSectionTest {
         assertEquals(0, opened)
     }
 
-    /** Task 7 wires the switch; until then the screen passes null and no switch is offered. */
+    /** A screen whose ViewModel has no [MockModeSwitch] passes null, and no switch is offered. */
     @Test
     fun noMockSwitchWhenTheModeIsUnknown() {
         show(mockMode = null)
@@ -69,5 +116,85 @@ class DeveloperSectionTest {
         show(mockMode = false, mockSwitchEnabled = false)
         compose.onNodeWithText("Mock mode (fake library)").assertIsNotEnabled().performClick()
         assertEquals(emptyList(), mockChanges)
+    }
+
+    // The tests below run the real Sync screen: what decides when the switch is disabled is the screen's, not the section's.
+    // `BuildConfig.DEBUG` is true in the debug unit tests, so the Developer section is there.
+
+    private object IdleScheduler : SyncScheduler {
+        override fun enqueue(runId: Long) = Unit
+        override fun cancel() = Unit
+        override suspend fun isActive(): Boolean = false
+    }
+
+    private val choice by lazy {
+        val prefs = ApplicationProvider.getApplicationContext<Context>().getSharedPreferences(BackendChoice.PREFS, Context.MODE_PRIVATE)
+        BackendChoice(prefs, debugBuild = true)
+    }
+
+    /** Each restart as it happened, with the stored choice at that moment: the new process must read the NEW choice. */
+    private val restarts = mutableListOf<Boolean>()
+
+    private fun showSyncScreen(usesFake: Boolean, runStatus: SyncStatus?) {
+        if (runStatus != null) {
+            runBlocking { db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = runStatus, startedAt = 1)) }
+        }
+        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore())
+        val probe = object : SessionProbe {
+            override suspend fun currentUser() = Account("42", "tester")
+        }
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
+        val viewModel = SyncViewModel(
+            SyncController(db, IdleScheduler),
+            LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
+            pacer,
+            SessionRepository(RecordingCookieStore(), probe, pacer, settings),
+            mockSwitch = MockModeSwitch(usesFake, choice) { restarts += choice.useFake },
+        )
+        compose.setContent {
+            ReelsTheme { SyncScreen(onBack = {}, onOpenLogin = { _, _ -> }, onOpenLab = {}, viewModel = viewModel) }
+        }
+        compose.waitForIdle()
+    }
+
+    /** The run is read off the main thread; wait until the screen has it (a RUNNING run shows its "Syncing" section). */
+    private fun awaitText(text: String) = compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitForIdle()
+        compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+    }
+
+    @Test
+    fun mockSwitchDisabledWhileRunning() {
+        showSyncScreen(usesFake = true, runStatus = SyncStatus.RUNNING)
+        awaitText("Syncing")
+        compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsNotEnabled().performClick()
+        compose.waitForIdle()
+        assertEquals(emptyList(), restarts, "no restart while a run is going")
+        assertTrue(choice.useFake, "the stored choice is untouched")
+    }
+
+    @Test
+    fun mockSwitchOnTheSyncScreenStoresTheChoiceAndRestartsOnce() {
+        showSyncScreen(usesFake = true, runStatus = null)
+        compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsOn().assertIsEnabled().performClick()
+        compose.waitForIdle()
+        assertEquals(listOf(false), restarts, "one restart, after the new choice was stored")
+        assertFalse(choice.useFake)
+    }
+
+    @Test
+    fun theSwitchShowsTheModeTheProcessRunsIn() {
+        showSyncScreen(usesFake = false, runStatus = null)
+        // Off means real: the switch reads off, and one tap asks for the fake library.
+        compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsOff().performClick()
+        compose.waitForIdle()
+        assertEquals(listOf(true), restarts)
+    }
+
+    @Test
+    fun aFinishedRunDoesNotDisableTheSwitch() {
+        showSyncScreen(usesFake = true, runStatus = SyncStatus.DONE)
+        awaitText("Last run")
+        compose.onNodeWithText("Mock mode (fake library)").performScrollTo().assertIsEnabled()
     }
 }

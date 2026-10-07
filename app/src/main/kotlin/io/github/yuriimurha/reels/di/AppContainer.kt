@@ -7,12 +7,14 @@ import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.db.ReelsDatabase
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
+import io.github.yuriimurha.reels.data.media.HttpMediaFetcher
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
 import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
+import io.github.yuriimurha.reels.instagram.web.WebInstagramClient
 import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
 import io.github.yuriimurha.reels.session.AndroidCookieStore
 import io.github.yuriimurha.reels.session.LazySessionProbe
@@ -31,9 +33,23 @@ import java.io.File
 /** Hand-wired dependencies, one instance per process (spec 4.1). */
 class AppContainer(context: Context) {
     val settings: SettingsStore by lazy { SettingsStore.create(context) }
-    val db: ReelsDatabase by lazy { ReelsDatabase.build(context) }
-    val thumbnails: ThumbnailStore by lazy { ThumbnailStore(File(context.filesDir, "thumbs")) }
-    val backend: Backend by lazy { Backend.Fake() }
+
+    /** Which library this process runs on (P1). Changing it takes effect on the next start. */
+    val backendChoice = BackendChoice(context.getSharedPreferences(BackendChoice.PREFS, Context.MODE_PRIVATE), BuildConfig.DEBUG)
+
+    /** Read once per process, so the library, its thumbnails and the backend can never disagree within one run. */
+    val usesFake: Boolean = backendChoice.useFake
+
+    /**
+     * `library.db`: the real library, and the `api_request` log behind the real 24 h budget even in Mock mode, so session
+     * checks and lab calls made in Mock mode still count (P2).
+     */
+    val requestLogDb: ReelsDatabase by lazy { ReelsDatabase.build(context, "library.db") }
+
+    /** The library the screens and the sync engine use: the fake one keeps `reels.db`, the real one is [requestLogDb]. */
+    val db: ReelsDatabase by lazy { if (usesFake) ReelsDatabase.build(context, "reels.db") else requestLogDb }
+
+    val thumbnails: ThumbnailStore by lazy { ThumbnailStore(File(context.filesDir, if (usesFake) "thumbs" else "library-thumbs")) }
     val library: LibraryRepository by lazy { LibraryRepository(db, thumbnails) }
     val syncController: SyncController by lazy { SyncController(db, WorkManagerSyncScheduler(context)) }
 
@@ -42,9 +58,9 @@ class AppContainer(context: Context) {
 
     val cookieStore: CookieStore by lazy { AndroidCookieStore() }
 
-    /** Paces every request to real Instagram; one per process for real traffic (spec 7.3). */
+    /** Paces every request to real Instagram; one per process for real traffic (spec 7.3). Logs to [requestLogDb] in both modes. */
     val instagramPacer: Pacer by lazy {
-        Pacer(PacingPolicy.Conservative, RoomRequestLog(db.apiRequestDao()), DataStoreCooldownStore(settings))
+        Pacer(PacingPolicy.Conservative, RoomRequestLog(requestLogDb.apiRequestDao()), DataStoreCooldownStore(settings))
     }
 
     private val instagramHttp: OkHttpClient by lazy {
@@ -54,6 +70,24 @@ class AppContainer(context: Context) {
             logger = if (BuildConfig.DEBUG) { line -> Log.d("InstagramHttp", line) } else null,
         )
     }
+
+    /**
+     * The CDN's own client (P6): no cookie jar, never shared with the API client. Lazy like [instagramHttp], because its
+     * user agent comes from the WebView provider, which must not load just because the container was built.
+     */
+    private val cdnHttp: OkHttpClient by lazy { HttpMediaFetcher.client(WebSettings.getDefaultUserAgent(context)) }
+
+    /** Fake library, or real Instagram (P1). Building it builds no HTTP client: both are lazy. */
+    val backend: Backend by lazy {
+        if (usesFake) {
+            Backend.Fake()
+        } else {
+            Backend.Real(WebInstagramClient({ instagramHttp }, cookieStore), HttpMediaFetcher({ cdnHttp }), instagramPacer)
+        }
+    }
+
+    /** The Developer section's Mock mode switch; [restart] is [ProcessRestart.restart] in the app. */
+    fun mockModeSwitch(restart: () -> Unit) = MockModeSwitch(usesFake, backendChoice, restart)
 
     /** The debug Adapter lab. Built without the HTTP client: that is only built when a lab call reaches the network. */
     val adapterLab: AdapterLab by lazy { AdapterLab({ instagramHttp }, cookieStore) }
@@ -72,9 +106,10 @@ class AppContainer(context: Context) {
     }
 
     fun syncEngine(): SyncEngine {
-        // Exhaustive on purpose: adding Backend.Real (M4) forces a decision about session signals.
+        // Exhaustive on purpose: a new backend forces a decision about session signals. Task 9 adds the session epochs.
         val signals: SessionSignals = when (backend) {
             is Backend.Fake -> SessionSignals.None
+            is Backend.Real -> session
         }
         return SyncEngine(backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals)
     }

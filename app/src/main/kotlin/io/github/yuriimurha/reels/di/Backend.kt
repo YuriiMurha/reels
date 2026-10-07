@@ -25,4 +25,14 @@ sealed interface Backend {
     ) : Backend {
         override val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), InMemoryCooldownStore())
     }
+
+    /**
+     * Real Instagram. Its pacer is the process's one Conservative `instagramPacer`, never a new one: a second Pacer
+     * would have its own gap and its own idea of the budget.
+     */
+    class Real(
+        override val client: InstagramClient,
+        override val fetcher: MediaFetcher,
+        override val pacer: Pacer,
+    ) : Backend
 }

@@ -2,7 +2,14 @@ package io.github.yuriimurha.reels.ui.sync
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import io.github.yuriimurha.reels.data.db.SyncMode
+import io.github.yuriimurha.reels.data.db.SyncRunEntity
+import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.library.LibraryRepository
+import io.github.yuriimurha.reels.di.BackendChoice
+import io.github.yuriimurha.reels.di.MockModeSwitch
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.Account
@@ -80,7 +87,7 @@ class SyncViewModelTest {
     }
 
     /** The clock is the test scheduler's, so the Pacer, the ViewModel and the 1 s ticker agree on the time. */
-    private fun kotlinx.coroutines.test.TestScope.viewModel(): SyncViewModel {
+    private fun kotlinx.coroutines.test.TestScope.viewModel(mockSwitch: MockModeSwitch? = null): SyncViewModel {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, now = clock)
         val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
@@ -90,6 +97,7 @@ class SyncViewModelTest {
             LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
             pacer,
             session,
+            mockSwitch = mockSwitch,
             now = clock,
         )
     }
@@ -298,6 +306,46 @@ class SyncViewModelTest {
         viewModel.logout()
         assertEquals(SessionState.LoggedOut, session.state.first { it == SessionState.LoggedOut })
         assertFalse(session.hasSessionCookies())
+    }
+
+    private fun mockSwitch(usesFake: Boolean, restarts: MutableList<Boolean>): MockModeSwitch {
+        val prefs = ApplicationProvider.getApplicationContext<Context>().getSharedPreferences(BackendChoice.PREFS, Context.MODE_PRIVATE)
+        val choice = BackendChoice(prefs, debugBuild = true)
+        return MockModeSwitch(usesFake, choice) { restarts += choice.useFake }
+    }
+
+    @Test
+    fun withoutAMockSwitchThereIsNoMockMode() = runTest {
+        val viewModel = viewModel()
+        assertNull(viewModel.mockMode, "null hides the switch")
+        viewModel.setMockMode(false) // nothing to change, and nothing may crash
+    }
+
+    @Test
+    fun theMockModeIsTheOneTheProcessRunsIn() = runTest {
+        assertEquals(true, viewModel(mockSwitch(usesFake = true, mutableListOf())).mockMode)
+        assertEquals(false, viewModel(mockSwitch(usesFake = false, mutableListOf())).mockMode)
+    }
+
+    @Test
+    fun changingTheMockModeStoresItAndRestartsOnce() = runTest {
+        val restarts = mutableListOf<Boolean>()
+        val viewModel = viewModel(mockSwitch(usesFake = true, restarts))
+        viewModel.setMockMode(false)
+        assertEquals(listOf(false), restarts)
+    }
+
+    @Test
+    fun theMockModeIsNotChangedWhileARunIsRunning() = runTest {
+        val restarts = mutableListOf<Boolean>()
+        val viewModel = viewModel(mockSwitch(usesFake = true, restarts))
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START))
+        backgroundScope.launch { viewModel.run.collect {} }
+        viewModel.run.first { it != null }
+
+        viewModel.setMockMode(false)
+
+        assertEquals(emptyList(), restarts, "a restart would kill the run's process: the screen disables the switch and so does the ViewModel")
     }
 
     private class FakeProbe : SessionProbe {

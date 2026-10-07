@@ -154,7 +154,7 @@ class SyncScreenLoginTest {
         compose.onNodeWithText("Developer").assertExists()
         compose.onNodeWithText("Adapter lab").performScrollTo().assertIsEnabled().performClick()
         assertEquals(1, labOpened)
-        // Task 7 wires the switch; this task passes no mode, which hides it.
+        // This ViewModel has no MockModeSwitch, which hides the switch.
         compose.onAllNodesWithText("Mock mode (fake library)").assertCountEquals(0)
     }
 
