@@ -1,0 +1,51 @@
+{
+  "items": [
+    {
+      "media": {
+        "pk": 3100000000000000005,
+        "id": "3100000000000000005_42",
+        "code": "Cx5aBcDeFg5",
+        "taken_at": 1700000400,
+        "media_type": 2,
+        "product_type": "clips",
+        "user": {"pk": 7700000005, "username": "user_5"},
+        "caption": {"text": "Synthetic caption five"},
+        "original_width": 1080,
+        "original_height": 1920,
+        "image_versions2": {
+          "candidates": [
+            {"url": "https://cdn.example.invalid/v/t51/501.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1920},
+            {"url": "https://cdn.example.invalid/v/t51/502.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 1280},
+            {"url": "https://cdn.example.invalid/v/t51/503.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 480, "height": 853}
+          ]
+        },
+        "video_versions": [
+          {"type": 101, "url": "https://cdn.example.invalid/v/t50/504.mp4?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 1280}
+        ]
+      }
+    },
+    {
+      "media": {
+        "pk": 3100000000000000006,
+        "id": "3100000000000000006_42",
+        "code": "Cx6aBcDeFg6",
+        "taken_at": 1700000300,
+        "media_type": 1,
+        "user": {"pk": 7700000006, "username": "user_6"},
+        "caption": null,
+        "original_width": 1080,
+        "original_height": 1350,
+        "image_versions2": {
+          "candidates": [
+            {"url": "https://cdn.example.invalid/v/t51/601.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1350},
+            {"url": "https://cdn.example.invalid/v/t51/602.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 900},
+            {"url": "https://cdn.example.invalid/v/t51/603.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 480, "height": 600}
+          ]
+        }
+      }
+    }
+  ],
+  "more_available": false,
+  "num_results": 2,
+  "status": "ok"
+}

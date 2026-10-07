@@ -38,6 +38,9 @@ class Pacer(
     private val interactiveWaiting = AtomicInteger(0)
     private val cdnLane = Semaphore(policy.cdnConcurrency)
     private var lastRequestEndedAt: Long? = null
+
+    /** True once [lastRequestEndedAt] was seeded from the persisted request log ([seedLastRequestEnd]). */
+    private var seeded = false
     private var syncRequestsUntilBreak = sampleBreakInterval()
 
     fun newRun(): RunBudget = RunBudget()
@@ -46,9 +49,16 @@ class Pacer(
      * A sync request. It samples its gap (and a break, if one is due) once, then waits for that moment WITHOUT
      * holding the gate, so interactive requests are never queued behind a sync gap or break. Whenever it takes
      * the gate it first yields to waiting interactive requests, and after any other request ran in the meantime
-     * it keeps at least [PacingPolicy.minGapMs] from that request's end.
+     * it waits a fresh gap from that request's end (a new draw, so never less than [PacingPolicy.minGapMs]).
+     * The very first request of a process waits out the gap after the last request the log remembers.
+     *
+     * [precondition] works as for [interactive] (R82): the gap and any break can last minutes, and a run's session can stop
+     * being usable meanwhile (another lane stored a challenge, a logout, a paste). It runs holding the gate, after the gap has
+     * been waited out and the last [ensureAllowed] and run-budget checks passed, right before the request would be counted
+     * and sent. If it throws, nothing is sent or logged, neither the run budget nor the break slot is used, the end of the
+     * last request does not move, the gate is released and the exception reaches the caller.
      */
-    suspend fun <T> sync(run: RunBudget, request: suspend () -> T): T {
+    suspend fun <T> sync(run: RunBudget, precondition: (suspend () -> Unit)? = null, request: suspend () -> T): T {
         var planned = false
         var plannedFrom: Long? = null // lastRequestEndedAt that notBefore was computed from
         var notBefore = 0L
@@ -59,6 +69,7 @@ class Pacer(
             gate.lock()
             var holding = true
             try {
+                seedLastRequestEnd()
                 if (interactiveWaiting.get() > 0) {
                     gate.unlock()
                     holding = false
@@ -73,8 +84,9 @@ class Pacer(
                     plannedFrom = last
                     planned = true
                 } else if (last != null && last != plannedFrom) {
-                    // Another request (an interactive one) ran while this one waited.
-                    notBefore = maxOf(notBefore, last + policy.minGapMs)
+                    // Another request (an interactive one) ran while this one waited. The gap after it is a fresh
+                    // draw (almost never exactly the minimum: a constant gap is a timing signature), never shorter.
+                    notBefore = maxOf(notBefore, last + policy.sampleGap(random))
                     plannedFrom = last
                 }
                 if (!includesBreak && breakIsDue()) {
@@ -91,6 +103,7 @@ class Pacer(
                 }
                 ensureAllowed()
                 ensureRunBudget(run)
+                precondition?.invoke()
                 consumeBreakSlot()
                 run.used++
                 return execute(request)
@@ -100,8 +113,15 @@ class Pacer(
         }
     }
 
-    /** A request the owner is waiting for (viewer link refresh, session check): short gap, goes first. */
-    suspend fun <T> interactive(request: suspend () -> T): T {
+    /**
+     * A request the owner is waiting for (viewer link refresh, session check): short gap, goes first.
+     *
+     * Waiting for the gate and for the gap can take seconds, and what the caller checked before queueing (a valid session)
+     * can change meanwhile. So [precondition] runs once everything else has been waited for and checked, holding the gate,
+     * right before the request would be recorded and sent: if it throws, nothing is sent, nothing is logged (so no budget is
+     * used), the gate is released and the exception reaches the caller. [sync] has the same hook.
+     */
+    suspend fun <T> interactive(precondition: (suspend () -> Unit)? = null, request: suspend () -> T): T {
         ensureAllowed()
         interactiveWaiting.incrementAndGet()
         var holding = false
@@ -109,8 +129,10 @@ class Pacer(
             gate.lock()
             holding = true
             interactiveWaiting.decrementAndGet()
+            seedLastRequestEnd()
             waitSinceLastRequest(policy.interactiveMinGapMs)
             ensureAllowed()
+            precondition?.invoke()
             return execute(request)
         } finally {
             if (holding) gate.unlock() else interactiveWaiting.decrementAndGet()
@@ -145,6 +167,17 @@ class Pacer(
         if (requestLog.countSince(since) >= policy.dailyBudget) {
             throw PacerRefusal.DailyBudgetReached((requestLog.oldestSince(since) ?: t) + DAY_MS)
         }
+    }
+
+    /**
+     * Once per process, under the gate: a restarted process does not know when the last request ended, the persisted
+     * log does. The log holds request START times, so the gap is measured from the last request's start. A row dated
+     * in the future (clock set back, emulator snapshot restore) counts as "now": it must not stall the gate for days.
+     */
+    private suspend fun seedLastRequestEnd() {
+        if (seeded) return
+        lastRequestEndedAt = lastRequestEndedAt ?: requestLog.latest()?.let { minOf(it, now()) }
+        seeded = true
     }
 
     private suspend fun waitSinceLastRequest(gapMs: Long) {

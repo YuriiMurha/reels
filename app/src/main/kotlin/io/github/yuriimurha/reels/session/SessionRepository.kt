@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.instagram.SessionProbe
 import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.WebSessionCookies
 import io.github.yuriimurha.reels.instagram.web.cookieValue
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import kotlinx.coroutines.NonCancellable
@@ -44,8 +45,14 @@ class SessionRepository(
      */
     private val lock = Mutex()
 
-    /** Bumped, under [lock], whenever the jar's session is replaced or forgotten: logout, a paste and a paste's rollback. */
+    /**
+     * Bumped, under [lock], whenever the jar's session is replaced or forgotten: logout, a paste and a paste's rollback.
+     * Volatile so [epoch] can be read without the lock, at the start of a run, even while a paste holds it.
+     */
+    @Volatile
     private var sessionEpoch = 0
+
+    override fun epoch(): Int = sessionEpoch
 
     override fun currentSessionFingerprint(): String? = sessionId()?.let(::fingerprintOf)
 
@@ -119,14 +126,52 @@ class SessionRepository(
         }
     }
 
-    override suspend fun loginRequired() {
+    /**
+     * A session check made by a run succeeded. Restores `Valid` after a banner an earlier run (or the lab) left behind. The
+     * stored state is only touched when it would change, so a run that finishes under an already-valid session does no
+     * write. Cookies are flushed with it, as for any `Valid` result (R45). Ignored for a stale [epoch] and when the jar holds
+     * no session, so a run that began before a logout can never log the owner back in.
+     */
+    override suspend fun sessionOk(username: String, epoch: Int) {
         lock.withLock {
+            if (epoch != sessionEpoch || !hasSessionCookies()) return
+            if (state.first() == SessionState.Valid(username)) return
+            cookies.flush()
+            store(SessionState.Valid(username))
+        }
+    }
+
+    override suspend fun loginRequired(epoch: Int) {
+        lock.withLock {
+            if (epoch != sessionEpoch) return
             store(if (hasSessionCookies()) SessionState.Expired(state.first().handle) else SessionState.LoggedOut)
         }
     }
 
-    override suspend fun challengeRequired(challengeUrl: String?) {
-        lock.withLock { store(SessionState.Challenge(challengeUrl, state.first().handle)) }
+    override suspend fun challengeRequired(challengeUrl: String?, epoch: Int) {
+        lock.withLock {
+            if (epoch != sessionEpoch) return
+            store(SessionState.Challenge(challengeUrl, state.first().handle))
+        }
+    }
+
+    /**
+     * R82: may a sync run that started under [epoch] send its next request? A stored Challenge says [RunSession.CHALLENGE];
+     * only a Valid state under the same epoch is [RunSession.USABLE]; anything else (Expired, LoggedOut, or a logout or paste
+     * since the run started) is [RunSession.NOT_USABLE]. A read, never a request, and it changes nothing.
+     *
+     * The engine asks this from INSIDE the Pacer's gate. It must never take [lock]: a paste holds the lock while it waits for
+     * that same gate, so taking it here would leave each waiting for the other. It needs no lock: [sessionEpoch] is volatile
+     * and the state is one DataStore read. The state is read first, the epoch second: logout and paste bump the epoch before
+     * they touch the jar, so one that has begun is always seen.
+     */
+    suspend fun runSession(epoch: Int): RunSession {
+        val stored = state.first()
+        return when {
+            stored is SessionState.Challenge -> RunSession.CHALLENGE
+            stored is SessionState.Valid && epoch == sessionEpoch -> RunSession.USABLE
+            else -> RunSession.NOT_USABLE
+        }
     }
 
     private suspend fun probeSession(handle: String?): SessionState = try {

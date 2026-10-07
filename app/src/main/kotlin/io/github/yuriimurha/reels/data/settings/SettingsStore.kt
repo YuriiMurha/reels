@@ -65,6 +65,22 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         }
     }
 
+    /**
+     * R84: the pk of the Instagram account a library belongs to, one key per library (`library_account_pk_<library>`), since
+     * the fake and the real library each have their own. [library] is `"fake"` or `"real"` (`SyncWorker.kindOf`).
+     */
+    suspend fun libraryAccountPk(library: String): String? = store.data.first()[libraryAccountKey(library)]
+
+    /** Null removes it (Delete library). */
+    suspend fun setLibraryAccountPk(library: String, pk: String?) {
+        store.edit { it.setOrRemove(libraryAccountKey(library), pk) }
+    }
+
+    private fun libraryAccountKey(library: String): Preferences.Key<String> {
+        require(library == "fake" || library == "real") { "library is \"fake\" or \"real\"" }
+        return stringPreferencesKey("library_account_pk_$library")
+    }
+
     private fun <T> MutablePreferences.setOrRemove(key: Preferences.Key<T>, value: T?) {
         if (value == null) remove(key) else this[key] = value
     }

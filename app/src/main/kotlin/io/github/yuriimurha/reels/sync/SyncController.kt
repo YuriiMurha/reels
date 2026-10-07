@@ -60,7 +60,7 @@ class SyncController(
     /** After process death a RUNNING row can be left with no worker behind it; make it resumable. */
     suspend fun recoverInterruptedRuns() {
         mutex.withLock {
-            if (!scheduler.isActive()) syncDao.pauseRunningRuns("Interrupted, tap Sync to resume")
+            if (!scheduler.isActive()) syncDao.pauseRunningRuns("Interrupted, tap Resume")
         }
     }
 }

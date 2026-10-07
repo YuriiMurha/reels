@@ -7,6 +7,7 @@ import io.github.yuriimurha.reels.instagram.Account
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.SessionProbe
 import io.github.yuriimurha.reels.instagram.web.cookieValue
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
@@ -22,8 +23,10 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -52,8 +55,11 @@ class SessionRepositoryTest {
     @After
     fun tearDown() = storeScope.cancel()
 
+    /** The store behind the last [repository], so a test can read what is persisted at a given moment. */
+    private lateinit var settings: SettingsStore
+
     private fun TestScope.repository(requestLog: InMemoryRequestLog = log): SessionRepository {
-        val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
+        settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
         val pacer = Pacer(PacingPolicy.Conservative, requestLog, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SessionRepository(cookies, probe, pacer, settings)
     }
@@ -120,7 +126,7 @@ class SessionRepositoryTest {
         val repository = repository()
         repository.validate()
         cookies.clearAll()
-        repository.loginRequired()
+        repository.loginRequired(repository.epoch())
         assertEquals(SessionState.LoggedOut, repository.state.first())
     }
 
@@ -394,10 +400,241 @@ class SessionRepositoryTest {
         signedIn()
         val repository = repository()
         repository.validate()
-        repository.challengeRequired("https://www.instagram.com/challenge/z/")
+        repository.challengeRequired("https://www.instagram.com/challenge/z/", repository.epoch())
         assertEquals(SessionState.Challenge("https://www.instagram.com/challenge/z/", "tester"), repository.state.first())
-        repository.loginRequired()
+        repository.loginRequired(repository.epoch())
         assertEquals(SessionState.Expired("tester"), repository.state.first())
+    }
+
+    @Test
+    fun staleEpochSignalsAreIgnored() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        val old = repository.epoch()
+        repository.logout()
+        assertNotEquals(old, repository.epoch(), "a logout starts a new epoch")
+        // The owner is logged in again (a new session, in the jar): a run that began under the old one must not touch it.
+        signedIn("s2", "43")
+        repository.loginRequired(old)
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a stale loginRequired must not expire the new login")
+        repository.challengeRequired("https://www.instagram.com/challenge/z/", old)
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a stale challengeRequired must not replace the new login's state")
+    }
+
+    @Test
+    fun aPasteAndItsRollbackEachStartANewEpoch() = runTest {
+        signedIn()
+        val repository = repository()
+        val before = repository.epoch()
+        probe.next = { throw InstagramException.LoginRequired() }
+        repository.pasteSessionId("43%3Acd") // rejected and rolled back
+        assertTrue(repository.epoch() >= before + 2, "the paste and its rollback both replaced the session")
+        repository.loginRequired(before)
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a signal from before the paste is stale")
+    }
+
+    @Test
+    fun currentEpochSignalsAreApplied() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.validate()
+        repository.loginRequired(repository.epoch())
+        assertEquals(SessionState.Expired("tester"), repository.state.first())
+    }
+
+    @Test
+    fun sessionOkRestoresValidAfterAStaleExpiredBanner() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        // An earlier run (or the lab) left the banner at Expired, but this run's currentUser just succeeded.
+        repository.loginRequired(repository.epoch())
+        assertEquals(SessionState.Expired("tester"), repository.state.first())
+        cookies.events.clear()
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+        assertEquals(listOf("flush"), cookies.events, "Valid is stored, so the jar is flushed with it (R45); nothing else is written")
+    }
+
+    @Test
+    fun sessionOkStoresTheHandleWhenNothingIsStoredYet() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.sessionOk("tester", repository.epoch())
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+        assertEquals(1, cookies.flushes)
+    }
+
+    @Test
+    fun sessionOkWritesNothingWhenTheStateIsAlreadyValidForThatHandle() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        cookies.events.clear()
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+        assertEquals(emptyList(), cookies.events, "every successful sync would otherwise flush the jar and rewrite the settings")
+    }
+
+    /** What is persisted at the moment the jar is flushed, read from a different thread than the one that is flushing. */
+    private fun storedStateAtFlush(into: MutableList<SessionState>) {
+        cookies.onFlush = { into += runBlocking { settings.session.first().toState() } }
+    }
+
+    /** A kill between the two must not leave "Logged in as" with no sessionid behind it, so the jar goes to disk FIRST. */
+    @Test
+    fun sessionOkFlushesTheJarBeforeItStoresValid() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.validate()
+        repository.loginRequired(repository.epoch())
+        val atFlush = mutableListOf<SessionState>()
+        storedStateAtFlush(atFlush)
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(listOf<SessionState>(SessionState.Expired("tester")), atFlush, "when the jar was flushed, Valid was not stored yet")
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+    }
+
+    @Test
+    fun aValidResultFlushesTheJarBeforeItIsStored() = runTest {
+        signedIn()
+        val repository = repository()
+        val atFlush = mutableListOf<SessionState>()
+        storedStateAtFlush(atFlush)
+
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+
+        assertEquals(listOf<SessionState>(SessionState.LoggedOut), atFlush, "when the jar was flushed, Valid was not stored yet")
+    }
+
+    @Test
+    fun sessionOkReplacesAValidStateForAnotherHandle() = runTest {
+        signedIn()
+        val repository = repository()
+        probe.next = { Account("42", "other") }
+        assertEquals(SessionState.Valid("other"), repository.validate())
+
+        repository.sessionOk("user_1", repository.epoch())
+
+        assertEquals(SessionState.Valid("user_1"), repository.state.first(), "only an identical Valid is skipped")
+    }
+
+    @Test
+    fun sessionOkIgnoredAfterLogout() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        val old = repository.epoch()
+        repository.logout()
+        // A new login is in the jar by the time the old run's answer arrives.
+        signedIn("s2", "43")
+
+        repository.sessionOk("tester", old)
+
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a run that began before the logout cannot log the owner back in")
+        assertEquals(emptyList(), cookies.events, "and it must not flush the new session's cookies either")
+    }
+
+    @Test
+    fun sessionOkIgnoredWithoutSessionCookies() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.validate()
+        repository.loginRequired(repository.epoch())
+        // The jar lost its session without going through logout (the WebView cleared it, say): same epoch, no cookies.
+        cookies.clearAll()
+        cookies.events.clear()
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(SessionState.Expired("tester"), repository.state.first())
+        assertEquals(emptyList(), cookies.events)
+    }
+
+    // ---- R82: the sync run's session gate ----
+
+    @Test
+    fun aRunMaySendOnlyUnderAValidSessionOfItsOwnEpoch() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        val epoch = repository.epoch()
+
+        assertEquals(RunSession.USABLE, repository.runSession(epoch))
+        assertEquals(RunSession.NOT_USABLE, repository.runSession(epoch - 1), "a run that began under an older session")
+
+        repository.loginRequired(epoch)
+        assertEquals(RunSession.NOT_USABLE, repository.runSession(epoch), "expired")
+
+        repository.challengeRequired(CHALLENGE_URL, epoch)
+        assertEquals(RunSession.CHALLENGE, repository.runSession(epoch))
+        assertEquals(RunSession.CHALLENGE, repository.runSession(epoch - 1), "a stored challenge stops any run as a challenge")
+        assertEquals(SessionState.Challenge(CHALLENGE_URL, "tester"), repository.state.first(), "asking changes nothing")
+
+        repository.logout()
+        assertEquals(RunSession.NOT_USABLE, repository.runSession(repository.epoch()), "logged out")
+    }
+
+    @Test
+    fun aPasteMidRunMakesTheRunsSessionUnusableEvenOnceItIsValid() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.validate()
+        val runEpoch = repository.epoch()
+        probe.next = { Account("43", "pasted") }
+
+        assertEquals(SessionState.Valid("pasted"), repository.pasteSessionId("43%3Acd"))
+
+        assertEquals(RunSession.NOT_USABLE, repository.runSession(runEpoch), "the run started under the session the paste replaced")
+        assertEquals(RunSession.USABLE, repository.runSession(repository.epoch()), "a run started now may send")
+    }
+
+    /**
+     * The engine asks [SessionRepository.runSession] from INSIDE the Pacer's gate, and a paste holds the session lock while it
+     * waits for that gate. If runSession took the lock, each would wait for the other forever. Real time, so the timeout is real.
+     */
+    @Test
+    fun theRunsSessionCheckNeverWaitsForTheLockAPasteHolds() = runBlocking {
+        signedIn()
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "gate.preferences_pb") })
+        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1))
+        val repository = SessionRepository(cookies, probe, pacer, settings)
+        repository.sessionOk("tester", repository.epoch()) // Valid, with no request: the log stays empty, so nothing waits a gap
+        val runEpoch = repository.epoch()
+        val holdingGate = CompletableDeferred<Unit>()
+        val pasteStarted = CompletableDeferred<Unit>()
+        var answer: RunSession? = null
+        probe.next = { Account("43", "pasted") }
+
+        withTimeout(10_000) {
+            // A sync request holds the Pacer's gate; its precondition goes on once the paste has taken the lock.
+            val sync = async {
+                runCatching {
+                    pacer.sync(pacer.newRun(), precondition = {
+                        holdingGate.complete(Unit)
+                        pasteStarted.await()
+                        answer = repository.runSession(runEpoch)
+                        if (answer != RunSession.USABLE) throw IllegalStateException("not usable")
+                    }) {}
+                }
+            }
+            holdingGate.await()
+            val paste = async(start = CoroutineStart.UNDISPATCHED) { repository.pasteSessionId("43%3Acd") } // takes the lock first
+            assertEquals("43%3Acd", cookies.cookieValue(SessionRepository.INSTAGRAM, "sessionid"), "the paste holds the lock")
+            pasteStarted.complete(Unit)
+
+            assertTrue(sync.await().isFailure, "the sync request was refused, not sent")
+            assertEquals(RunSession.NOT_USABLE, answer)
+            assertEquals(SessionState.Valid("pasted"), paste.await(), "and the paste then got the gate")
+        }
+        assertEquals(1, probe.calls, "the paste's check was the only request")
     }
 
     @Test
@@ -420,6 +657,10 @@ class SessionRepositoryTest {
         assertFalse("s1" in fingerprint.orEmpty())
         cookies.setCookie(SessionRepository.INSTAGRAM, "sessionid=s2")
         assertNotEquals(fingerprint, repository.currentSessionFingerprint())
+    }
+
+    private companion object {
+        const val CHALLENGE_URL = "https://www.instagram.com/challenge/z/"
     }
 
     private class FakeProbe : SessionProbe {

@@ -1,6 +1,10 @@
 package io.github.yuriimurha.reels.data.settings
 
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import io.github.yuriimurha.reels.sync.StoredLibraryAccount
 import io.github.yuriimurha.reels.sync.pacing.Cooldowns
 import io.github.yuriimurha.reels.sync.pacing.DataStoreCooldownStore
 import kotlinx.coroutines.CoroutineScope
@@ -75,6 +79,39 @@ class SettingsStoreTest {
         val cooldowns = DataStoreCooldownStore(open(file, now = 5_000_000L))
         assertEquals(5_000_000L + 3_600_000L, cooldowns.activeUntil())
         assertEquals(5_100_000L + Cooldowns.LONG_MS, cooldowns.onRateLimited(now = 5_100_000L))
+    }
+
+    /** R84: each library remembers its own account; the fake library's never stands in for the real one's. */
+    @Test
+    fun eachLibraryKeepsItsOwnAccount() = runTest {
+        val file = File(tmp.root, "settings.preferences_pb")
+        val settings = open(file, now = 1L)
+        val real = StoredLibraryAccount(settings, "real")
+        val fake = StoredLibraryAccount(settings, "fake")
+        assertNull(real.pk())
+
+        real.remember("7")
+        assertEquals("7", real.pk())
+        assertNull(fake.pk(), "the fake library has no account yet")
+        fake.remember("1")
+        assertEquals("7", real.pk())
+
+        real.forget()
+        assertNull(real.pk())
+        assertEquals("1", fake.pk(), "forgetting one library's account leaves the other's")
+        assertEquals("1", settings.libraryAccountPk("fake"))
+        assertEquals(setOf(stringPreferencesKey("library_account_pk_fake")), readKeys(file), "on disk as library_account_pk_<kind>")
+    }
+
+    /** The keys a settings file holds, read back through a fresh DataStore on a copy (one DataStore per file per process). */
+    private suspend fun readKeys(file: File): Set<Preferences.Key<*>> {
+        val copy = File(tmp.root, "copy.preferences_pb").also { file.copyTo(it, overwrite = true) }
+        val readScope = CoroutineScope(Dispatchers.IO + Job())
+        return try {
+            PreferenceDataStoreFactory.create(scope = readScope) { copy }.data.first().asMap().keys
+        } finally {
+            readScope.cancel()
+        }
     }
 
     @Test

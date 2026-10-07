@@ -45,6 +45,18 @@ class DaoTest {
     }
 
     @Test
+    fun setVideoLinkRewritesOnlyThatRowsLink() = runTest {
+        media.upsert(listOf(mediaEntity("m1", videoUrl = "https://v.test/old", videoUrlExpiresAt = 5), mediaEntity("m2", videoUrl = "https://v.test/two", videoUrlExpiresAt = 6)))
+
+        media.setVideoLink("m1", "https://v.test/new", 99)
+
+        val (one, two) = media.byPks(listOf("m1", "m2")).sortedBy { it.pk }
+        assertEquals("https://v.test/new" to 99L, one.videoUrl to one.videoUrlExpiresAt)
+        assertEquals("https://v.test/two" to 6L, two.videoUrl to two.videoUrlExpiresAt)
+        assertEquals("caption m1", one.caption, "nothing else on the row changed")
+    }
+
+    @Test
     fun collectionPagesAreNewestSavedFirstAndHideRemoved() = runTest {
         givenLibrary()
         assertEquals(listOf("m2", "m3", "m1"), media.pageCollection(ALL_SAVED_ID).loadAll().map { it.pk })
@@ -96,6 +108,83 @@ class DaoTest {
         assertEquals(allPks.toSet(), collections.memberships(ALL_SAVED_ID, allPks).map { it.mediaPk }.toSet())
         assertEquals(listOf("m2", "m3", "m1"), media.pageCollection(ALL_SAVED_ID).loadAll().map { it.pk })
         assertEquals(listOf("m1"), media.pageCollection("c2").loadAll().map { it.pk })
+    }
+
+    @Test
+    fun liveCollectionCountSkipsAllSavedAndRemovedCollections() = runTest {
+        givenLibrary() // All Saved, c1, c2
+        assertEquals(2, collections.liveCollectionCount(), "All Saved is not a real collection")
+        collections.markRemovedExcept(keep = listOf("c1"), at = 9)
+        assertEquals(1, collections.liveCollectionCount())
+        collections.markRemovedExcept(keep = emptyList(), at = 10)
+        assertEquals(0, collections.liveCollectionCount())
+    }
+
+    /** R71: the share a FULL reconcile removes is measured against the members that existed before the run began. */
+    @Test
+    fun memberCountSeenBeforeCountsOnlyMembersWhoseMediaWasFirstSeenEarlier() = runTest {
+        collections.upsert(
+            listOf(
+                CollectionEntity(ALL_SAVED_ID, "All Saved", coverPk = null, position = -1),
+                CollectionEntity("c1", "Workouts", coverPk = null, position = 0),
+            ),
+        )
+        media.upsert(
+            listOf(
+                mediaEntity("m1").copy(firstSeenAt = 5),
+                mediaEntity("m2").copy(firstSeenAt = 10),
+                mediaEntity("m3").copy(firstSeenAt = 20),
+                mediaEntity("m4").copy(firstSeenAt = 1), // first seen early, but a member of c1 only
+            ),
+        )
+        collections.upsertMemberships(
+            listOf(
+                CollectionMediaEntity(ALL_SAVED_ID, "m1", sortKey = 1, lastSeenRunId = 2),
+                CollectionMediaEntity(ALL_SAVED_ID, "m2", sortKey = 2, lastSeenRunId = 2),
+                CollectionMediaEntity(ALL_SAVED_ID, "m3", sortKey = 3, lastSeenRunId = 2),
+                CollectionMediaEntity("c1", "m4", sortKey = 4, lastSeenRunId = 2),
+            ),
+        )
+        assertEquals(0, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 5), "strictly before: m1 was first seen AT 5")
+        assertEquals(1, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 6))
+        assertEquals(2, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 11))
+        assertEquals(3, collections.memberCountSeenBefore(ALL_SAVED_ID, before = 21))
+        assertEquals(1, collections.memberCountSeenBefore("c1", before = 21), "only that collection's rows")
+        assertEquals(0, collections.memberCountSeenBefore("no-such-collection", before = 21))
+    }
+
+    /** Strategy A (P3's alternative): the rewrite is limited to the collections this run listed. */
+    @Test
+    fun deleteRealMembershipsExceptOnlyTouchesKnownCollections() = runTest {
+        givenLibrary()
+        collections.upsertMemberships(
+            listOf(
+                CollectionMediaEntity("c2", "m2", sortKey = 30, lastSeenRunId = 1),
+                CollectionMediaEntity("c3", "m2", sortKey = 30, lastSeenRunId = 1), // a collection this run did not list
+            ),
+        )
+        suspend fun scopesOfM2() = listOf(ALL_SAVED_ID, "c1", "c2", "c3").filter { collections.memberships(it, listOf("m2")).isNotEmpty() }
+        assertEquals(listOf(ALL_SAVED_ID, "c1", "c2", "c3"), scopesOfM2())
+
+        // m2 is now only in c2, as far as the response says; this run listed c1 and c2.
+        collections.deleteRealMembershipsExcept("m2", keep = listOf("c2"), known = listOf("c1", "c2"))
+
+        assertEquals(listOf(ALL_SAVED_ID, "c2", "c3"), scopesOfM2(), "c1 went; c2 stays; c3 is not known so it is left alone")
+    }
+
+    @Test
+    fun deleteRealMembershipsExceptNeverTouchesAllSavedEvenIfListedAsKnown() = runTest {
+        givenLibrary()
+        collections.deleteRealMembershipsExcept("m1", keep = emptyList(), known = listOf(ALL_SAVED_ID, "c1", "c2"))
+        assertEquals(listOf("m1"), collections.memberships(ALL_SAVED_ID, listOf("m1")).map { it.mediaPk })
+        assertEquals(emptyList(), collections.memberships("c2", listOf("m1")), "a known real collection is rewritten")
+    }
+
+    @Test
+    fun deleteRealMembershipsExceptWithNothingKnownDeletesNothing() = runTest {
+        givenLibrary()
+        collections.deleteRealMembershipsExcept("m2", keep = emptyList(), known = emptyList())
+        assertEquals(listOf("m2"), collections.memberships("c1", listOf("m2")).map { it.mediaPk })
     }
 
     @Test

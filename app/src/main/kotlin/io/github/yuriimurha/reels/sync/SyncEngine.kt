@@ -11,6 +11,8 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.db.ThumbnailTarget
+import io.github.yuriimurha.reels.data.media.CdnRateLimited
+import io.github.yuriimurha.reels.data.media.MediaEviction
 import io.github.yuriimurha.reels.data.media.MediaFetcher
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.InstagramClient
@@ -23,9 +25,12 @@ import io.github.yuriimurha.reels.sync.pacing.PacerRefusal
 import io.github.yuriimurha.reels.sync.pacing.retryTransient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
@@ -40,7 +45,26 @@ class SyncEngine(
     private val signals: SessionSignals = SessionSignals.None,
     private val random: Random = Random.Default,
     private val now: () -> Long = System::currentTimeMillis,
+    /** Told which items a reconcile removed, so their cached videos go with their thumbnails (spec 8.3). */
+    private val eviction: MediaEviction = MediaEviction { },
+    /**
+     * R82: asked from inside the Pacer's gate right before every request (the session check included), with the epoch the run
+     * started under. Anything but [RunSession.USABLE] stops the run with nothing more sent: a challenge or an expiry another
+     * lane stored (the viewer, the lab, Check now), a logout, or a paste. The fake backend has no session: the default lets
+     * every request through.
+     */
+    private val sessionUsable: suspend (epoch: Int) -> RunSession = { RunSession.USABLE },
+    /** R84: the account this library belongs to. A run under another account stops before it writes anything. */
+    private val libraryAccount: LibraryAccount,
 ) {
+    companion object {
+        /** P7: a FULL reconcile removing at least this many items AND more than half of those that existed before the run is refused. */
+        internal const val RECONCILE_GUARD_MIN_ITEMS = 20
+
+        /** R84: the `lastError` (and the Sync screen's banner) of a run under another account than the library's. */
+        internal const val ANOTHER_ACCOUNT = "This library belongs to another Instagram account. Delete library to switch."
+    }
+
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
     private val syncDao = db.syncDao()
@@ -51,15 +75,20 @@ class SyncEngine(
      * only the exception class. Only cancellation propagates (after the run is left PAUSED, "Cancelled").
      */
     suspend fun run(runId: Long) {
+        // The session this run starts under. Every signal below carries it, so one that outlives a logout or a paste is ignored.
+        val epoch = signals.epoch()
         val stored = checkNotNull(syncDao.run(runId)) { "No sync run $runId" }
         val progress = Progress(
             stored.copy(status = SyncStatus.RUNNING, lastError = null, finishedAt = null, collectionsDone = 0),
             pacer.newRun(),
+            epoch,
         )
         progress.save()
         try {
             progress.phase("Checking session")
-            call(progress) { client.currentUser() }
+            val account = call(progress) { client.currentUser() }
+            notifySession { signals.sessionOk(account.username, epoch) }
+            ensureLibraryAccount(account.pk)
             progress.phase("Listing collections")
             val collections = fetchCollections(progress)
             val scopes = listOf(ALL_SAVED_ID to "All Saved") +
@@ -71,22 +100,32 @@ class SyncEngine(
         } catch (e: CancellationException) {
             withContext(NonCancellable) { progress.finish(SyncStatus.PAUSED, "Cancelled") }
             throw e
+        } catch (e: SessionNotUsable) {
+            // R82: the session stopped being usable under the run and nothing more was sent. No signal: the session layer
+            // already knows, and challengeRequired(null, ...) would wipe the challenge URL it stored.
+            if (e.challenge) {
+                progress.finish(SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification")
+            } else {
+                progress.finish(SyncStatus.STOPPED_LOGIN, "Session expired")
+            }
         } catch (e: InstagramException.ChallengeRequired) {
             progress.finish(SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification")
-            notifySession { signals.challengeRequired(e.challengeUrl) }
+            notifySession { signals.challengeRequired(e.challengeUrl, epoch) }
         } catch (e: InstagramException.LoginRequired) {
             progress.finish(SyncStatus.STOPPED_LOGIN, "Session expired")
-            notifySession { signals.loginRequired() }
+            notifySession { signals.loginRequired(epoch) }
         } catch (e: InstagramException.RateLimited) {
             progress.finish(SyncStatus.STOPPED_RATE_LIMIT, "Instagram is limiting requests")
         } catch (e: PacerRefusal.CoolingDown) {
             progress.finish(SyncStatus.STOPPED_RATE_LIMIT, "Cooling down")
         } catch (e: InstagramException.ShapeChanged) {
             progress.finish(SyncStatus.STOPPED_SHAPE, "Adapter needs repair: ${e.fieldPath}")
+        } catch (e: AnotherAccount) {
+            progress.finish(SyncStatus.STOPPED_SHAPE, ANOTHER_ACCOUNT)
         } catch (e: InstagramException.Transient) {
             progress.finish(SyncStatus.PAUSED, "Network problem, try again later")
         } catch (e: PacerRefusal.RunBudgetReached) {
-            progress.finish(SyncStatus.PAUSED, "Run budget reached, tap Sync to continue")
+            progress.finish(SyncStatus.PAUSED, "Run budget reached, tap Resume")
         } catch (e: PacerRefusal.DailyBudgetReached) {
             progress.finish(SyncStatus.PAUSED, "24-hour budget reached")
         } catch (e: Exception) {
@@ -96,8 +135,8 @@ class SyncEngine(
     }
 
     /**
-     * Tells the session layer about a stop whose status is already written. A failing receiver must not
-     * change that status or escape; cancellation still propagates.
+     * Tells the session layer what the run learned: a successful session check, or a stop whose status is already written.
+     * A failing receiver must not change that status or end the run, and must not escape; cancellation still propagates.
      */
     private suspend fun notifySession(signal: suspend () -> Unit) {
         try {
@@ -109,8 +148,38 @@ class SyncEngine(
         }
     }
 
+    /** One paced request, retried after a transient failure. Every attempt first passes [ensureSessionUsable], inside the gate. */
     private suspend fun <T> call(progress: Progress, request: suspend () -> T): T =
-        retryTransient(random) { pacer.sync(progress.budget, request) }
+        retryTransient(random) {
+            pacer.sync(progress.budget, precondition = { ensureSessionUsable(progress.epoch) }, request = request)
+        }
+
+    private suspend fun ensureSessionUsable(epoch: Int) {
+        when (sessionUsable(epoch)) {
+            RunSession.USABLE -> Unit
+            RunSession.CHALLENGE -> throw SessionNotUsable(challenge = true)
+            RunSession.NOT_USABLE -> throw SessionNotUsable(challenge = false)
+        }
+    }
+
+    /** [sessionUsable] said no: thrown inside the Pacer's gate before anything is sent or counted, mapped to a stop in [run]. */
+    private class SessionNotUsable(val challenge: Boolean) : Exception()
+
+    /**
+     * R84: one library, one account. The first run whose session check succeeds remembers the account's [pk] (only while none
+     * is stored); a run under any other account stops right here, before the collection list is even requested, so nothing of
+     * that account's feed is written and no reconcile can count it. Delete library forgets the account, to switch.
+     */
+    private suspend fun ensureLibraryAccount(pk: String) {
+        when (libraryAccount.pk()) {
+            null -> libraryAccount.remember(pk)
+            pk -> Unit
+            else -> throw AnotherAccount()
+        }
+    }
+
+    /** The session belongs to another account than the library ([ensureLibraryAccount]). */
+    private class AnotherAccount : Exception()
 
     private suspend fun fetchCollections(progress: Progress): List<CollectionEntity> {
         val remote = mutableListOf<RemoteCollection>()
@@ -121,6 +190,9 @@ class SyncEngine(
             remote += page.items
             cursor = page.nextCursor
         } while (cursor != null)
+        // An empty list over a library that has collections is a broken answer, not an account that deleted them all: marking
+        // them removed would hide every collection. Thrown before the transaction, so nothing has been touched.
+        if (remote.isEmpty() && collectionDao.liveCollectionCount() > 0) throw InstagramException.ShapeChanged("empty collection list")
         val live = remote.mapIndexed { index, c -> CollectionEntity(c.id, c.name, c.coverMediaPk, position = index) }
         db.withTransaction {
             collectionDao.upsert(live + CollectionEntity(ALL_SAVED_ID, "All Saved", coverPk = null, position = -1))
@@ -152,9 +224,23 @@ class SyncEngine(
             val outcome = db.withTransaction { applyPage(progress, scope, current, page, knownCollections) }
             cursor = outcome.cursor
             outcome.removedPks.forEach(thumbnails::delete)
+            evictVideos(outcome.removedPks)
             cacheThumbnails(progress, outcome.needThumbnails.map { ThumbnailTarget(it.pk, it.thumbnailUrl) })
         }
         progress.update { it.copy(collectionsDone = it.collectionsDone + 1) }
+    }
+
+    /**
+     * Housekeeping after the reconcile has been committed: a cache that cannot be written (a full disk) must not stop the run,
+     * and it cannot undo the reconcile.
+     */
+    private fun evictVideos(pks: List<String>) {
+        if (pks.isEmpty()) return
+        try {
+            eviction.evict(pks)
+        } catch (e: Exception) {
+            // Intentionally ignored: a stale cached video only takes up space until the cache evicts it.
+        }
     }
 
     private class PageOutcome(
@@ -194,7 +280,8 @@ class SyncEngine(
             page.items.zip(memberships).forEach { (item, member) ->
                 // null means "the response doesn't say" (RemoteMedia): keep what we have, never treat it as "none".
                 val ids = item.savedCollectionIds?.filter { it in knownCollections } ?: return@forEach
-                collectionDao.deleteRealMembershipsExcept(item.pk, ids)
+                // Only among the collections this run listed: a membership in one it did not list is left alone.
+                collectionDao.deleteRealMembershipsExcept(item.pk, ids, knownCollections.toList())
                 collectionDao.upsertMemberships(ids.map { CollectionMediaEntity(it, item.pk, member.sortKey, runId) })
             }
         }
@@ -215,25 +302,56 @@ class SyncEngine(
         )
         syncDao.upsertCursor(next)
 
-        val removed = if (mode == SyncMode.FULL && reachedEnd) reconcile(scope, runId) else emptyList()
+        val removed = if (mode == SyncMode.FULL && reachedEnd) reconcile(scope, runId, progress.run.startedAt) else emptyList()
         progress.update { r ->
             r.copy(newItems = r.newItems + page.items.count { it.pk !in existing }, seenItems = r.seenItems + page.items.size)
         }
         return PageOutcome(next, page.items.filter { existing[it.pk]?.thumbPath == null }, removed)
     }
 
-    /** Spec 7.2 step 5. Called only when a FULL walk of [scope] reached the end in this run. */
-    private suspend fun reconcile(scope: String, runId: Long): List<String> {
+    /**
+     * Spec 7.2 step 5. Called only when a FULL walk of [scope] reached the end in this run. [runStartedAt] is the run row's
+     * `startedAt`, which a resumed run keeps; both it and `firstSeenAt` come from the wall clock (`SyncController` and this
+     * engine each default to `System::currentTimeMillis`).
+     */
+    private suspend fun reconcile(scope: String, runId: Long, runStartedAt: Long): List<String> {
         if (scope != ALL_SAVED_ID) {
             collectionDao.deleteUnseen(scope, runId)
             return emptyList()
         }
         val unsaved = collectionDao.unseenPks(ALL_SAVED_ID, runId)
+        // P7 (amended by R71): a walk that reached the end but would remove at least RECONCILE_GUARD_MIN_ITEMS items AND more
+        // than half of the library is a broken, partial or foreign feed far more often than an account that unsaved that much.
+        // "The library" is what existed BEFORE this run: counting the members this run's own pages added would let a feed of
+        // all-new items (another account's, say) enlarge the denominator until it passed. Items first seen by an earlier
+        // attempt of this same run are new to the run too: they were first seen after its `startedAt`. Thrown inside the page's
+        // transaction, so the page and its cursor roll back and the run stops. If the owner really did unsave (and save) that
+        // much, Delete library then Full sync mirrors it.
+        // R83: and it ends no later than the last DONE run. Items a refused, paused or failed run added after that and that a
+        // Discard then left behind are not library either, or Discard and a new Full sync would count a foreign feed's own
+        // items in. The +1: a run's last page and its finish can fall in the same millisecond.
+        val lastDone = syncDao.lastDoneAt()
+        val cutoff = if (lastDone == null) runStartedAt else minOf(runStartedAt, lastDone + 1)
+        val before = collectionDao.memberCountSeenBefore(ALL_SAVED_ID, cutoff)
+        if (unsaved.size >= RECONCILE_GUARD_MIN_ITEMS && unsaved.size * 2 > before) {
+            throw InstagramException.ShapeChanged("full sync would remove ${unsaved.size} of $before items")
+        }
         unsaved.chunked(500).forEach { chunk ->
             mediaDao.markRemoved(chunk, now())
             collectionDao.deleteAllMembershipsOf(chunk)
         }
         return unsaved
+    }
+
+    /** What became of one thumbnail. */
+    private sealed interface Thumb {
+        data class Stored(val path: String) : Thumb
+
+        /** Unavailable (the fetcher said so) or the download, decoding or disk write failed. Counts as a failure. */
+        data object Failed : Thumb
+
+        /** Not tried: the CDN had already said 429 in this run. Not a failure; the item has no thumbnail yet. */
+        data object Skipped : Thumb
     }
 
     /**
@@ -243,26 +361,51 @@ class SyncEngine(
     private suspend fun cacheThumbnails(progress: Progress, items: List<ThumbnailTarget>, countFailures: Boolean = true) {
         if (items.isEmpty()) return
         val results = coroutineScope {
-            items.map { item ->
-                async {
-                    val path = try {
-                        val bytes = pacer.cdn { fetcher.fetch(item.url) }
-                        bytes?.let { withContext(Dispatchers.IO) { thumbnails.write(item.pk, it) } }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        null // network, decoding or disk trouble: this thumbnail counts as failed, the sync goes on
-                    }
-                    item.pk to path
-                }
-            }.awaitAll()
+            items.map { item -> async { item.pk to cacheThumbnail(progress, item) } }.awaitAll()
         }
-        results.forEach { (pk, path) -> if (path != null) mediaDao.setThumbPath(pk, path) }
+        results.forEach { (pk, thumb) -> if (thumb is Thumb.Stored) mediaDao.setThumbPath(pk, thumb.path) }
         progress.update { r ->
             r.copy(
-                thumbsCached = r.thumbsCached + results.count { it.second != null },
-                failures = if (countFailures) r.failures + results.count { it.second == null } else r.failures,
+                thumbsCached = r.thumbsCached + results.count { it.second is Thumb.Stored },
+                failures = if (countFailures) r.failures + results.count { it.second == Thumb.Failed } else r.failures,
             )
+        }
+    }
+
+    /**
+     * One thumbnail. After the CDN's first 429 of this run ([Progress.cdnBlocked]) nothing more is requested: checked again
+     * once the download holds a CDN permit, because it may have queued behind the one that got the 429. At most the
+     * downloads already in flight (the policy's CDN concurrency, less the one that failed) still complete.
+     */
+    private suspend fun cacheThumbnail(progress: Progress, item: ThumbnailTarget): Thumb {
+        if (progress.cdnBlocked) return Thumb.Skipped
+        return try {
+            var skipped = false
+            val bytes = pacer.cdn {
+                if (progress.cdnBlocked) {
+                    skipped = true
+                    null
+                } else {
+                    fetcher.fetch(item.url)
+                }
+            }
+            if (skipped) {
+                Thumb.Skipped
+            } else {
+                bytes?.let { Thumb.Stored(withContext(Dispatchers.IO) { thumbnails.write(item.pk, it) }) } ?: Thumb.Failed
+            }
+        } catch (e: CdnRateLimited) {
+            progress.cdnBlocked = true
+            Thumb.Failed // this download did fail; the ones skipped after it did not
+        } catch (e: TimeoutCancellationException) {
+            // A TimeoutCancellationException is a CancellationException, but one out of a download's own timeout is a failed
+            // download, not a cancelled run. If it is this scope that is being cancelled, that still propagates.
+            currentCoroutineContext().ensureActive()
+            Thumb.Failed
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Thumb.Failed // network, decoding or disk trouble: this thumbnail counts as failed, the sync goes on
         }
     }
 
@@ -286,9 +429,19 @@ class SyncEngine(
         removedAt = null,
     )
 
-    /** The run row plus this invocation's request budget; every change is written straight through. */
-    private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget) {
+    /**
+     * The run row plus this invocation's request budget and the session [epoch] it started under; every change is written
+     * straight through.
+     */
+    private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget, val epoch: Int) {
         private val requestsBefore = run.requestsUsed
+
+        /**
+         * Set by the first CDN 429 of this invocation; from then on no thumbnail is requested. Not persisted: a resume or the
+         * next run tries again. Written by download coroutines that may run on different threads.
+         */
+        @Volatile
+        var cdnBlocked = false
 
         suspend fun save() = syncDao.updateRun(run)
 

@@ -21,7 +21,7 @@ class ViewerPageTest {
     @get:Rule
     val compose = createComposeRule()
 
-    private fun show(media: MediaEntity, onOpenInstagram: (String) -> Unit = {}) = compose.setContent {
+    private fun show(media: MediaEntity, unavailable: String? = null, onOpenInstagram: (String) -> Unit = {}) = compose.setContent {
         ReelsTheme {
             ViewerPage(
                 media = media,
@@ -31,6 +31,7 @@ class ViewerPageTest {
                 onToggleMute = {},
                 onTogglePlay = {},
                 onOpenInstagram = onOpenInstagram,
+                unavailable = unavailable,
             )
         }
     }
@@ -44,7 +45,7 @@ class ViewerPageTest {
     @Test
     fun openOnInstagramUsesThePermalink() {
         var opened: String? = null
-        show(mediaEntity("m1", MediaType.REEL)) { opened = it }
+        show(mediaEntity("m1", MediaType.REEL), onOpenInstagram = { opened = it })
         compose.onNodeWithText("Open on Instagram").performClick()
         assertEquals("https://www.instagram.com/reel/Cm1/", opened)
     }
@@ -79,5 +80,23 @@ class ViewerPageTest {
         show(mediaEntity("m1", MediaType.IMAGE).copy(carouselCount = 5))
         compose.onAllNodesWithText("1/5").assertCountEquals(0)
         compose.onAllNodesWithText("1/1").assertCountEquals(0)
+    }
+
+    /** Spec 8.5: the thumbnail stays, the reason is said, and the way out (Open on Instagram) is right under it. */
+    @Test
+    fun anUnavailableVideoSaysWhyAndStillOffersInstagram() {
+        var opened: String? = null
+        show(mediaEntity("m1", MediaType.REEL), unavailable = "Offline: this video isn't cached yet", onOpenInstagram = { opened = it })
+
+        compose.onNodeWithText("Offline: this video isn't cached yet").assertIsDisplayed()
+        compose.onNodeWithText("Open on Instagram").assertIsDisplayed().performClick()
+        assertEquals("https://www.instagram.com/reel/Cm1/", opened)
+    }
+
+    @Test
+    fun aVideoThatCanPlayShowsNoMessage() {
+        show(mediaEntity("m1", MediaType.REEL))
+        compose.onAllNodesWithText("Offline: this video isn't cached yet").assertCountEquals(0)
+        compose.onAllNodesWithText("Can't play this video").assertCountEquals(0)
     }
 }

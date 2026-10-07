@@ -12,7 +12,10 @@ class ReelsWorkerFactory(private val container: () -> AppContainer) : WorkerFact
         workerClassName: String,
         workerParameters: WorkerParameters,
     ): ListenableWorker? = when (workerClassName) {
-        SyncWorker::class.java.name -> SyncWorker(appContext, workerParameters, container().syncEngine())
+        SyncWorker::class.java.name -> {
+            val container = container()
+            SyncWorker(appContext, workerParameters, container.syncEngine()::run, SyncWorker.kindOf(container.usesFake))
+        }
         else -> null
     }
 }

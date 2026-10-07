@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "media": {
+        "pk": 3100000000000000004,
+        "id": "3100000000000000004_42",
+        "code": "Cx4aBcDeFg4",
+        "taken_at": 1700000500,
+        "media_type": 1,
+        "user": {"pk": 7700000004, "username": "user_4"},
+        "caption": {"text": "Synthetic caption four"},
+        "original_width": 1080,
+        "original_height": 1080,
+        "image_versions2": {
+          "candidates": [
+            {"url": "https://cdn.example.invalid/v/t51/401.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1080},
+            {"url": "https://cdn.example.invalid/v/t51/402.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 720},
+            {"url": "https://cdn.example.invalid/v/t51/403.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 480, "height": 480}
+          ]
+        }
+      }
+    }
+  ],
+  "more_available": false,
+  "num_results": 1,
+  "status": "ok"
+}

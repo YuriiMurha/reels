@@ -133,7 +133,7 @@ class SearchAndQueryTest {
         assertNull(collections.maxSortKey("none"))
         assertEquals(setOf("m1"), collections.memberships("c1", listOf("m1", "m2")).map { it.mediaPk }.toSet())
 
-        collections.deleteRealMembershipsExcept("m1", keep = listOf("c1"))
+        collections.deleteRealMembershipsExcept("m1", keep = listOf("c1"), known = listOf("c1", "c2"))
         assertEquals(listOf("c1"), collections.collectionsOf("m1").map { it.id })
         assertEquals(
             listOf("m1"),
@@ -189,5 +189,17 @@ class SearchAndQueryTest {
         assertNull(log.oldestSince(3_000))
         log.deleteUpTo(2_000)
         assertEquals(1, log.countSince(0))
+    }
+
+    @Test
+    fun apiRequestLatestIsTheMaximumTimeOrNull() = runTest {
+        val log = db.apiRequestDao()
+        assertNull(log.latest(), "an empty log has no latest request")
+        listOf(2_000L, 3_000L, 1_000L).forEach { log.insert(ApiRequestEntity(at = it)) }
+        assertEquals(3_000L, log.latest(), "latest is the maximum, not the last inserted")
+        log.deleteUpTo(2_000)
+        assertEquals(3_000L, log.latest())
+        log.deleteUpTo(3_000)
+        assertNull(log.latest())
     }
 }

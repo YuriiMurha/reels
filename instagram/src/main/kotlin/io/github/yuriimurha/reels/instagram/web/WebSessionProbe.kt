@@ -16,10 +16,7 @@ class WebSessionProbe(
     private val base: HttpUrl = WebEndpoints.BASE,
 ) : SessionProbe {
     override suspend fun currentUser(): Account {
-        // The id goes into the request path, so anything but digits ("..", "42a") counts as no session.
-        val userId = cookies.cookieValue(WebEndpoints.BASE.toString(), "ds_user_id")
-            ?.takeIf { id -> id.isNotEmpty() && id.all { it in '0'..'9' } }
-            ?: throw InstagramException.LoginRequired()
+        val userId = cookies.sessionUserId() ?: throw InstagramException.LoginRequired()
         val json = http.getJsonObject(WebEndpoints.currentUser(base, userId))
         val user = json["user"] as? JsonObject ?: throw InstagramException.ShapeChanged("user")
         val username = user.string("username") ?: throw InstagramException.ShapeChanged("user.username")
@@ -27,3 +24,10 @@ class WebSessionProbe(
         return Account(pk = pk, username = username)
     }
 }
+
+/**
+ * The logged-in user's id from the `ds_user_id` cookie, or null. The id goes into a request path, so anything but
+ * digits ("..", "42a") counts as no session.
+ */
+internal fun CookieStore.sessionUserId(): String? =
+    cookieValue(WebEndpoints.BASE.toString(), "ds_user_id")?.takeIf { id -> id.isNotEmpty() && id.all { it in '0'..'9' } }

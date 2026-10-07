@@ -8,9 +8,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.grid.GridScreen
 import io.github.yuriimurha.reels.ui.home.HomeScreen
+import io.github.yuriimurha.reels.ui.lab.AdapterLabScreen
 import io.github.yuriimurha.reels.ui.login.LoginPurpose
 import io.github.yuriimurha.reels.ui.login.LoginScreen
 import io.github.yuriimurha.reels.ui.search.SearchScreen
@@ -32,6 +34,10 @@ data object SearchRoute
 
 @Serializable
 data object SyncRoute
+
+/** The debug-only Adapter lab. Registered, and reachable from Sync's Developer section, in debug builds only. */
+@Serializable
+data object AdapterLabRoute
 
 /**
  * [url] is where the WebView starts (a challenge page, or Instagram's home after a paste); null means the login page.
@@ -106,7 +112,13 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
             SyncScreen(
                 onBack = { navController.popBackSafely() },
                 onOpenLogin = { url, purpose -> navController.navigate(LoginRoute(url, purpose)) { launchSingleTop = true } },
+                onOpenLab = { navController.navigate(AdapterLabRoute) { launchSingleTop = true } },
             )
+        }
+        if (BuildConfig.DEBUG) {
+            composable<AdapterLabRoute> {
+                AdapterLabScreen(onBack = { navController.popBackSafely() })
+            }
         }
         composable<LoginRoute> { entry ->
             val route = entry.toRoute<LoginRoute>()

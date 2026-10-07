@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -5,6 +7,13 @@ plugins {
     alias(libs.plugins.ksp)
     alias(libs.plugins.room)
 }
+
+// Release signing (P10). keystore.properties is gitignored and written by the owner (see README, "Release build"); without it
+// the release build is signed with the debug key.
+val keystoreProperties = rootProject.file("keystore.properties").takeIf { it.isFile }?.let { file ->
+    Properties().apply { file.inputStream().use(::load) }
+}
+if (keystoreProperties == null) logger.lifecycle("release: no keystore.properties at the repo root; signing with the debug key")
 
 android {
     namespace = "io.github.yuriimurha.reels"
@@ -19,8 +28,24 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        if (keystoreProperties != null) {
+            // A key that is missing or blank fails here by name (never by value), not as a bare null or an empty password further down.
+            fun required(key: String) =
+                checkNotNull(keystoreProperties.getProperty(key)?.takeIf { it.isNotBlank() }) { "keystore.properties has no (or an empty) '$key'" }
+            create("release") {
+                storeFile = rootProject.file(required("storeFile"))
+                storePassword = required("storePassword")
+                keyAlias = required("keyAlias")
+                keyPassword = required("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // P10: without keystore.properties the release build is signed with the debug key, so installRelease still works.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
@@ -75,8 +100,12 @@ dependencies {
     implementation(libs.work.runtime)
     implementation(libs.datastore.preferences)
     implementation(libs.media3.exoplayer)
+    implementation(libs.media3.datasource)
+    implementation(libs.media3.database)
     implementation(libs.media3.ui.compose)
     implementation(libs.coil.compose)
+    // Installs the baseline profiles (the libraries' own and baseline-prof.txt) on a sideloaded build, which Play would otherwise do (P9).
+    implementation(libs.androidx.profileinstaller)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 
@@ -86,6 +115,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.work.testing)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.test.ext.junit)

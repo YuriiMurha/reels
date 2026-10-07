@@ -14,8 +14,21 @@ data class SyncUiState(
     val banner: String?,
 )
 
-/** What the Sync screen offers for the latest run and the Pacer's state (spec 7.1, 7.4, 9.5). */
-fun syncUiState(run: SyncRunEntity?, pacer: PacerStatus?, now: Long): SyncUiState {
+internal const val LOG_IN_TO_SYNC = "Log in to Instagram to sync"
+
+/**
+ * What the Sync screen offers for the latest run and the Pacer's state (spec 7.1, 7.4, 9.5). [sessionReady] is false when
+ * the backend talks to Instagram and the session is not known to be valid (not read yet, logged out, expired, challenged):
+ * starting or resuming is then off, and the screen says why unless a more specific banner already does. While the stored
+ * session is still being read ([sessionLoading]) starting stays off, but nothing is said: "Log in" would be a guess.
+ */
+fun syncUiState(
+    run: SyncRunEntity?,
+    pacer: PacerStatus?,
+    now: Long,
+    sessionReady: Boolean = true,
+    sessionLoading: Boolean = false,
+): SyncUiState {
     val running = run?.status == SyncStatus.RUNNING
     val resumable = run?.status?.isResumable == true
     val coolingUntil = pacer?.cooldownUntil?.takeIf { it > now }
@@ -30,11 +43,11 @@ fun syncUiState(run: SyncRunEntity?, pacer: PacerStatus?, now: Long): SyncUiStat
             SyncStatus.PAUSED -> run.lastError ?: "Paused"
             SyncStatus.RUNNING, SyncStatus.DONE, SyncStatus.CANCELLED -> null
         }
-    }
+    } ?: LOG_IN_TO_SYNC.takeIf { !sessionReady && !sessionLoading }
     return SyncUiState(
         running = running,
         resumable = resumable,
-        canStart = !running && coolingUntil == null,
+        canStart = !running && coolingUntil == null && sessionReady,
         canCancel = running,
         canDiscard = resumable && !running,
         canDeleteLibrary = !running,

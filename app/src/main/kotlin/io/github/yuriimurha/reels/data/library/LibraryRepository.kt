@@ -14,9 +14,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 
 /** Read side of the library for the UI. */
-class LibraryRepository(private val db: ReelsDatabase, private val thumbnails: ThumbnailStore) {
+class LibraryRepository(
+    private val db: ReelsDatabase,
+    private val thumbnails: ThumbnailStore,
+    /** Empties the video cache with the library: cached videos belong to items that no longer exist (spec 8.3). */
+    private val clearVideoCache: () -> Unit = {},
+    /** R84: forgets the library's account (`LibraryAccount.forget`). */
+    private val forgetAccount: suspend () -> Unit = {},
+) {
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
 
@@ -54,9 +62,23 @@ class LibraryRepository(private val db: ReelsDatabase, private val thumbnails: T
 
     suspend fun collectionsOf(pk: String): List<CollectionEntity> = collectionDao.collectionsOf(pk)
 
-    /** Wipes synced items, collections, history and thumbnails. Keeps the session and the request log (spec 9.5). */
+    /**
+     * Wipes synced items, collections, history, thumbnails and cached videos, and forgets which Instagram account the library
+     * belonged to (R84), so the next sync may be another account's. Keeps the session and the request log (spec 9.5). The
+     * account is forgotten only after the rows are gone: the other order could leave a library with no owner to check against.
+     */
     suspend fun deleteLibrary() {
         db.deleteLibrary()
-        withContext(Dispatchers.IO) { thumbnails.deleteAll() }
+        forgetAccount()
+        withContext(Dispatchers.IO) {
+            thumbnails.deleteAll()
+            try {
+                clearVideoCache()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The library is already gone; cached videos only take space until the cache evicts them.
+            }
+        }
     }
 }

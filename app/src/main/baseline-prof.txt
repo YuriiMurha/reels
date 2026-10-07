@@ -1,0 +1,4 @@
+# App code that runs on every launch and while scrolling: compile it ahead of time (spec 11).
+# The Compose libraries ship their own profiles; profileinstaller installs all of them on sideloaded builds.
+HSPLio/github/yuriimurha/reels/**->**(**)**
+Lio/github/yuriimurha/reels/**;

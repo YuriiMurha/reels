@@ -1,9 +1,13 @@
 package io.github.yuriimurha.reels.ui.sync
 
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -60,6 +64,7 @@ class SyncScreenLoginTest {
         SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
     }
     private var opened: Pair<String?, LoginPurpose>? = null
+    private var labOpened = 0
 
     @After
     fun tearDown() {
@@ -83,10 +88,16 @@ class SyncScreenLoginTest {
             LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
             pacer,
             SessionRepository(cookies, probe, pacer, settings),
+            requiresSession = false,
         )
         compose.setContent {
             ReelsTheme {
-                SyncScreen(onBack = {}, onOpenLogin = { url, purpose -> opened = url to purpose }, viewModel = viewModel)
+                SyncScreen(
+                    onBack = {},
+                    onOpenLogin = { url, purpose -> opened = url to purpose },
+                    onOpenLab = { labOpened++ },
+                    viewModel = viewModel,
+                )
             }
         }
         compose.waitForIdle()
@@ -133,6 +144,27 @@ class SyncScreenLoginTest {
         compose.onNodeWithText("Paste sessionid").performClick()
         compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password)).performTextInput("42%3Aab")
         compose.onNodeWithText("Use it").performClick()
+    }
+
+    /** `BuildConfig.DEBUG` is true in the debug unit tests, so the Developer section is there. */
+    @Test
+    fun theDeveloperSectionOffersTheAdapterLabWhileLoggedIn() {
+        runBlocking { settings.setSession(SessionState.Valid("tester").toStored()) }
+        show()
+        awaitText("Adapter lab")
+        compose.onNodeWithText("Developer").assertExists()
+        compose.onNodeWithText("Adapter lab").performScrollTo().assertIsEnabled().performClick()
+        assertEquals(1, labOpened)
+        // This ViewModel has no MockModeSwitch, which hides the switch.
+        compose.onAllNodesWithText("Mock mode (fake library)").assertCountEquals(0)
+    }
+
+    @Test
+    fun theAdapterLabNeedsAValidSession() {
+        show()
+        awaitText("Log in") // the stored state has been read: LoggedOut
+        compose.onNodeWithText("Adapter lab").performScrollTo().assertIsNotEnabled().performClick()
+        assertEquals(0, labOpened)
     }
 
     @Test

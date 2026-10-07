@@ -36,8 +36,8 @@ class FakeInstagramClient(
             page.copy(items = page.items.map { visible(it) })
         }
 
-    override suspend fun mediaInfo(mediaPk: String): RemoteMedia =
-        answer("mediaInfo:$mediaPk") { visible(library.media(mediaPk) ?: throw InstagramException.ShapeChanged("items[0]")) }
+    override suspend fun mediaInfo(mediaPk: String): RemoteMedia? =
+        answer("mediaInfo:$mediaPk") { library.media(mediaPk)?.let(::visible) }
 
     private inline fun <T> answer(call: String, block: () -> T): T {
         callLog += call

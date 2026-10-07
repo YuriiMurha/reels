@@ -1,5 +1,6 @@
 package io.github.yuriimurha.reels.data.media
 
+import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.R
 import io.github.yuriimurha.reels.instagram.MediaType
@@ -16,14 +17,16 @@ class FakeVideoSourceResolverTest {
 
     @Test
     fun videosResolveToTheBundledClip() = runTest {
-        assertEquals(
-            "android.resource://io.github.yuriimurha.reels/${R.raw.sample_clip}",
-            resolver.resolve(mediaEntity("m1", MediaType.REEL)).toString(),
-        )
-        assertEquals(
-            "android.resource://io.github.yuriimurha.reels/${R.raw.sample_clip}",
-            resolver.resolve(mediaEntity("m2", MediaType.VIDEO)).toString(),
-        )
+        val clip = Uri.parse("android.resource://io.github.yuriimurha.reels/${R.raw.sample_clip}")
+        assertEquals(VideoSource.Play(clip, "m1"), resolver.resolve(mediaEntity("m1", MediaType.REEL)))
+        assertEquals(VideoSource.Play(clip, "m2"), resolver.resolve(mediaEntity("m2", MediaType.VIDEO)))
+    }
+
+    /** Mock mode has no links to refresh: forcing one changes nothing. */
+    @Test
+    fun aForcedRefreshIsTheSameClip() = runTest {
+        val clip = Uri.parse("android.resource://io.github.yuriimurha.reels/${R.raw.sample_clip}")
+        assertEquals(VideoSource.Play(clip, "m1"), resolver.resolve(mediaEntity("m1", MediaType.REEL), forceRefresh = true))
     }
 
     @Test

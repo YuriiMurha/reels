@@ -1,0 +1,109 @@
+{
+  "items": [
+    {
+      "media": {
+        "pk": 3100000000000000001,
+        "id": "3100000000000000001_42",
+        "code": "Cx1aBcDeFg1",
+        "taken_at": 1700003000,
+        "media_type": 2,
+        "product_type": "clips",
+        "user": {"pk": 7700000001, "username": "user_1"},
+        "caption": {"text": "Synthetic caption one"},
+        "original_width": 1080,
+        "original_height": 1920,
+        "image_versions2": {
+          "candidates": [
+            {"url": "https://cdn.example.invalid/v/t51/101.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1920},
+            {"url": "https://cdn.example.invalid/v/t51/102.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 1280},
+            {"url": "https://cdn.example.invalid/v/t51/103.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 480, "height": 853}
+          ]
+        },
+        "video_versions": [
+          {"type": 101, "url": "https://cdn.example.invalid/v/t50/104.mp4?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 1280}
+        ],
+        "saved_collection_ids": ["17900000000000002"]
+      }
+    },
+    {
+      "media": {
+        "pk": 3100000000000000002,
+        "id": "3100000000000000002_42",
+        "code": "Cx2aBcDeFg2",
+        "taken_at": 1700002000,
+        "media_type": 1,
+        "user": {"pk": 7700000002, "username": "user_2"},
+        "caption": null,
+        "original_width": 1080,
+        "original_height": 1080,
+        "image_versions2": {
+          "candidates": [
+            {"url": "https://cdn.example.invalid/v/t51/201.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1080},
+            {"url": "https://cdn.example.invalid/v/t51/202.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 720},
+            {"url": "https://cdn.example.invalid/v/t51/203.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 480, "height": 480}
+          ]
+        }
+      }
+    },
+    {
+      "media": {
+        "pk": 3100000000000000003,
+        "id": "3100000000000000003_42",
+        "code": "Cx3aBcDeFg3",
+        "taken_at": 1700001000,
+        "media_type": 8,
+        "carousel_media_count": 3,
+        "user": {"pk": 7700000003, "username": "user_3"},
+        "caption": {"text": "Synthetic caption three"},
+        "original_width": 1080,
+        "original_height": 1350,
+        "carousel_media": [
+          {
+            "pk": 3100000000000000031,
+            "id": "3100000000000000031_42",
+            "media_type": 1,
+            "original_width": 1080,
+            "original_height": 1350,
+            "image_versions2": {
+              "candidates": [
+                {"url": "https://cdn.example.invalid/v/t51/301.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1350},
+                {"url": "https://cdn.example.invalid/v/t51/302.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 900},
+                {"url": "https://cdn.example.invalid/v/t51/303.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 480, "height": 600}
+              ]
+            }
+          },
+          {
+            "pk": 3100000000000000032,
+            "id": "3100000000000000032_42",
+            "media_type": 1,
+            "original_width": 1080,
+            "original_height": 1350,
+            "image_versions2": {
+              "candidates": [
+                {"url": "https://cdn.example.invalid/v/t51/311.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1350},
+                {"url": "https://cdn.example.invalid/v/t51/312.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 900}
+              ]
+            }
+          },
+          {
+            "pk": 3100000000000000033,
+            "id": "3100000000000000033_42",
+            "media_type": 1,
+            "original_width": 1080,
+            "original_height": 1350,
+            "image_versions2": {
+              "candidates": [
+                {"url": "https://cdn.example.invalid/v/t51/321.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1350},
+                {"url": "https://cdn.example.invalid/v/t51/322.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 900}
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "more_available": true,
+  "next_max_id": "QVFE_cursor_2",
+  "num_results": 3,
+  "status": "ok"
+}

@@ -30,6 +30,10 @@ interface SyncDao {
     @Query("SELECT MAX(finishedAt) FROM sync_run WHERE status = 'DONE' AND mode = 'FULL'")
     fun lastFullSyncAt(): Flow<Long?>
 
+    /** When the latest DONE run (either mode) finished, or null if none has: the end of the library as last confirmed (R83). */
+    @Query("SELECT MAX(finishedAt) FROM sync_run WHERE status = 'DONE'")
+    suspend fun lastDoneAt(): Long?
+
     @Query("UPDATE sync_run SET status = 'PAUSED', lastError = :reason WHERE status = 'RUNNING'")
     suspend fun pauseRunningRuns(reason: String)
 

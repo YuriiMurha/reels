@@ -1,5 +1,6 @@
 package io.github.yuriimurha.reels.instagram.web
 
+import io.github.yuriimurha.reels.instagram.InstagramException
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 
@@ -37,4 +38,28 @@ object WebEndpoints {
             .addPathSegment("info")
             .addPathSegment("")
             .build()
+
+    private val DIGITS = Regex("[0-9]{1,30}")
+
+    /** An id goes into a URL path, so anything but digits ("..", "1/2") is refused before a request is made. */
+    private fun pathId(id: String, field: String): String =
+        id.takeIf { DIGITS.matches(it) } ?: throw InstagramException.ShapeChanged(field)
+
+    private fun HttpUrl.Builder.cursor(cursor: String?) = apply { cursor?.let { addQueryParameter("max_id", it) } }
+
+    /** Candidate from spec 6.2 (P4): the collection types are the ones instagrapi sends. */
+    fun collections(base: HttpUrl, cursor: String?): HttpUrl =
+        base.newBuilder().addPathSegments("api/v1/collections/list/")
+            .addQueryParameter("collection_types", "[\"ALL_MEDIA_AUTO_COLLECTION\",\"MEDIA\",\"AUDIO_AUTO_COLLECTION\"]")
+            .cursor(cursor).build()
+
+    fun savedPosts(base: HttpUrl, cursor: String?): HttpUrl =
+        base.newBuilder().addPathSegments("api/v1/feed/saved/posts/").cursor(cursor).build()
+
+    fun collectionPosts(base: HttpUrl, collectionId: String, cursor: String?): HttpUrl =
+        base.newBuilder().addPathSegments("api/v1/feed/collection").addPathSegment(pathId(collectionId, "collection_id"))
+            .addPathSegments("posts/").cursor(cursor).build()
+
+    fun mediaInfo(base: HttpUrl, mediaPk: String): HttpUrl =
+        base.newBuilder().addPathSegments("api/v1/media").addPathSegment(pathId(mediaPk, "pk")).addPathSegments("info/").build()
 }

@@ -8,6 +8,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -267,6 +268,21 @@ class ReelsNavHostTest {
         compose.onNodeWithText("Log in again").performClick()
         compose.waitForIdle()
         assertEquals(LoginRoute(null, LoginPurpose.RELOGIN), navController.currentBackStackEntry!!.toRoute<LoginRoute>())
+    }
+
+    /** The lab opens from Sync's Developer section (debug builds), over the container's real wiring, and Back returns to Sync. */
+    @Test
+    fun syncOpensTheAdapterLabAndBackReturnsToSync() {
+        runBlocking { container.settings.setSession(SessionState.Valid("tester").toStored()) }
+        showFrom(SyncRoute)
+        awaitText("Check now") // the stored Valid state has been read, so the lab button is enabled
+        compose.onNodeWithText("Adapter lab").performScrollTo().performClick()
+        compose.waitForIdle()
+        assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<AdapterLabRoute>(), "Adapter lab did not open the lab")
+        compose.onNodeWithText("Each tap sends one paced request to Instagram as the logged-in test account.").assertExists()
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.waitForIdle()
+        assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<SyncRoute>(), "Back did not return to Sync")
     }
 
     /** "Check again" is shown only on a CHALLENGE screen that is waiting, so it shows the route's purpose reached LoginScreen. */

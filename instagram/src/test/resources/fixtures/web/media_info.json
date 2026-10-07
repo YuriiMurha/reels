@@ -1,0 +1,54 @@
+{
+  "items": [
+    {
+      "pk": 3100000000000000001,
+      "id": "3100000000000000001_42",
+      "code": "Cx1aBcDeFg1",
+      "taken_at": 1700003000,
+      "media_type": 2,
+      "product_type": "clips",
+      "user": {
+        "pk": 7700000001,
+        "username": "user_1"
+      },
+      "caption": {
+        "text": "Synthetic caption one"
+      },
+      "original_width": 1080,
+      "original_height": 1920,
+      "image_versions2": {
+        "candidates": [
+          {
+            "url": "https://cdn.example.invalid/v/t51/101.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn",
+            "width": 1080,
+            "height": 1920
+          },
+          {
+            "url": "https://cdn.example.invalid/v/t51/102.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn",
+            "width": 720,
+            "height": 1280
+          },
+          {
+            "url": "https://cdn.example.invalid/v/t51/103.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn",
+            "width": 480,
+            "height": 853
+          }
+        ]
+      },
+      "video_versions": [
+        {
+          "type": 101,
+          "url": "https://cdn.example.invalid/v/t50/104.mp4?stp=x&oe=6720A3F0&_nc_ht=cdn",
+          "width": 720,
+          "height": 1280
+        }
+      ],
+      "saved_collection_ids": [
+        "17900000000000002"
+      ]
+    }
+  ],
+  "num_results": 1,
+  "more_available": false,
+  "status": "ok"
+}

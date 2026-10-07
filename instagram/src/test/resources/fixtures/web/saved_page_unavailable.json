@@ -1,0 +1,38 @@
+{
+  "items": [
+    {"media": null},
+    {
+      "media": {
+        "pk": 3100000000000000007,
+        "id": "3100000000000000007_42",
+        "code": "Cx7aBcDeFg7",
+        "taken_at": 1700000200,
+        "media_type": 1,
+        "user": {"pk": 7700000007, "username": "user_7"},
+        "caption": {"text": "Synthetic caption seven"},
+        "original_width": 1080,
+        "original_height": 1080,
+        "image_versions2": {
+          "candidates": [
+            {"url": "https://cdn.example.invalid/v/t51/701.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 1080, "height": 1080},
+            {"url": "https://cdn.example.invalid/v/t51/702.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 720, "height": 720},
+            {"url": "https://cdn.example.invalid/v/t51/703.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", "width": 480, "height": 480}
+          ]
+        }
+      }
+    },
+    {
+      "media": {
+        "pk": 3100000000000000008,
+        "id": "3100000000000000008_42",
+        "code": "Cx8aBcDeFg8",
+        "taken_at": 1700000100,
+        "media_type": 1,
+        "user": {"pk": 7700000008, "username": "user_8"}
+      }
+    }
+  ],
+  "more_available": false,
+  "num_results": 3,
+  "status": "ok"
+}

@@ -19,10 +19,12 @@ fun mediaEntity(
     caption: String? = "caption $pk",
     thumbPath: String? = "/thumbs/$pk.jpg",
     removedAt: Long? = null,
+    videoUrl: String? = null,
+    videoUrlExpiresAt: Long? = null,
 ) = MediaEntity(
     pk = pk, code = "C$pk", type = type, author = author, caption = caption, takenAt = 0,
     width = 1080, height = 1920, carouselCount = null, thumbPath = thumbPath, thumbUrl = "fake://thumb/$pk",
-    videoUrl = null, videoUrlExpiresAt = null, collectionNames = "", firstSeenAt = 0, lastSeenAt = 0,
+    videoUrl = videoUrl, videoUrlExpiresAt = videoUrlExpiresAt, collectionNames = "", firstSeenAt = 0, lastSeenAt = 0,
     removedAt = removedAt,
 )
 

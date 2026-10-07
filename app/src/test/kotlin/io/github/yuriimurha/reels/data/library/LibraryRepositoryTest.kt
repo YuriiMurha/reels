@@ -120,6 +120,52 @@ class LibraryRepositoryTest {
     }
 
     @Test
+    fun deleteLibraryClearsTheVideoCacheToo() = runTest {
+        givenLibrary()
+        var cleared = 0
+        val repository = LibraryRepository(db, thumbs, clearVideoCache = { cleared++ })
+
+        repository.deleteLibrary()
+
+        assertEquals(1, cleared)
+        assertEquals(emptyList(), repository.collectionCards().first())
+    }
+
+    /** The library is already gone when the cache is cleared: a cache that cannot be emptied must not make Delete library fail. */
+    @Test
+    fun aVideoCacheThatCannotBeClearedDoesNotFailDeleteLibrary() = runTest {
+        givenLibrary()
+        val path = thumbs.write("m1", byteArrayOf(1))
+        val repository = LibraryRepository(db, thumbs, clearVideoCache = { throw java.io.IOException("disk error") })
+
+        repository.deleteLibrary()
+
+        assertEquals(emptyList(), repository.collectionCards().first(), "the rows are gone")
+        assertFalse(File(path).exists(), "and the thumbnails")
+    }
+
+    /** R84: Delete library also forgets which Instagram account the library belonged to, once its rows are gone. */
+    @Test
+    fun deleteLibraryForgetsTheLibrarysAccountAfterTheRowsAreGone() = runTest {
+        givenLibrary()
+        val cardsWhenForgotten = mutableListOf<Int>()
+        lateinit var repository: LibraryRepository
+        repository = LibraryRepository(db, thumbs, forgetAccount = { cardsWhenForgotten += repository.collectionCards().first().size })
+
+        repository.deleteLibrary()
+
+        assertEquals(listOf(0), cardsWhenForgotten, "forgotten exactly once, after the library itself was deleted")
+    }
+
+    @Test
+    fun aCancelledClearStillPropagatesTheCancellation() = runTest {
+        givenLibrary()
+        val repository = LibraryRepository(db, thumbs, clearVideoCache = { throw kotlin.coroutines.cancellation.CancellationException("cancelled") })
+
+        kotlin.test.assertFailsWith<kotlin.coroutines.cancellation.CancellationException> { repository.deleteLibrary() }
+    }
+
+    @Test
     fun mediaSourceSurvivesEncoding() {
         for (source in listOf(
             MediaSource.Collection("c1"),
