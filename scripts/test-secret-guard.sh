@@ -37,13 +37,14 @@ check() {
   echo "ok: $what ($got)"
 }
 
-# check_bytes <blocked|allowed> <description> <path> <printf-format> [args...]
-# Writes bytes directly to disk (not through bash variables) and tests with UTF-8 locale
+# check_bytes <blocked|allowed> <description> <path> <writer-function>
+# The writer prints the file's bytes to stdout and they go straight to disk: bash drops NUL bytes from
+# variables and $(...), so binary content must never pass through one. Commits run under a UTF-8 locale so
+# the hook's own LC_ALL=C is what makes the invalid-UTF-8 case pass.
 check_bytes() {
-  local want="$1" what="$2" path="$3" fmt="$4" got
-  shift 4
+  local want="$1" what="$2" path="$3" writer="$4" got
   mkdir -p "$tmp/$(dirname "$path")"
-  printf "$fmt" "$@" > "$tmp/$path"
+  "$writer" > "$tmp/$path"
   git -C "$tmp" add "$path"
   if LC_ALL=en_US.UTF-8 git -C "$tmp" commit -q -m "$what" >/dev/null 2>&1; then got=allowed; else got=blocked; fi
   if [ "$got" = blocked ]; then
@@ -83,16 +84,18 @@ colon_sid="$sid_name: 1234567890%3A$(printf 'Ab%.0s' $(seq 1 12))"
 check blocked "colon-format sessionid" "notes3.txt" "$colon_sid"
 py_repr="{'"'"'$sid_name'"'"': '"'"'1234567890%3A$(printf 'Ab%.0s' $(seq 1 12))'"'"'}"
 check blocked "Python repr with sessionid" "config.py" "$py_repr"
+py_dict="{'name': '$sid_name', 'value': 'x'}"
+check blocked "Python dict with name and sessionid" "env.py" "$py_dict"
 csrf_token_long="$(printf 'Ab%.0s' $(seq 1 16))"
 check blocked "X-CSRFToken header" "headers.txt" "X-CSRFToken: $csrf_token_long"
 check blocked "JSON csrftoken with 32 chars" "state.json" "{\"$csrf_name\": \"$csrf_token_long$csrf_token_long\"}"
-# Binary regression cases: test with bytes written directly to disk
-check_bytes blocked "invalid UTF-8 with sessionid" "binary-utf8.txt" '\xff\xfe%s\n' "$planted_sid"
-# Create file with sessionid, 9000 a's, then NUL byte (no newline between)
-check_bytes blocked "sessionid with NUL bytes in middle" "padded-nul.bin" '%s' "$(printf '%s' "$planted_sid"; head -c 9000 /dev/zero | tr '\0' 'a'; printf '\0')"
-# UTF-16LE encoding of planted_sid (may be detected due to --text flag; mark as allowed if detected)
-utf16le_sid="$(printf '%s' "$planted_sid" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null || printf '%s' "$planted_sid")"
-check_bytes blocked "UTF-16LE sessionid (out of scope but detected by --text)" "utf16le.txt" '%s' "$utf16le_sid"
+# Binary regression cases. Each writer streams real bytes to the file (see check_bytes).
+write_invalid_utf8() { printf '\xff\xfe%s\n' "$planted_sid"; }
+write_utf16le() { printf '%s\n' "$planted_sid" | iconv -f UTF-8 -t UTF-16LE; }
+write_nul_first() { head -c 16 /dev/zero; printf '%s\n' "$planted_sid"; }
+check_bytes blocked "invalid UTF-8 with sessionid" "binary-utf8.txt" write_invalid_utf8
+check_bytes blocked "real UTF-16LE sessionid" "utf16le.txt" write_utf16le
+check_bytes blocked "NUL inside git's binary-detection window, then sessionid" "nul-first.bin" write_nul_first
 check allowed "prose that mentions csrftoken" "docs/csrf.md" "The csrftoken cookie is read from the jar"
 check allowed "csrftoken with 15-char value (boundary)" "notes4.txt" "$csrf_name=$(printf 'Ab%.0s' $(seq 1 7))A"
 check allowed "prose sessionid colon" "docs/auth.md" "sessionid: authentication cookie"
