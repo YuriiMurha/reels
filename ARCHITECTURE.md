@@ -229,10 +229,15 @@ endpoint to learn the real response shapes (spec 6.3).
 - **Sync lane:** 4–12 s log-normal gaps, a 60–180 s break every 15–30 requests, 300 requests per run and 600 per rolling
   24 h (counted from the persisted `api_request` log). A run's budget is per engine invocation: each resume starts at 0,
   and the 24 h cap still holds.
+  - `sync(run, precondition, request)` takes the same optional `precondition` as the interactive lane (R82). It runs holding
+    the gate, after the gap (and any break) has been waited out and the last `ensureAllowed()` and run-budget checks passed,
+    right before the break slot and the run budget are counted and the request is recorded and sent. A throw sends and logs
+    nothing, uses neither the run budget nor the break slot, leaves the end of the last request where it was, frees the gate
+    and reaches the caller. It can only stop requests.
 - **Interactive lane** (viewer link renewals, session checks, lab calls): priority, so interactive requests never wait
   behind a sync gap or break, with a 2 s minimum gap, counted in the 24 h budget. `interactive(precondition, request)`
   runs the optional `precondition` once the gate is held, the gap waited out and the last `ensureAllowed()` passed, right
-  before the request is recorded and sent (R79); the sync lane has no such hook.
+  before the request is recorded and sent (R79).
 - **CDN lane:** 2 concurrent downloads with 0.2–0.8 s jitter, not budgeted.
 - **Cooldowns:** after a `RateLimited` the cooldown is 1 h, or 24 h if the previous rate limit was less than 24 h ago. It
   is persisted in DataStore, so killing the app does not reset it. While it is active every API lane refuses
@@ -310,6 +315,15 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
 - **Session signals.** `run` reads `signals.epoch()` first thing, tells the session layer `sessionOk(username, epoch)` once
   `currentUser()` has succeeded, and passes the same epoch with `loginRequired` and `challengeRequired`; a failing receiver
   changes nothing about the run.
+- **Session gate (R82, spec 6.4).** Every request of a run, the first `currentUser()` included, passes
+  `sessionUsable(epoch)` (the epoch the run captured at its start) as the Pacer's sync-lane `precondition`, so it is asked
+  inside the gate right before sending. `RunSession.USABLE` lets the request go. `CHALLENGE` (a stored Challenge) stops the
+  run as STOPPED_CHALLENGE, and `NOT_USABLE` (Expired, LoggedOut, or another epoch after a logout or a paste) as
+  STOPPED_LOGIN, with nothing more sent and no session signal (the session layer already knows, and
+  `challengeRequired(null, ...)` would wipe the challenge URL it stored). This is what stops a run when the viewer, the
+  lab or Check now meets a challenge or an expiry mid-run, a paste replaces the session mid-run, or WorkManager re-runs
+  work by itself after a process death under a session that is no longer valid (it then sends zero requests). The
+  default (the fake backend) lets every request through. It only removes requests.
 - `SortKeys` gives newest-first keys.
 
 ### Run outcomes
@@ -325,6 +339,7 @@ status chip shows the `lastError` for any stopped or paused run.
 | App killed mid-run, found at the next start | PAUSED | Interrupted, tap Resume | the same |
 | `ChallengeRequired` (the session layer gets the challenge URL) | STOPPED_CHALLENGE | Instagram wants verification | Instagram wants verification. Resolve it before syncing again. |
 | `LoginRequired` (the session layer marks it expired) | STOPPED_LOGIN | Session expired | Session expired. Log in again, then tap Resume. |
+| The session gate said no before a request (R82): a stored Challenge; or Expired, LoggedOut, or a logout or paste since the run started. Nothing more is sent, no signal | STOPPED_CHALLENGE for a Challenge, else STOPPED_LOGIN | Instagram wants verification, or Session expired | as the two rows above |
 | `RateLimited` (the Pacer armed the cooldown), or `PacerRefusal.CoolingDown` | STOPPED_RATE_LIMIT | Instagram is limiting requests, or Cooling down | Instagram limited requests. Tap Resume when you're ready. |
 | `ShapeChanged(path)` | STOPPED_SHAPE | Adapter needs repair: `<path>` | the `lastError` |
 | `Transient` after the four backoffs | PAUSED | Network problem, try again later | the `lastError` |
@@ -420,8 +435,12 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   isSessionReady = { session.state.first() is SessionState.Valid })`, where `session` is both the `SessionSignals`
   argument and the source of the readiness check) live here too. `syncEngine()` passes a `MediaEviction` over
   `videoCache.remove`, and `library` gets `clearVideoCache = { videoCache.clear() }`.
-- **Engine signals.** `syncEngine()` is an exhaustive `when (backend)`: `Fake` gets `SessionSignals.None`, `Real` gets the
-  `SessionRepository`, whose signals carry the session epoch.
+- **Engine signals and gate.** `syncEngine()` is an exhaustive `when (backend)`: `Fake` gets `SessionSignals.None` and a
+  gate that is always `USABLE`; `Real` gets the `SessionRepository`, whose signals carry the session epoch, and
+  `sessionUsable = session::runSession` (R82: Challenge if the stored state is Challenge, Usable only for a Valid state
+  under the run's own epoch). `runSession` never takes `SessionRepository`'s lock: a paste holds that lock while it waits
+  for the Pacer's gate, and the gate's holder is the one asking, so the lock would deadlock both (pinned by a test that
+  runs exactly that interleaving). It reads the state before the epoch, because logout and paste bump the epoch first.
 - **Lazy HTTP clients.** `instagramHttp` and `cdnHttp` (whose user agent comes from `WebSettings.getDefaultUserAgent`, a
   WebView provider load) are built by the first request that needs them, so constructing the container or the backend loads
   no WebView (tests pin this).

@@ -213,11 +213,14 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
 ### When a run stops (the red banner on Sync)
 
 - **"Instagram wants verification. Resolve it before syncing again."** Instagram asked for a check (a challenge).
-  This is a hard stop with no automatic retries, and nothing more is sent. Under **Instagram session** tap **Resolve
-  on Instagram**, finish the check in the page, tap **Check again**, and when Sync says "Logged in as @handle" tap
-  **Resume**.
-- **"Session expired. Log in again, then tap Resume."** Instagram no longer accepts the login. Tap **Log in again**
-  (finish any 2FA), then **Resume**.
+  This is a hard stop with no automatic retries, and nothing more is sent. That holds also when the viewer, the lab or
+  **Check now** is what met the challenge: a run that is going checks the session before every request and stops before
+  its next one. A run Android restarts by itself sends nothing either while the session isn't valid. Under **Instagram
+  session** tap **Resolve on Instagram**, finish the check in the page, tap **Check again**, and when Sync says "Logged
+  in as @handle" tap **Resume**.
+- **"Session expired. Log in again, then tap Resume."** Instagram no longer accepts the login, or a sessionid was pasted
+  while the run was going (the run stops before its next request rather than carry on under another session). Tap
+  **Log in again** (finish any 2FA), then **Resume**. If Sync already says "Logged in as @handle", just tap **Resume**.
 - **"Adapter needs repair: …"** Instagram's answer was not what the app expects; the text after the colon says where.
   Nothing was deleted. Don't keep tapping Resume (each tap sends the same request again). Run the Adapter lab once,
   and paste the banner and the lab's result in a Claude session. The common texts after the colon are explained in

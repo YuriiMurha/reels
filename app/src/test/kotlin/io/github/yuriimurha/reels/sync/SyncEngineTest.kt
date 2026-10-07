@@ -74,12 +74,13 @@ class SyncEngineTest {
         store: ThumbnailStore = thumbs,
         sessionSignals: SessionSignals = signals,
         eviction: MediaEviction = MediaEviction { },
+        sessionUsable: suspend (Int) -> RunSession = { RunSession.USABLE },
     ): SyncEngine {
         clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
-            eviction = eviction,
+            eviction = eviction, sessionUsable = sessionUsable,
         )
     }
 
@@ -983,6 +984,134 @@ class SyncEngineTest {
         assertEquals(1, run.failures)
         assertEquals(49, run.thumbsCached)
         assertNull(db.mediaDao().byPks(listOf(slowPk)).single().thumbPath)
+    }
+
+    // ---- R82: a session that stops being usable stops the run before its next request ----
+
+    /**
+     * Final review I-1 (a), the reviewer's reproduction: the viewer's `mediaInfo` came back `challenge_required` while request
+     * 3 of a Full sync was out, so the stored state is now Challenge. Before the fix the run sent 6 more requests and ended DONE.
+     */
+    @Test
+    fun aChallengeStoredByAnotherLaneStopsTheRunBeforeItsNextRequest() = runTest {
+        val client = FakeInstagramClient(FakeLibrary(seed = 3, itemCount = 60, collectionCount = 3), reportsSavedCollectionIds = false)
+        var stored = RunSession.USABLE
+        client.failures = FakeFailures { call ->
+            if (call == 3) stored = RunSession.CHALLENGE
+            null
+        }
+
+        val run = runSync(engine(client, sessionUsable = { stored }), SyncMode.FULL)
+
+        assertEquals(3, client.calls.size, "nothing after the request during which the challenge was stored: ${client.calls}")
+        assertEquals(SyncStatus.STOPPED_CHALLENGE, run.status)
+        assertEquals("Instagram wants verification", run.lastError)
+        assertEquals(
+            listOf("ok:test_account@5"),
+            signals.events,
+            "no challenge signal: the session layer already holds the challenge, and a null URL would wipe the one it stored",
+        )
+    }
+
+    @Test
+    fun anExpiryStoredByAnotherLaneStopsTheRunAsSessionExpired() = runTest {
+        val client = smallClient()
+        var stored = RunSession.USABLE
+        client.failures = FakeFailures { call ->
+            if (call == 4) stored = RunSession.NOT_USABLE // Check now, or the lab, got login_required while page 2 was out
+            null
+        }
+
+        val run = runSync(engine(client, sessionUsable = { stored }), SyncMode.QUICK)
+
+        assertEquals(4, client.calls.size, "nothing after the expiry was stored: ${client.calls}")
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals("Session expired", run.lastError)
+        assertEquals(listOf("ok:test_account@5"), signals.events, "no loginRequired: the session layer already knows")
+    }
+
+    /** I-1 (b): a paste (or a logout) mid-run starts a new epoch. The run must not carry on under a session it didn't start with. */
+    @Test
+    fun aPasteOrLogoutMidRunStopsItWithNoFurtherRequest() = runTest {
+        val client = smallClient()
+        // As the container wires it: usable only under the epoch the run started with (5).
+        val sameEpoch: suspend (Int) -> RunSession = { epoch -> if (epoch == signals.current) RunSession.USABLE else RunSession.NOT_USABLE }
+        client.failures = FakeFailures { call ->
+            if (call == 3) signals.current = 6 // the owner pasted another session while page 1 was out
+            null
+        }
+
+        val run = runSync(engine(client, sessionUsable = sameEpoch), SyncMode.QUICK)
+
+        assertEquals(3, client.calls.size, "nothing under the new session: ${client.calls}")
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals("Session expired", run.lastError)
+        assertEquals(listOf("ok:test_account@5"), signals.events)
+    }
+
+    /** The gate is asked with the epoch the run captured at its start, before every request, the session check included. */
+    @Test
+    fun theGateIsAskedBeforeEveryRequestWithTheRunsEpoch() = runTest {
+        val client = smallClient()
+        val asked = mutableListOf<Pair<Int, Int>>() // (requests made so far, epoch asked with)
+        client.failures = FakeFailures { call ->
+            if (call == 2) signals.current = 9 // the session layer moves on; the run keeps asking with ITS epoch
+            null
+        }
+
+        runSync(engine(client, sessionUsable = { epoch -> asked += client.calls.size to epoch; RunSession.USABLE }), SyncMode.QUICK)
+
+        assertEquals(client.calls.indices.map { it to 5 }, asked, "one check per request, each before it, always with epoch 5")
+    }
+
+    /** I-1 (c): WorkManager re-runs work by itself after a process death. Under a challenged session it must send nothing at all. */
+    @Test
+    fun aRerunUnderAChallengedSessionSendsNothingNotEvenTheSessionCheck() = runTest {
+        val client = smallClient()
+        val engine = engine(client)
+        client.failures = FakeFailures { if (it == 4) InstagramException.ChallengeRequired(null) else null }
+        val id = newRun(SyncMode.FULL)
+        engine.run(id)
+        assertEquals(SyncStatus.STOPPED_CHALLENGE, db.syncDao().run(id)!!.status, "precondition: a run left resumable")
+        val callsBefore = client.calls.size
+        val requestsBefore = db.syncDao().run(id)!!.requestsUsed
+        signals.events.clear()
+        client.failures = FakeFailures { null }
+
+        engine(client, sessionUsable = { RunSession.CHALLENGE }).run(id)
+
+        val run = db.syncDao().run(id)!!
+        assertEquals(callsBefore, client.calls.size, "not even currentUser: ${client.calls.drop(callsBefore)}")
+        assertEquals(SyncStatus.STOPPED_CHALLENGE, run.status)
+        assertEquals("Instagram wants verification", run.lastError)
+        assertEquals(requestsBefore, run.requestsUsed, "no request was counted")
+        assertEquals(emptyList(), signals.events)
+    }
+
+    @Test
+    fun aRerunUnderAnExpiredSessionSendsNothing() = runTest {
+        val client = smallClient()
+        val run = runSync(engine(client, sessionUsable = { RunSession.NOT_USABLE }), SyncMode.QUICK)
+
+        assertEquals(emptyList(), client.calls)
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals("Session expired", run.lastError)
+        assertEquals(emptyList(), signals.events)
+    }
+
+    /** The fake backend has no session: the container builds its engine without a gate, and the default lets everything through. */
+    @Test
+    fun theFakeBackendsEngineIsUnaffected() = runTest {
+        val client = smallClient()
+        clock = { testScheduler.currentTime }
+        val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = { testScheduler.currentTime })
+        // No sessionUsable argument, and SessionSignals.None, as AppContainer.syncEngine() builds it for Backend.Fake.
+        val engine = SyncEngine(client, pacer, db, fetcher, thumbs, SessionSignals.None, Random(1), now = { testScheduler.currentTime })
+
+        val run = runSync(engine, SyncMode.FULL)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(client.library.allSaved().map { it.pk }, pks(ALL_SAVED_ID))
     }
 
     private class ThrowingSignals : SessionSignals {

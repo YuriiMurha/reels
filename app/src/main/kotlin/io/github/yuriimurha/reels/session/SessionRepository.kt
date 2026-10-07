@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.instagram.SessionProbe
 import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.WebSessionCookies
 import io.github.yuriimurha.reels.instagram.web.cookieValue
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import kotlinx.coroutines.NonCancellable
@@ -151,6 +152,25 @@ class SessionRepository(
         lock.withLock {
             if (epoch != sessionEpoch) return
             store(SessionState.Challenge(challengeUrl, state.first().handle))
+        }
+    }
+
+    /**
+     * R82: may a sync run that started under [epoch] send its next request? A stored Challenge says [RunSession.CHALLENGE];
+     * only a Valid state under the same epoch is [RunSession.USABLE]; anything else (Expired, LoggedOut, or a logout or paste
+     * since the run started) is [RunSession.NOT_USABLE]. A read, never a request, and it changes nothing.
+     *
+     * The engine asks this from INSIDE the Pacer's gate. It must never take [lock]: a paste holds the lock while it waits for
+     * that same gate, so taking it here would leave each waiting for the other. It needs no lock: [sessionEpoch] is volatile
+     * and the state is one DataStore read. The state is read first, the epoch second: logout and paste bump the epoch before
+     * they touch the jar, so one that has begun is always seen.
+     */
+    suspend fun runSession(epoch: Int): RunSession {
+        val stored = state.first()
+        return when {
+            stored is SessionState.Challenge -> RunSession.CHALLENGE
+            stored is SessionState.Valid && epoch == sessionEpoch -> RunSession.USABLE
+            else -> RunSession.NOT_USABLE
         }
     }
 

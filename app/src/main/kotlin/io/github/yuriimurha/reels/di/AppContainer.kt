@@ -27,6 +27,7 @@ import io.github.yuriimurha.reels.session.AndroidCookieStore
 import io.github.yuriimurha.reels.session.LazySessionProbe
 import io.github.yuriimurha.reels.session.SessionRepository
 import io.github.yuriimurha.reels.session.SessionState
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.SyncController
 import io.github.yuriimurha.reels.sync.SyncEngine
@@ -149,14 +150,26 @@ class AppContainer(context: Context) {
     }
 
     fun syncEngine(): SyncEngine {
-        // Exhaustive on purpose: a new backend forces a decision about session signals (the real one's carry the session epoch).
-        val signals: SessionSignals = when (backend) {
-            is Backend.Fake -> SessionSignals.None
-            is Backend.Real -> session
+        // Exhaustive on purpose: a new backend forces a decision about session signals (the real one's carry the session epoch)
+        // and about the session gate every request passes (R82).
+        val signals: SessionSignals
+        val sessionUsable: suspend (epoch: Int) -> RunSession
+        when (backend) {
+            is Backend.Fake -> {
+                signals = SessionSignals.None
+                sessionUsable = { RunSession.USABLE } // the fake library has no session
+            }
+            is Backend.Real -> {
+                signals = session
+                // Valid under the run's own epoch, read without SessionRepository's lock: a paste holds that lock while it
+                // waits for the Pacer's gate, and this runs inside the gate, so taking the lock would deadlock.
+                sessionUsable = session::runSession
+            }
         }
         return SyncEngine(
             backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals,
             eviction = MediaEviction { pks -> pks.forEach { videoCache.remove(it) } },
+            sessionUsable = sessionUsable,
         )
     }
 }

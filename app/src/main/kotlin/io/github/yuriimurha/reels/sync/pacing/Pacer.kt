@@ -51,8 +51,14 @@ class Pacer(
      * the gate it first yields to waiting interactive requests, and after any other request ran in the meantime
      * it waits a fresh gap from that request's end (a new draw, so never less than [PacingPolicy.minGapMs]).
      * The very first request of a process waits out the gap after the last request the log remembers.
+     *
+     * [precondition] works as for [interactive] (R82): the gap and any break can last minutes, and a run's session can stop
+     * being usable meanwhile (another lane stored a challenge, a logout, a paste). It runs holding the gate, after the gap has
+     * been waited out and the last [ensureAllowed] and run-budget checks passed, right before the request would be counted
+     * and sent. If it throws, nothing is sent or logged, neither the run budget nor the break slot is used, the end of the
+     * last request does not move, the gate is released and the exception reaches the caller.
      */
-    suspend fun <T> sync(run: RunBudget, request: suspend () -> T): T {
+    suspend fun <T> sync(run: RunBudget, precondition: (suspend () -> Unit)? = null, request: suspend () -> T): T {
         var planned = false
         var plannedFrom: Long? = null // lastRequestEndedAt that notBefore was computed from
         var notBefore = 0L
@@ -97,6 +103,7 @@ class Pacer(
                 }
                 ensureAllowed()
                 ensureRunBudget(run)
+                precondition?.invoke()
                 consumeBreakSlot()
                 run.used++
                 return execute(request)
@@ -112,7 +119,7 @@ class Pacer(
      * Waiting for the gate and for the gap can take seconds, and what the caller checked before queueing (a valid session)
      * can change meanwhile. So [precondition] runs once everything else has been waited for and checked, holding the gate,
      * right before the request would be recorded and sent: if it throws, nothing is sent, nothing is logged (so no budget is
-     * used), the gate is released and the exception reaches the caller. The sync lane has no such hook.
+     * used), the gate is released and the exception reaches the caller. [sync] has the same hook.
      */
     suspend fun <T> interactive(precondition: (suspend () -> Unit)? = null, request: suspend () -> T): T {
         ensureAllowed()

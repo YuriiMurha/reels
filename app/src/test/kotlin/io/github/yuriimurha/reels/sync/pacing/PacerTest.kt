@@ -213,6 +213,110 @@ class PacerTest {
         assertTrue(!checked, "and the precondition never ran")
     }
 
+    // ---- R82: the sync lane's precondition ----
+
+    /**
+     * A sync run checks, from inside the gate, that its session is still usable: another lane can store a challenge while
+     * the run waits out a gap. A failed check sends nothing, logs nothing, uses none of the run's budget and frees the gate.
+     */
+    @Test
+    fun aThrowingSyncPreconditionSendsLogsAndCountsNothingAndReleasesTheGate() = runTest {
+        val log = InMemoryRequestLog()
+        val pacer = pacer(log = log)
+        val run = pacer.newRun()
+        var sent = 0
+
+        assertFailsWith<IllegalStateException> {
+            pacer.sync(run, precondition = { throw IllegalStateException("not usable") }) { sent++ }
+        }
+        assertEquals(0, sent, "the request was never run")
+        assertEquals(0, log.countSince(-1), "and never logged: it did not count against the 24 h budget")
+        assertEquals(0, run.used, "nor against the run's budget")
+
+        // The gate is free again: a held gate would never answer, and the timeout says so.
+        withTimeout(60_000) { pacer.sync(run) { sent++ } }
+        assertEquals(1, sent)
+        assertEquals(1, log.countSince(-1))
+        assertEquals(1, run.used)
+    }
+
+    /** The precondition is the LAST check: after the gap, at the moment of sending, before the request is logged or counted. */
+    @Test
+    fun theSyncPreconditionRunsAfterTheGapAndBeforeTheRequestIsLoggedOrCounted() = runTest {
+        val log = InMemoryRequestLog()
+        val pacer = pacer(log = log)
+        val run = pacer.newRun()
+        pacer.sync(run) {}
+        val previousEnd = testScheduler.currentTime
+        var checkedAt = -1L
+        var loggedWhenChecked = -1
+        var usedWhenChecked = -1
+        var sentAt = -1L
+
+        pacer.sync(run, precondition = {
+            checkedAt = testScheduler.currentTime
+            loggedWhenChecked = log.countSince(-1)
+            usedWhenChecked = run.used
+        }) { sentAt = testScheduler.currentTime }
+
+        assertTrue(checkedAt - previousEnd >= PacingPolicy.Conservative.minGapMs, "checked after the gap: ${checkedAt - previousEnd} ms")
+        assertEquals(sentAt, checkedAt, "checked right before the request, with no wait in between")
+        assertEquals(1, loggedWhenChecked, "checked before this request was recorded")
+        assertEquals(1, usedWhenChecked, "and before it was counted against the run")
+        assertEquals(2, log.countSince(-1))
+    }
+
+    /** A refused attempt sent nothing, so it must not move "the end of the last request": the next gap counts from the real one. */
+    @Test
+    fun aThrowingSyncPreconditionLeavesTheEndOfTheLastRequestAlone() = runTest {
+        val pacer = pacer()
+        val run = pacer.newRun()
+        pacer.sync(run) {}
+        val lastRealEnd = testScheduler.currentTime
+
+        assertFailsWith<IllegalStateException> { pacer.sync(run, precondition = { throw IllegalStateException("not usable") }) {} }
+        val refusedAt = testScheduler.currentTime
+        assertTrue(refusedAt - lastRealEnd >= PacingPolicy.Conservative.minGapMs, "it waited its gap, then refused")
+        var startedAt = -1L
+        pacer.interactive { startedAt = testScheduler.currentTime }
+
+        assertEquals(refusedAt, startedAt, "the last real request ended long over 2 s ago; the refused attempt is not a request")
+    }
+
+    /** A refused attempt is not a sent request: breaks stay where the SENT requests put them. */
+    @Test
+    fun aThrowingSyncPreconditionDoesNotUseUpTheBreakSlot() = runTest {
+        val pacer = pacer(random = fixedBreakInterval(2)) // a break before every second sent request
+        val run = pacer.newRun()
+        val starts = mutableListOf<Long>()
+
+        pacer.sync(run) { starts += testScheduler.currentTime } // sent #1
+        // The next one is owed a break; it waits for it, then its precondition refuses.
+        assertFailsWith<IllegalStateException> { pacer.sync(run, precondition = { throw IllegalStateException("not usable") }) {} }
+        repeat(3) { pacer.sync(run) { starts += testScheduler.currentTime } } // sent #2, #3, #4
+
+        val gaps = starts.zipWithNext { a, b -> b - a }
+        assertTrue(gaps[1] < 59_000, "no break between sent #2 and #3 (#2 took the slot the refused attempt left alone): $gaps")
+        assertTrue(gaps[2] > 59_000, "a break before sent #4: $gaps")
+        assertEquals(4, run.used)
+    }
+
+    /** A cooldown that starts while a sync request waits refuses it before its precondition is asked anything. */
+    @Test
+    fun aCooldownThatStartsWhileASyncRequestWaitsComesBeforeItsPrecondition() = runTest {
+        val pacer = pacer()
+        var checked = false
+        launch { runCatching { pacer.interactive { delay(1_000); throw InstagramException.RateLimited() } } } // holds the gate, then arms the cooldown
+        runCurrent()
+        val queued = async { runCatching { pacer.sync(pacer.newRun(), precondition = { checked = true }) {} } }
+        runCurrent()
+
+        advanceUntilIdle()
+
+        assertTrue(queued.await().exceptionOrNull() is PacerRefusal.CoolingDown, "refused by the cooldown")
+        assertTrue(!checked, "and the precondition never ran")
+    }
+
     @Test
     fun rateLimitStartsACooldownThatRefusesBothLanes() = runTest {
         val pacer = pacer()

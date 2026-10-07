@@ -28,3 +28,18 @@ interface SessionSignals {
         override suspend fun challengeRequired(challengeUrl: String?, epoch: Int) = Unit
     }
 }
+
+/**
+ * Whether a sync run may send its next request under the session it started with (R82). The engine asks before every
+ * request, from inside the Pacer's gate, so a change that another lane, a logout or a paste made meanwhile is seen.
+ */
+enum class RunSession {
+    /** The stored state is Valid and the jar still holds the session the run started under (the same epoch). */
+    USABLE,
+
+    /** The stored state is Challenge: the run stops as STOPPED_CHALLENGE. */
+    CHALLENGE,
+
+    /** Expired, logged out, or replaced since the run started (another epoch): the run stops as STOPPED_LOGIN. */
+    NOT_USABLE,
+}

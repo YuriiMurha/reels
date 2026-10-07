@@ -47,6 +47,13 @@ class SyncEngine(
     private val now: () -> Long = System::currentTimeMillis,
     /** Told which items a reconcile removed, so their cached videos go with their thumbnails (spec 8.3). */
     private val eviction: MediaEviction = MediaEviction { },
+    /**
+     * R82: asked from inside the Pacer's gate right before every request (the session check included), with the epoch the run
+     * started under. Anything but [RunSession.USABLE] stops the run with nothing more sent: a challenge or an expiry another
+     * lane stored (the viewer, the lab, Check now), a logout, or a paste. The fake backend has no session: the default lets
+     * every request through.
+     */
+    private val sessionUsable: suspend (epoch: Int) -> RunSession = { RunSession.USABLE },
 ) {
     companion object {
         /** P7: a FULL reconcile removing at least this many items AND more than half of those that existed before the run is refused. */
@@ -69,6 +76,7 @@ class SyncEngine(
         val progress = Progress(
             stored.copy(status = SyncStatus.RUNNING, lastError = null, finishedAt = null, collectionsDone = 0),
             pacer.newRun(),
+            epoch,
         )
         progress.save()
         try {
@@ -86,6 +94,14 @@ class SyncEngine(
         } catch (e: CancellationException) {
             withContext(NonCancellable) { progress.finish(SyncStatus.PAUSED, "Cancelled") }
             throw e
+        } catch (e: SessionNotUsable) {
+            // R82: the session stopped being usable under the run and nothing more was sent. No signal: the session layer
+            // already knows, and challengeRequired(null, ...) would wipe the challenge URL it stored.
+            if (e.challenge) {
+                progress.finish(SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification")
+            } else {
+                progress.finish(SyncStatus.STOPPED_LOGIN, "Session expired")
+            }
         } catch (e: InstagramException.ChallengeRequired) {
             progress.finish(SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification")
             notifySession { signals.challengeRequired(e.challengeUrl, epoch) }
@@ -124,8 +140,22 @@ class SyncEngine(
         }
     }
 
+    /** One paced request, retried after a transient failure. Every attempt first passes [ensureSessionUsable], inside the gate. */
     private suspend fun <T> call(progress: Progress, request: suspend () -> T): T =
-        retryTransient(random) { pacer.sync(progress.budget, request) }
+        retryTransient(random) {
+            pacer.sync(progress.budget, precondition = { ensureSessionUsable(progress.epoch) }, request = request)
+        }
+
+    private suspend fun ensureSessionUsable(epoch: Int) {
+        when (sessionUsable(epoch)) {
+            RunSession.USABLE -> Unit
+            RunSession.CHALLENGE -> throw SessionNotUsable(challenge = true)
+            RunSession.NOT_USABLE -> throw SessionNotUsable(challenge = false)
+        }
+    }
+
+    /** [sessionUsable] said no: thrown inside the Pacer's gate before anything is sent or counted, mapped to a stop in [run]. */
+    private class SessionNotUsable(val challenge: Boolean) : Exception()
 
     private suspend fun fetchCollections(progress: Progress): List<CollectionEntity> {
         val remote = mutableListOf<RemoteCollection>()
@@ -370,8 +400,11 @@ class SyncEngine(
         removedAt = null,
     )
 
-    /** The run row plus this invocation's request budget; every change is written straight through. */
-    private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget) {
+    /**
+     * The run row plus this invocation's request budget and the session [epoch] it started under; every change is written
+     * straight through.
+     */
+    private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget, val epoch: Int) {
         private val requestsBefore = run.requestsUsed
 
         /**

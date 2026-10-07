@@ -52,6 +52,23 @@ class BackendWiringGuardTest {
         assertTrue("syncScheduler.cancelAndAwait()" in switches.single(), "cancelSync must await the cancel: ${switches.single()}")
     }
 
+    /**
+     * R82: the real engine asks `SessionRepository.runSession` (Valid under the run's own epoch, lock-free: pinned by
+     * `SessionRepositoryTest`) before every request; the fake one has no session. Read, not run: running the real engine in a
+     * test is exactly the request to Instagram that must never happen.
+     */
+    @Test
+    fun theRealEngineIsGatedOnTheSessionAndTheFakeOneIsNot() {
+        val container = main("di/AppContainer.kt")
+        val engines = callArguments(container, "SyncEngine(")
+        assertEquals(1, engines.size, "expected exactly one SyncEngine in AppContainer: $engines")
+        assertTrue(Regex("""sessionUsable\s*=\s*sessionUsable\b""").containsMatchIn(engines.single()), "the engine's gate: ${engines.single()}")
+        val real = Regex("""is Backend\.Real\s*->\s*\{([^}]*)}""").find(container)?.groupValues?.get(1)
+        assertTrue(real != null && Regex("""sessionUsable\s*=\s*session::runSession\b""").containsMatchIn(real), "Backend.Real's gate: $real")
+        val fake = Regex("""is Backend\.Fake\s*->\s*\{([^}]*\{[^}]*}[^}]*)}""").find(container)?.groupValues?.get(1)
+        assertTrue(fake != null && Regex("""sessionUsable\s*=\s*\{\s*RunSession\.USABLE\s*}""").containsMatchIn(fake), "Backend.Fake's gate: $fake")
+    }
+
     @Test
     fun theSyncScreenShowsTheBackendsPacer() {
         val screen = main("ui/sync/SyncScreen.kt")
