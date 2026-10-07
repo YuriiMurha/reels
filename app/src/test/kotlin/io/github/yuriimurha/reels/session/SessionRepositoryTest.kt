@@ -22,6 +22,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -52,8 +53,11 @@ class SessionRepositoryTest {
     @After
     fun tearDown() = storeScope.cancel()
 
+    /** The store behind the last [repository], so a test can read what is persisted at a given moment. */
+    private lateinit var settings: SettingsStore
+
     private fun TestScope.repository(requestLog: InMemoryRequestLog = log): SessionRepository {
-        val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
+        settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
         val pacer = Pacer(PacingPolicy.Conservative, requestLog, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SessionRepository(cookies, probe, pacer, settings)
     }
@@ -473,6 +477,51 @@ class SessionRepositoryTest {
 
         assertEquals(SessionState.Valid("tester"), repository.state.first())
         assertEquals(emptyList(), cookies.events, "every successful sync would otherwise flush the jar and rewrite the settings")
+    }
+
+    /** What is persisted at the moment the jar is flushed, read from a different thread than the one that is flushing. */
+    private fun storedStateAtFlush(into: MutableList<SessionState>) {
+        cookies.onFlush = { into += runBlocking { settings.session.first().toState() } }
+    }
+
+    /** A kill between the two must not leave "Logged in as" with no sessionid behind it, so the jar goes to disk FIRST. */
+    @Test
+    fun sessionOkFlushesTheJarBeforeItStoresValid() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.validate()
+        repository.loginRequired(repository.epoch())
+        val atFlush = mutableListOf<SessionState>()
+        storedStateAtFlush(atFlush)
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(listOf<SessionState>(SessionState.Expired("tester")), atFlush, "when the jar was flushed, Valid was not stored yet")
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+    }
+
+    @Test
+    fun aValidResultFlushesTheJarBeforeItIsStored() = runTest {
+        signedIn()
+        val repository = repository()
+        val atFlush = mutableListOf<SessionState>()
+        storedStateAtFlush(atFlush)
+
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+
+        assertEquals(listOf<SessionState>(SessionState.LoggedOut), atFlush, "when the jar was flushed, Valid was not stored yet")
+    }
+
+    @Test
+    fun sessionOkReplacesAValidStateForAnotherHandle() = runTest {
+        signedIn()
+        val repository = repository()
+        probe.next = { Account("42", "other") }
+        assertEquals(SessionState.Valid("other"), repository.validate())
+
+        repository.sessionOk("user_1", repository.epoch())
+
+        assertEquals(SessionState.Valid("user_1"), repository.state.first(), "only an identical Valid is skipped")
     }
 
     @Test

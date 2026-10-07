@@ -16,6 +16,7 @@ import io.github.yuriimurha.reels.sync.pacing.PacerStatus
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 
 /** What the Sync screen does with the answer to a paste. */
@@ -96,11 +98,15 @@ class SyncViewModel(
     /** Null (still loading) is not ready: a sync must not start on a guess. */
     private fun sessionReady(state: SessionState?): Boolean = !requiresSession || state is SessionState.Valid
 
-    val ui: StateFlow<SyncUiState> = combine(run, tick, sessionState) { r, t, s ->
-        syncUiState(r, t?.status, t?.at ?: now(), sessionReady(s))
-    }.stateIn(viewModelScope, sharing, syncUiState(null, null, now(), sessionReady(null)))
+    private fun uiState(r: SyncRunEntity?, t: Tick?, s: SessionState?): SyncUiState =
+        syncUiState(r, t?.status, t?.at ?: now(), sessionReady(s), sessionLoading = requiresSession && s == null)
 
+    val ui: StateFlow<SyncUiState> = combine(run, tick, sessionState) { r, t, s -> uiState(r, t, s) }
+        .stateIn(viewModelScope, sharing, uiState(null, null, null))
+
+    /** Starts or resumes a run, but only when the screen offers it ([SyncUiState.canStart]): the buttons are disabled, and this holds the same line. */
     fun start(mode: SyncMode) {
+        if (!ui.value.canStart) return
         viewModelScope.launch { controller.start(mode) }
     }
 
@@ -174,11 +180,23 @@ class SyncViewModel(
         }
     }
 
-    /** Stops a running sync first, so it cannot keep working under a session that is being forgotten, then logs out. */
+    /**
+     * Stops a running sync first, so it cannot keep working under a session that is being forgotten, then logs out. The owner
+     * asked to forget the session, so that always happens: the whole thing is shielded from the screen going away (the
+     * scope being cancelled), and a failure to cancel the run (WorkManager, the database) is not allowed to stop it. The
+     * run then keeps whatever state it had; its signals are ignored anyway, because the logout changes the epoch.
+     */
     fun logout() {
         viewModelScope.launch {
-            controller.cancel()
-            session.logout()
+            withContext(NonCancellable) {
+                try {
+                    controller.cancel()
+                } catch (e: Exception) {
+                    // Nothing to show. This scope cannot be cancelled, so even a CancellationException here is some inner
+                    // failure, not ours, and must not skip the logout either.
+                }
+                session.logout()
+            }
         }
     }
 

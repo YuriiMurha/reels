@@ -17,7 +17,11 @@ class RecordingCookieStore(private val inner: InMemoryCookieStore = InMemoryCook
         inner.setCookie(url, setCookie)
     }
 
+    /** Called at the moment of every flush, before it is recorded, so a test can look at what else has happened by then. */
+    var onFlush: (() -> Unit)? = null
+
     override fun flush() {
+        onFlush?.invoke()
         events += "flush"
         inner.flush()
     }

@@ -3,6 +3,7 @@ package io.github.yuriimurha.reels.ui.sync
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.content.Context
+import androidx.lifecycle.viewModelScope
 import androidx.test.core.app.ApplicationProvider
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
@@ -32,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
@@ -45,6 +47,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -52,6 +55,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -80,11 +84,19 @@ class SyncViewModelTest {
         storeScope.cancel()
     }
 
+    /** When set, the scheduler's [SyncScheduler.cancel] throws it, as a WorkManager failure would. */
+    private var cancelFailure: Exception? = null
+
+    private val enqueued = CopyOnWriteArrayList<Long>()
+
     /** Writes "scheduler.cancel" into the cookie jar's event list, so a test sees it in order with the jar's own "clear". */
     private val scheduler = object : SyncScheduler {
-        override fun enqueue(runId: Long) = Unit
+        override fun enqueue(runId: Long) {
+            enqueued += runId
+        }
         override fun cancel() {
             cookies.events += "scheduler.cancel"
+            cancelFailure?.let { throw it }
         }
         override suspend fun isActive(): Boolean = false
     }
@@ -327,6 +339,40 @@ class SyncViewModelTest {
         assertEquals("Cancelled", stopped.lastError)
     }
 
+    /** Whatever goes wrong while the run is being cancelled, the owner asked to log out: the session is forgotten. */
+    @Test
+    fun logoutForgetsTheSessionEvenWhenCancellingTheRunFails() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        cancelFailure = IllegalStateException("WorkManager is not available")
+        cookies.events.clear()
+
+        viewModel.logout()
+        withContext(Dispatchers.Default) { withTimeout(5_000) { session.state.first { it == SessionState.LoggedOut } } }
+
+        assertEquals(listOf("scheduler.cancel", "clear"), cookies.events, "the cancel was tried first, and its failure did not stop the logout")
+        assertFalse(session.hasSessionCookies())
+    }
+
+    /** The screen can go away (the ViewModel is cleared, its scope cancelled) between the tap and the end of the logout. */
+    @Test
+    fun logoutCompletesEvenIfTheScreenGoesAwayRightAfterTheTap() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START))
+
+        viewModel.logout()
+        runCurrent() // the logout has started and is waiting on the database write that pauses the run
+        viewModel.viewModelScope.cancel()
+        assertFalse(viewModel.viewModelScope.isActive)
+        withContext(Dispatchers.Default) { withTimeout(5_000) { session.state.first { it == SessionState.LoggedOut } } }
+
+        assertFalse(session.hasSessionCookies())
+        assertEquals(SyncStatus.PAUSED, db.syncDao().latestRun()!!.status, "the run was cancelled too")
+    }
+
     @Test
     fun logoutWithNothingRunningStillForgetsTheSession() = runTest {
         signedIn()
@@ -339,51 +385,125 @@ class SyncViewModelTest {
         assertFalse(session.hasSessionCookies())
     }
 
+    /**
+     * The screen's state right now. `ui` is collected only for this instant, never across a wait for real I/O: while it is
+     * collected, its 1 s ticker spins the test's virtual clock flat out, and a DataStore update that lands meanwhile on an
+     * I/O thread can go unseen (the test then hangs; seen as an `UncompletedCoroutinesError`, about one run in ten on a cold
+     * JVM). So the stored session is awaited through [SyncViewModel.sessionState], which has no ticker, and `ui` is read after.
+     */
+    private fun TestScope.screen(viewModel: SyncViewModel): SyncUiState {
+        val open = launch { viewModel.ui.collect {} }
+        runCurrent()
+        val state = viewModel.ui.value
+        open.cancel()
+        return state
+    }
+
+    /** Presses Sync (or Full sync) while the screen is open, so `ui`, which `start` consults, is live. */
+    private fun TestScope.startWithTheScreenOpen(viewModel: SyncViewModel, mode: SyncMode = SyncMode.QUICK) {
+        val open = launch { viewModel.ui.collect {} }
+        runCurrent()
+        viewModel.start(mode)
+        open.cancel()
+    }
+
+    /** Keeps the stored session loaded and returns once it has been read. */
+    private suspend fun TestScope.loadSession(viewModel: SyncViewModel) {
+        backgroundScope.launch { viewModel.sessionState.collect {} }
+        viewModel.sessionState.first { it != null }
+    }
+
     @Test
     fun realBackendNeedsAValidSessionToStart() = runTest {
         signedIn()
         val viewModel = viewModel(requiresSession = true)
         assertFalse(viewModel.ui.value.canStart, "before the stored session has been read it is unknown, and unknown is not ready")
-        assertEquals("Log in to Instagram to sync", viewModel.ui.value.banner)
-        backgroundScope.launch { viewModel.ui.collect {} }
-        viewModel.sessionState.first { it != null }
-        assertFalse(viewModel.ui.first { it.banner == "Log in to Instagram to sync" }.canStart, "logged out: Sync is off")
+        assertNull(viewModel.ui.value.banner, "but loading is not 'logged out': no \"Log in\" hint is flashed before the state is known")
+        loadSession(viewModel)
+        screen(viewModel).let {
+            assertFalse(it.canStart, "logged out: Sync is off")
+            assertEquals("Log in to Instagram to sync", it.banner)
+        }
 
         assertEquals(SessionState.Valid("tester"), session.validate())
-        val ready = viewModel.ui.first { it.canStart }
-        assertNull(ready.banner, "a valid session needs no explanation")
+        viewModel.sessionState.first { it is SessionState.Valid }
+        screen(viewModel).let {
+            assertTrue(it.canStart)
+            assertNull(it.banner, "a valid session needs no explanation")
+        }
 
         probe.next = { throw InstagramException.LoginRequired() }
         assertEquals(SessionState.Expired("tester"), session.validate())
-        assertFalse(viewModel.ui.first { !it.canStart }.canStart, "an expired session cannot sync")
+        viewModel.sessionState.first { it is SessionState.Expired }
+        assertFalse(screen(viewModel).canStart, "an expired session cannot sync")
 
         probe.next = { Account("41", "tester") }
         session.validate()
-        viewModel.ui.first { it.canStart }
+        viewModel.sessionState.first { it is SessionState.Valid }
+        assertTrue(screen(viewModel).canStart)
+
         viewModel.logout()
-        assertEquals("Log in to Instagram to sync", viewModel.ui.first { !it.canStart }.banner, "logged out again: Sync is off")
+        viewModel.sessionState.first { it == SessionState.LoggedOut }
+        screen(viewModel).let {
+            assertFalse(it.canStart, "logged out again: Sync is off")
+            assertEquals("Log in to Instagram to sync", it.banner)
+        }
     }
 
     @Test
     fun aChallengedSessionCannotStartASyncEither() = runTest {
         signedIn()
         val viewModel = viewModel(requiresSession = true)
-        backgroundScope.launch { viewModel.ui.collect {} }
+        loadSession(viewModel)
         probe.next = { throw InstagramException.ChallengeRequired("https://www.instagram.com/challenge/x/") }
         assertEquals(SessionState.Challenge("https://www.instagram.com/challenge/x/", null), session.validate())
         viewModel.sessionState.first { it is SessionState.Challenge }
-        assertFalse(viewModel.ui.first { it.banner != null }.canStart)
+        assertFalse(screen(viewModel).canStart)
+    }
+
+    /** Defence in depth: the buttons are disabled, but nothing that reaches `start` may begin a sync the screen did not offer. */
+    @Test
+    fun startDoesNothingUntilTheSessionIsValid() = runTest {
+        signedIn()
+        val viewModel = viewModel(requiresSession = true)
+        loadSession(viewModel)
+
+        startWithTheScreenOpen(viewModel)
+        // Not advanceUntilIdle: it can't settle while the screen's ticker is alive. Let any (wrongly) started work finish.
+        repeat(3) {
+            runCurrent()
+            withContext(Dispatchers.Default) { delay(100) }
+        }
+        assertNull(db.syncDao().latestRun(), "no run is created for a session that is not valid")
+        assertEquals(emptyList(), enqueued)
+
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        viewModel.sessionState.first { it is SessionState.Valid }
+        startWithTheScreenOpen(viewModel)
+        withContext(Dispatchers.Default) { withTimeout(5_000) { while (enqueued.isEmpty()) delay(10) } }
+        assertEquals(1, enqueued.size, "once the screen offers Sync, the same call starts a run")
+    }
+
+    @Test
+    fun theFakeBackendStartsWithoutASession() = runTest {
+        val viewModel = viewModel(requiresSession = false)
+        loadSession(viewModel)
+
+        startWithTheScreenOpen(viewModel)
+        withContext(Dispatchers.Default) { withTimeout(5_000) { while (enqueued.isEmpty()) delay(10) } }
+
+        assertEquals(1, enqueued.size)
     }
 
     @Test
     fun theFakeBackendNeedsNoSessionToStart() = runTest {
         val viewModel = viewModel(requiresSession = false)
         assertTrue(viewModel.ui.value.canStart)
-        backgroundScope.launch { viewModel.ui.collect {} }
+        backgroundScope.launch { viewModel.sessionState.collect {} }
         assertEquals(SessionState.LoggedOut, viewModel.sessionState.first { it != null })
-        runCurrent()
-        assertTrue(viewModel.ui.value.canStart, "Mock mode never touches Instagram, so a logged-out app can sync the fake library")
-        assertNull(viewModel.ui.value.banner)
+        val shown = screen(viewModel)
+        assertTrue(shown.canStart, "Mock mode never touches Instagram, so a logged-out app can sync the fake library")
+        assertNull(shown.banner)
     }
 
     @Test

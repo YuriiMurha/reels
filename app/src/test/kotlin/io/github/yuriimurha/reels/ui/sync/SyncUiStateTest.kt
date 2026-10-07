@@ -110,4 +110,19 @@ class SyncUiStateTest {
         assertTrue(ui.canCancel)
         assertFalse(ui.canStart)
     }
+
+    @Test
+    fun aSessionStillLoadingShowsNoBannerButStaysDisabled() {
+        val ui = syncUiState(null, pacer(), now, sessionReady = false, sessionLoading = true)
+        assertFalse(ui.canStart, "nothing may start on a guess")
+        assertNull(ui.banner, "\"Log in\" would be wrong for a session that is merely not read yet")
+    }
+
+    @Test
+    fun aLoadingSessionStillLetsAMoreSpecificBannerThrough() {
+        assertEquals(
+            "24-hour budget reached",
+            syncUiState(run(SyncStatus.PAUSED, "24-hour budget reached"), pacer(), now, sessionReady = false, sessionLoading = true).banner,
+        )
+    }
 }

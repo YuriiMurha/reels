@@ -7,6 +7,7 @@ import mockwebserver3.RecordedRequest
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.InetAddress
+import java.net.Proxy
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -34,9 +35,21 @@ class SessionGuardTest {
     @AfterTest
     fun stop() = server.close()
 
-    private fun clientFor(cookies: CookieStore, logger: ((String) -> Unit)? = null): OkHttpClient =
+    /**
+     * The factory's client, with `www.instagram.com` resolved to the mock server by [dns] and no proxy, so a JVM-wide proxy
+     * setting can never forward these requests (fake cookie included) to the real host.
+     */
+    private fun clientFor(
+        cookies: CookieStore,
+        logger: ((String) -> Unit)? = null,
+        dns: () -> Unit = {},
+    ): OkHttpClient =
         HttpClientFactory.create(cookies, userAgent = "UA", logger = logger).newBuilder()
-            .dns { listOf(InetAddress.getByName("127.0.0.1")) }
+            .proxy(Proxy.NO_PROXY)
+            .dns {
+                dns()
+                listOf(InetAddress.getByName("127.0.0.1"))
+            }
             .build()
 
     private fun get(client: OkHttpClient) {
@@ -94,6 +107,42 @@ class SessionGuardTest {
         assertNull(cookies.cookieValue(site, sessionId))
         assertNull(cookies.cookieValue(site, csrf), "a cookie from a stale response is stale too")
         assertNull(cookies.cookieValue(site, "rur"), "header names are case-insensitive")
+    }
+
+    /**
+     * OkHttp loads the Cookie header (Bridge) BEFORE it connects (DNS, TCP, TLS), and network interceptors run after that. A
+     * logout during the handshake empties the jar while the request already carries the old sessionid, so a guard that read
+     * "before" from the jar at that point would see nothing and nothing, and wave the old answer through.
+     */
+    @Test
+    fun aLogoutDuringConnectionSetupDoesNotLetTheOldAnswerRestoreTheSession() {
+        val cookies = InMemoryCookieStore().apply { setCookie(site, "$sessionId=s1") }
+        serve(setCookie = WebSessionCookies.sessionCookie("s2"))
+
+        get(clientFor(cookies, dns = { cookies.clearAll() }))
+
+        assertEquals("$sessionId=s1", server.takeRequest().headers["Cookie"], "the request really went out with the old session")
+        assertNull(cookies.cookieValue(site, sessionId), "the old session's answer must not put a session back into the emptied jar")
+    }
+
+    @Test
+    fun aSessionReplacedDuringConnectionSetupIsNotOverwrittenByTheOldAnswer() {
+        val cookies = InMemoryCookieStore().apply { setCookie(site, "$sessionId=s1") }
+        serve(setCookie = WebSessionCookies.sessionCookie("s2"))
+
+        get(clientFor(cookies, dns = { cookies.setCookie(site, "$sessionId=s3") }))
+
+        assertEquals("s3", cookies.cookieValue(site, sessionId))
+    }
+
+    @Test
+    fun aRequestThatCarriedNoSessionAndFoundNoneAfterwardsKeepsItsCookies() {
+        val cookies = InMemoryCookieStore()
+        serve(setCookie = "$csrf=c2; Domain=.instagram.com; Path=/; Secure")
+
+        get(clientFor(cookies))
+
+        assertEquals("c2", cookies.cookieValue(site, csrf))
     }
 
     /** The guard is the first (outermost) network interceptor: the wire log, which sits closer to the socket, sees what really arrived. */
