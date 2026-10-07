@@ -44,6 +44,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.sync.pacing.PacerStatus
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.login.LoginPurpose
@@ -137,7 +138,7 @@ fun SyncScreen(
             onSubmit = { input ->
                 viewModel.paste(input) { needsCsrf ->
                     pasting = false
-                    if (needsCsrf) onOpenLogin("https://www.instagram.com/", LoginPurpose.CSRF)
+                    if (needsCsrf) onOpenLogin(WebEndpoints.HOME_URL, LoginPurpose.CSRF)
                 }
             },
             onDismiss = { pasting = false },

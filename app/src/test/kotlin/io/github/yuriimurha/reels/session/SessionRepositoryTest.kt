@@ -160,6 +160,25 @@ class SessionRepositoryTest {
         assertEquals("flush", cookies.events.last(), "the flush comes after the last write")
     }
 
+    /** Byte-for-byte: the cookie attributes are what Chromium's jar stores, so a drift here is a silent login bug. */
+    @Test
+    fun aPasteAndItsRollbackWriteTheExactSetCookieValues() = runTest {
+        probe.next = { throw InstagramException.LoginRequired() }
+        val repository = repository()
+        repository.pasteSessionId("42%3Aab")
+        assertEquals(
+            listOf(
+                "set sessionid=42%3Aab; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=31536000",
+                "set ds_user_id=42; Domain=.instagram.com; Path=/; Secure; Max-Age=7776000",
+                "flush",
+                "set sessionid=; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=0",
+                "set ds_user_id=; Domain=.instagram.com; Path=/; Secure; Max-Age=0",
+                "flush",
+            ),
+            cookies.events,
+        )
+    }
+
     @Test
     fun pasteDuringCooldownRefusesBeforeTouchingTheJar() = runTest {
         signedIn()

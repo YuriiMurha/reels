@@ -4,6 +4,7 @@ import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.SessionProbe
 import io.github.yuriimurha.reels.instagram.web.CookieStore
+import io.github.yuriimurha.reels.instagram.web.WebSessionCookies
 import io.github.yuriimurha.reels.instagram.web.cookieValue
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.Pacer
@@ -93,9 +94,9 @@ class SessionRepository(
             val previousSession = sessionId()
             val previousUser = userId()
             sessionEpoch++
-            writeSessionCookies(sessionCookie(parsed.sessionId), userCookie(parsed.userId))
+            writeSessionCookies(WebSessionCookies.sessionCookie(parsed.sessionId), WebSessionCookies.userCookie(parsed.userId))
             suspend fun rollBack() = withContext(NonCancellable) {
-                writeSessionCookies(sessionCookie(previousSession), userCookie(previousUser))
+                writeSessionCookies(WebSessionCookies.sessionCookie(previousSession), WebSessionCookies.userCookie(previousUser))
                 sessionEpoch++
             }
             val result = try {
@@ -147,23 +148,9 @@ class SessionRepository(
         cookies.flush()
     }
 
-    /** A null [value] expires the cookie: how a rollback removes what the paste added. */
-    private fun sessionCookie(value: String?): String =
-        if (value == null) {
-            "sessionid=; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=0"
-        } else {
-            "sessionid=$value; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=31536000"
-        }
-
-    private fun userCookie(value: String?): String =
-        if (value == null) {
-            "ds_user_id=; Domain=.instagram.com; Path=/; Secure; Max-Age=0"
-        } else {
-            "ds_user_id=$value; Domain=.instagram.com; Path=/; Secure; Max-Age=7776000"
-        }
-
     companion object {
-        const val INSTAGRAM = "https://www.instagram.com"
+        /** The URL the cookie jar keys Instagram's cookies by; owned by `:instagram`. */
+        const val INSTAGRAM = WebSessionCookies.ORIGIN
 
         /** First 12 hex characters of the SHA-256 of [sessionId]: enough to tell sessions apart, useless as a credential. */
         internal fun fingerprintOf(sessionId: String): String =

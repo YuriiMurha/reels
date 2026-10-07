@@ -35,12 +35,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import kotlinx.coroutines.delay
-
-private const val LOGIN_URL = "https://www.instagram.com/accounts/login/"
-private const val INSTAGRAM_HOME = "https://www.instagram.com/"
 
 private const val FINISHED_VERIFYING = "Finished verifying on Instagram?"
 
@@ -138,7 +136,7 @@ fun LoginScreen(
 }
 
 /** Where the WebView starts: the requested page when it is an allowed one, otherwise Instagram's login page. */
-internal fun loginTarget(startUrl: String?): String = allowedUrlOrNull(startUrl) ?: LOGIN_URL
+internal fun loginTarget(startUrl: String?): String = allowedUrlOrNull(startUrl) ?: WebEndpoints.LOGIN_URL
 
 /**
  * Where the WebView starts for [purpose]. A challenge without a usable URL opens Instagram's home, which redirects to
@@ -150,22 +148,16 @@ internal fun startPage(purpose: LoginPurpose, startUrl: String?): String = when 
 }
 
 /** What to load for a Challenge result: its URL when allowed, else Instagram's home, which redirects to the checkpoint. */
-internal fun challengeTarget(challengeUrl: String?): String = allowedUrlOrNull(challengeUrl) ?: INSTAGRAM_HOME
+internal fun challengeTarget(challengeUrl: String?): String = allowedUrlOrNull(challengeUrl) ?: WebEndpoints.HOME_URL
 
 /** False when the WebView already shows [target]: reloading it would only throw away what the owner has done there. */
 internal fun needsLoad(currentUrl: String?, target: String): Boolean = currentUrl != target
 
-private val ALLOWED_DOMAINS = listOf("instagram.com", "facebook.com", "meta.com")
-
 /**
  * The login flow may only visit https pages on Instagram's own domains (and Facebook and Meta, which its login and
- * verification use), where the host is the domain or a subdomain of it (dot boundary, so `evilinstagram.com` is out).
+ * verification use). The list and the host matching live in `:instagram` ([WebEndpoints.isLoginPage]).
  */
-internal fun isAllowedPage(scheme: String?, host: String?): Boolean {
-    if (!scheme.equals("https", ignoreCase = true) || host == null) return false
-    val lower = host.lowercase()
-    return ALLOWED_DOMAINS.any { lower == it || lower.endsWith(".$it") }
-}
+internal fun isAllowedPage(scheme: String?, host: String?): Boolean = WebEndpoints.isLoginPage(scheme, host)
 
 internal fun isAllowedPage(url: Uri): Boolean = isAllowedPage(url.scheme, url.host)
 
