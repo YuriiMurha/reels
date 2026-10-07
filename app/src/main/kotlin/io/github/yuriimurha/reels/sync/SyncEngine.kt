@@ -101,7 +101,7 @@ class SyncEngine(
         } catch (e: InstagramException.Transient) {
             progress.finish(SyncStatus.PAUSED, "Network problem, try again later")
         } catch (e: PacerRefusal.RunBudgetReached) {
-            progress.finish(SyncStatus.PAUSED, "Run budget reached, tap Sync to continue")
+            progress.finish(SyncStatus.PAUSED, "Run budget reached, tap Resume")
         } catch (e: PacerRefusal.DailyBudgetReached) {
             progress.finish(SyncStatus.PAUSED, "24-hour budget reached")
         } catch (e: Exception) {

@@ -46,7 +46,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Pacer | `app/.../sync/pacing/` | The single gate for Instagram API calls. [Details](#pacer). |
 | Settings | `app/.../data/settings/SettingsStore.kt` | DataStore preferences: `muted`; the persisted cooldown (`cooldown_until`, `last_rate_limit_at`); and the session state (`session_kind`, `session_handle`, `session_challenge_url`, encoded by the session package; the session itself is only in the cookie jar). A settings file that cannot be read is replaced by `corruptionFallback` (ruling R54), not by empty preferences: `cooldown_until = now + 1 h` (the Pacer's `Cooldowns.SHORT_MS`) and `last_rate_limit_at = now`, so a corruption never silently ends an active cooldown and a rate limit in the next 24 h escalates straight to the 24 h tier; the session keys stay empty, which reads as LoggedOut until validation runs. Budgets persist in `api_request` (`RoomRequestLog`). |
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
-| Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Sync to resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
+| Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
 | Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. [Details](#wiring). |
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks` (an `ACTION_VIEW` intent, so whichever app handles the link). Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
@@ -77,9 +77,9 @@ A debug build starts in Mock mode (the fake library); a release build always use
   - The app's `@Serializable` enums (`LoginPurpose`, a `LoginRoute` argument) are kept by name, because Navigation looks
     an enum route argument up with `Class.forName` when the graph is built, and the minified build crashed on launch
     without it.
-  - Exception classes keep their names (`-keepnames` on `Throwable` subclasses): a run's `lastError` (`Unexpected error:
-    <class>`, from `SyncEngine`) and the HTTP crash guard (`IOException(<class>)`) show a class `simpleName`, which R8 would
-    otherwise turn into `a`.
+  - Exception classes keep their names (`-keepnames` on `Throwable` subclasses): a run's `lastError` (`Unexpected error: <class>`,
+    from `SyncEngine`) and the HTTP crash guard (`IOException(<class>)`) show a class `simpleName`, which R8 would otherwise
+    turn into `a`.
 - **Smoke tests on the emulator,** under R8:
   - Logged out, empty library: Home, Sync ("Not logged in", Sync disabled), Search and Back, no crash; `dumpsys` shows
     the app compiled `speed-profile` from the installed profile.
@@ -322,18 +322,17 @@ status chip shows the `lastError` for any stopped or paused run.
 | What happened | Status | `lastError` | Sync screen banner |
 |---|---|---|---|
 | Cancel, or logout during a run | PAUSED | Cancelled | Cancelled |
-| App killed mid-run, found at the next start | PAUSED | Interrupted, tap Sync to resume | the same |
+| App killed mid-run, found at the next start | PAUSED | Interrupted, tap Resume | the same |
 | `ChallengeRequired` (the session layer gets the challenge URL) | STOPPED_CHALLENGE | Instagram wants verification | Instagram wants verification. Resolve it before syncing again. |
 | `LoginRequired` (the session layer marks it expired) | STOPPED_LOGIN | Session expired | Session expired. Log in again, then tap Resume. |
 | `RateLimited` (the Pacer armed the cooldown), or `PacerRefusal.CoolingDown` | STOPPED_RATE_LIMIT | Instagram is limiting requests, or Cooling down | Instagram limited requests. Tap Resume when you're ready. |
 | `ShapeChanged(path)` | STOPPED_SHAPE | Adapter needs repair: `<path>` | the `lastError` |
 | `Transient` after the four backoffs | PAUSED | Network problem, try again later | the `lastError` |
-| `RunBudgetReached` (300 requests) | PAUSED | Run budget reached, tap Sync to continue | the `lastError` |
+| `RunBudgetReached` (300 requests) | PAUSED | Run budget reached, tap Resume | the `lastError` |
 | `DailyBudgetReached` (600 in 24 h) | PAUSED | 24-hour budget reached | the `lastError` |
 | Anything else | PAUSED | Unexpected error: `<class>` | the `lastError` |
 
-While a cooldown is active the banner is "Cooling down after a rate limit: N min left" instead, and starting is off. When a
-run is resumable the screen's button is named **Resume**, whatever a banner's text says ("tap Sync").
+While a cooldown is active the banner is "Cooling down after a rate limit: N min left" instead, and starting is off.
 
 ## Video
 

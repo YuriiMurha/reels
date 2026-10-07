@@ -9,7 +9,7 @@
 - [x] Owner reviews the plan and picks the execution method (subagent-driven)
 - [x] Write the M3–M6 implementation plan: [`docs/superpowers/plans/2026-10-07-saved-reels-m3-m6.md`](docs/superpowers/plans/2026-10-07-saved-reels-m3-m6.md)
 - [x] Build M3–M6 in code, tested without any agent contacting Instagram (everything that talks to Instagram has only met fakes and a local test server)
-- [ ] Owner: the on-phone checks below. The order is README section 5 (first real sync), 7 (Adapter lab), 8 (checklist)
+- [ ] Owner: the on-phone checks below, in this order: README section 5 (Mock mode off, log in, the Adapter lab of section 7 once, then the first Sync), then the checklist in section 8
 
 ## Owner actions
 

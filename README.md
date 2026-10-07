@@ -53,7 +53,8 @@ the real library.
 
    Every command below runs from this folder (the one with `gradlew`) unless it says otherwise.
 
-3. Point Gradle at the SDK. This writes `local.properties` (gitignored):
+3. Point Gradle at the SDK. Run this once, on a fresh clone: it writes `local.properties` (gitignored), replacing any
+   earlier one:
 
    ```bash
    echo "sdk.dir=$HOME/Library/Android/sdk" > local.properties
@@ -88,9 +89,11 @@ the real library.
    adb devices
    ```
 
-`./gradlew installDebug` installs to **every** connected device, so if an emulator is running too, it would get the app
-as well. The install commands in this guide therefore pass the phone's serial in `ANDROID_SERIAL`: `adb -d` means "the
-one device attached by USB", so it skips an emulator.
+`./gradlew installDebug` installs to **every** connected device, so an emulator that is running would get the app as
+well. The install commands in this guide therefore first read the serial of the phone attached by USB (`adb -d`
+means "the one device attached by USB") and only then run Gradle for that one device (`ANDROID_SERIAL`). If no phone is
+attached, or two are, `adb` fails and the command stops there, before Gradle runs: nothing is installed anywhere. Fix
+the connection (the steps above) and run it again.
 
 Never log into Instagram on an emulator: the account should only ever see your phone.
 
@@ -99,7 +102,7 @@ Never log into Instagram on an emulator: the account should only ever see your p
 With the phone connected (section 2) and the exports from step 1.4 done in this terminal:
 
 ```bash
-ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installDebug
+SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
 ```
 
 Then open **Reels** on the phone. A fresh debug install is in Mock mode.
@@ -149,8 +152,8 @@ On the Sync screen, under **Instagram session**:
   there, then tap **Check again**.
 - If the session expires ("Session expired (@handle)"), **Log in again** opens the login page.
 
-The app keeps the session only in Android's WebView cookie store. It is never written to a file, logged or backed
-up.
+The app keeps the session only in Android's WebView cookie store: it writes no file of its own with it and never logs
+it. Android's WebView keeps that cookie store on the phone (app-private, and excluded from backup).
 
 ## 5. First real sync
 
@@ -161,7 +164,7 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
    this terminal):
 
    ```bash
-   ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installDebug
+   SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
    ```
 
 2. **Turn Mock mode off.** Open **Reels**, tap the status chip (top right) to open **Sync**, scroll down to
@@ -319,11 +322,11 @@ adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/media_info.json 
 If an exported file contains an error such as `No such file or directory`, that button has no scrubbed copy (never
 tapped, or its latest answer was not JSON).
 
-**Read each scrubbed file before committing it as a fixture: redaction is heuristic.** A bare lowercase handle used
+**Read each scrubbed file before you hand it over or commit it: redaction is heuristic.** A bare lowercase handle used
 as a key, or as a one-word value, can't be told from schema and is kept. The pre-commit guard only catches session
 material, not personal data.
 
-**Hand it back.** Give the five files and the on-screen results (long-press the shape text to select and copy it, or
+**Hand it back.** Once you have read them, give the five files and the on-screen results (long-press the shape text to select and copy it, or
 send a screenshot) to a Claude session and ask it to answer the seven spike questions in section 6.3 of the design
 doc. The seven questions, and where each answer is in the lab's output, are in the M3 part of the
 [checklist](#8-on-phone-checklist). The answers get recorded in `ARCHITECTURE.md` and `TODO.md`, and the files you
@@ -362,12 +365,16 @@ not in this log.
   under the buttons and the login screen's bar (for a shape problem it reads "Unexpected Instagram response at"
   followed by a path such as `user` or `http.404`; note the path), and the request lines.
 - [ ] **No request at start.** Swipe the app away and reopen it. **Look for:** it still says "Logged in as @handle",
-  and logcat shows **no** new request.
-- [ ] **Check now, twice quickly.** **Look for:** exactly one request.
+  and logcat shows **no** new request. **Report:** a pass, or the request lines that appeared.
+- [ ] **Check now, twice quickly.** **Look for:** exactly one request. **Report:** how many request blocks logcat shows.
 - [ ] **Log out and in again.** **Look for:** "Not logged in" after **Log out**, and **Log in** works again.
+  **Report:** a pass, or the message you saw.
 - [ ] **Optional: paste.** Log out, then **Paste sessionid** from a mobile browser on this phone. **Look for:** "Logged
-  in as @handle".
-- [ ] **Header notes for the next milestone** (answer in the same Claude session; "didn't see it" is an answer):
+  in as @handle". **Report:** a pass, or the red line under the paste box ("That doesn't look like a sessionid",
+  "Instagram rejected that session; your current login is unchanged", "Couldn't check that session").
+- [ ] **Header notes for the next milestone.** **Report:** the `X-IG-App-ID` value you saw, whether the
+  `X-Requested-With` header appeared, the language of any error message, any request logged twice, and whether the
+  `sessionid` changed in a checkpoint; "didn't see it" is an answer. How to look:
   - On the Mac, open `chrome://inspect/#devices` in Chrome **before** you tap Log in. The login screen is the only
     place the app shows a WebView, and it disappears when the screen closes, so inspect it while it is open: tap
     **Log in**, click **inspect** under the app's WebView, open the **Network** tab, and reload the page. On any
@@ -414,7 +421,7 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 - [ ] **QUICK sync.** Tap **Sync** on the empty real library. **Look for:** the phase moves through "Checking
   session", "Listing collections" and "Syncing All Saved", then each collection; logcat shows one request every
   4–12 s and a longer pause (60–180 s) after every 15–30; **Requests in 24 h** rises by about the number of request
-  blocks in logcat; the run ends with no banner (or pauses at "Run budget reached, tap Sync to continue": tap
+  blocks in logcat; the run ends with no banner (or pauses at "Run budget reached, tap Resume": tap
   **Resume**); the grid has thumbnails. **Report:** the Sync screen's counters at the end (Collections, New items,
   Items seen, Thumbnails cached, Failures, Requests, Requests in 24 h), how long it took, and any banner.
 - [ ] **Cancel and resume.** During a run tap **Cancel**, then **Resume**. **Look for:** it carries on from where it
@@ -466,7 +473,8 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 ### M6: release build
 
 - [ ] **`installRelease`** ([section 9](#9-release-build)), with the debug key first (no setup), and with your own key
-  if you made one. **Look for:** the app opens on Saved, and **Sync** has no Developer section.
+  if you made one. **Look for:** the app opens on Saved, and **Sync** has no Developer section. **Report:** which key
+  (debug or yours), and a pass, or what you saw instead (an install error, a crash, a Developer section).
 - [ ] **What agents couldn't exercise under R8:** with the release build, **log in** (the login page must show and
   accept you: that is the WebView login), run **Sync** (the real client and the thumbnail downloader), then open a grid
   and a viewer. **Look for:** no crash. If it crashes, the cause is a missing keep rule: **Report:** the lines under
@@ -512,7 +520,7 @@ an error.
 With the exports from step 1.4 done in this terminal:
 
 ```bash
-ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installRelease
+SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installRelease
 ```
 
 To sign with your own key instead, do this once. The key and its password are yours to create: nothing in the repo
@@ -527,15 +535,20 @@ generates or stores them, and both files below are gitignored (the pre-commit ho
    "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/keytool" -genkeypair -v -keystore reels-release.jks -keyalg RSA -keysize 4096 -validity 10000 -alias reels
    ```
 
-2. Create `keystore.properties` in the same folder with these four keys, and fill in `storePassword` and `keyPassword`
-   in that file. Both get the **same** password, the one you just chose. A blank value is refused. `storeFile` is
-   relative to the repo root:
+2. Create `keystore.properties` in the same folder. This command writes the four keys, with the file name and alias
+   the `keytool` command above used, and **blank passwords**. Run it **only once**: running it again would wipe the
+   passwords you filled in.
 
-   ```properties
-   storeFile=reels-release.jks
-   storePassword=
-   keyAlias=reels
-   keyPassword=
+   ```bash
+   printf 'storeFile=reels-release.jks\nstorePassword=\nkeyAlias=reels\nkeyPassword=\n' > keystore.properties
+   ```
+
+   Then open it and type the password you chose after `storePassword=` and after `keyPassword=` (the **same** password
+   in both, no spaces, no quotes), then save and close. A blank value is refused. `storeFile` is relative to the repo
+   root:
+
+   ```bash
+   open -e keystore.properties
    ```
 
 3. Keep a copy of `reels-release.jks` and its password outside the repo. If they are lost, the app installed with that
@@ -550,7 +563,7 @@ generates or stores them, and both files below are gitignored (the pre-commit ho
 5. Install it on the phone:
 
    ```bash
-   ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installRelease
+   SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installRelease
    ```
 
 If `keystore.properties` lacks one of the four keys, or has it blank, Gradle stops (for every task, not only the release
@@ -607,12 +620,10 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
 A paused run shows its reason as the banner (and in the status chip on Saved). The button reads **Resume**.
 
 - **"Cancelled"**: you tapped Cancel, or logged out during a run. **Resume** continues.
-- **"Interrupted, tap Sync to resume"**: the app was killed mid-run and Android had not restarted it. Tap **Resume**
-  (the button is named Resume, whatever the banner says).
+- **"Interrupted, tap Resume"**: the app was killed mid-run and Android had not restarted it. Tap **Resume**.
 - **"Network problem, try again later"**: the connection failed and the app gave up after its retries (30 s, 1, 2, 4
   minutes). Tap **Resume** when the connection is back.
-- **"Run budget reached, tap Sync to continue"**: the run used its 300 requests. Tap **Resume** (the button is named
-  Resume).
+- **"Run budget reached, tap Resume"**: the run used its 300 requests. Tap **Resume**.
 - **"24-hour budget reached"**: 600 requests in the last 24 hours. Tap **Resume** only when the oldest of those is a
   day old; sooner it stops again at once, without sending anything.
 - **"Unexpected error: `<ClassName>`"**: a bug. Tap **Resume** once; if it comes back, paste the class name in a Claude

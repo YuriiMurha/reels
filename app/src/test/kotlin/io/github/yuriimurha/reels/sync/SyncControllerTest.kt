@@ -79,7 +79,7 @@ class SyncControllerTest {
         controller.recoverInterruptedRuns()
         val run = db.syncDao().run(orphan)!!
         assertEquals(SyncStatus.PAUSED, run.status)
-        assertEquals("Interrupted, tap Sync to resume", run.lastError)
+        assertEquals("Interrupted, tap Resume", run.lastError)
         assertEquals(orphan, controller.start(SyncMode.QUICK), "the orphan resumes from its cursor")
     }
 
