@@ -397,7 +397,9 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
     the challenge URL is passed on to the session layer and never shown) and show "Instagram session needs attention (Sync
     screen)". `RateLimited` shows "Instagram is limiting requests" (the Pacer armed the cooldown). Anything else,
     `ShapeChanged` included, shows a fixed "Can't load this video right now", never the failure's own text.
-- **`VideoCache`** wraps a Media3 `SimpleCache` (LRU, 512 MB) in `cacheDir/video`, ONE per process
+- **`VideoCache`** wraps a Media3 `SimpleCache` (LRU, 512 MB) in `cacheDir/video` for the real library and
+  `cacheDir/fake-video` in Mock mode (R85: like thumbnails, each library has its own, so Mock mode's clip cached under a
+  fake pk can never answer for a real item, and Delete library in one mode never empties the other's), ONE per process
   (`AppContainer.videoCache`, lazy; a second one on the directory throws).
   - Entries are keyed by the pk (`MediaItem.setCustomCacheKey`), never the link, so a renewed link still hits the cached
     bytes. `isFullyCached` is true only when the recorded content length is known AND the whole range 0 to that length is
@@ -408,6 +410,15 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
     real library) and NO cookies: nothing installs a `CookieHandler` and the video path never touches the cookie store or
     `instagramHttp` (pinned by `VideoWiringGuardTest`; `VideoDataSourceTest` runs the stack against MockWebServer: a new
     link under the same pk is served from disk with no second request, and no `Cookie` header is sent).
+  - Redirects are followed: `DefaultHttpDataSource` has no switch to refuse them (`setAllowCrossProtocolRedirects(false)`,
+    its default, only refuses an http/https change), so a CDN redirect costs one more request, cookieless, to the host it
+    names. Video is not on the Pacer's CDN lane, so this is not counted anywhere.
+  - `videoMediaSourceFactory` is what the viewer's ExoPlayer builds media from: a `DefaultMediaSourceFactory` over
+    `cachedDataSourceFactory` with `VideoLoadErrorPolicy` (R85). Media3's default policy retries every load error up to 3
+    times before the player reports it; the policy returns `C.TIME_UNSET` (no retry) when the error or its cause chain is an
+    `HttpDataSource.InvalidResponseCodeException` (a 403/410 link that ran out, a 429, a 404), and defers to the default for
+    anything else (a dropped connection, a timeout). A refused link therefore costs one CDN request, not four, and reaches
+    `onPlayerError` at once. `VideoWiringGuardTest` pins that the viewer uses this factory and that it installs the policy.
   - **Eviction:** a FULL reconcile's removed pks go to `MediaEviction` right after their thumbnails are deleted, and Delete
     library clears the whole cache.
 - **In the viewer,** settled pages are collected with `collectLatest` (`playSettledPages`), so a newer page cancels the
@@ -429,7 +440,8 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
     is not: it asks the resolver itself, at the cost of one more request; the settle's own cancellation still propagates.
 - **Request rate.** Nothing here adds a lane, a rate or a concurrency: a video costs at most one interactive `mediaInfo`
   when it is opened with an expired link, plus at most one prefetch per settled page, each paced by the interactive lane's
-  2 s minimum gap and counted in the 24 h budget; a fresh link, a cached video and Mock mode send nothing.
+  2 s minimum gap and counted in the 24 h budget; a fresh link, a cached video and Mock mode send nothing. The player
+  retries no HTTP error status (R85), which only removes CDN requests.
 
 ## Wiring
 
@@ -445,7 +457,8 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
 - **Mock mode.** `BackendChoice` (SharedPreferences file `backend`, key `use_fake`) decides which: release builds never use
   the fake library, debug builds default to it, and `AppContainer.usesFake` reads it ONCE per process, so the library, the
   thumbnails and the backend can't disagree within a run.
-- **Video wiring.** `videoCache` (lazy, one `SimpleCache` per process) and `videoResolver` (`FakeVideoSourceResolver` in
+- **Video wiring.** `videoCache` (lazy, one `SimpleCache` per process, in `cacheDir/fake-video` in Mock mode and
+  `cacheDir/video` otherwise; `BackendSelectionTest` runs both) and `videoResolver` (`FakeVideoSourceResolver` in
   Mock mode, else `RealVideoSourceResolver(backend.client, instagramPacer, db.mediaDao(), videoCache, session,
   isSessionReady = { session.state.first() is SessionState.Valid })`, where `session` is both the `SessionSignals`
   argument and the source of the readiness check) live here too. `syncEngine()` passes a `MediaEviction` over
@@ -518,7 +531,10 @@ Mock mode switch.
   the first call that reaches the network).
 - **Pacing.** Each tap is one `pacer.interactive { }` on the single `AppContainer.instagramPacer`, so it is one request, with
   the interactive lane's 2 s minimum gap, the shared 600-per-24-hour budget and the persisted cooldown; a second tap while one
-  is out is ignored, and nothing retries. The lab adds owner-triggered requests on that existing lane and raises no rate or
+  is out is ignored, and nothing retries. The stored session must be Valid, checked before the tap queues and again as the
+  Pacer's `precondition` from inside the gate (R85, as R79 for the viewer): a challenge or an expiry stored while the tap
+  waited sends nothing, logs nothing and adds no message (the screen already says "Log in on the Sync screen to use the
+  lab."). The lab adds owner-triggered requests on that existing lane and raises no rate or
   concurrency. A returned `RateLimited` is stored in a local first and then thrown inside the Pacer block, because the Pacer
   arms the cooldown only when the block throws it; the ViewModel catches it outside and still shows the shape. A
   `PacerRefusal` (cooldown, budget) shows its fixed message and sends no request.

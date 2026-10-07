@@ -81,8 +81,9 @@ data class LabUiState(
 
 /**
  * Debug-only Adapter lab (spec 6.3). Each [tap] is exactly one request on the Pacer's interactive lane, so it obeys the
- * same cooldown, budget and gap as every other request. [labDir] receives the scrubbed JSON and nothing else. [io] is
- * where files are written.
+ * same cooldown, budget and gap as every other request, and only under a Valid stored session: checked before the tap
+ * queues and again from inside the Pacer's gate. [labDir] receives the scrubbed JSON and nothing else. [io] is where files
+ * are written.
  */
 class AdapterLabViewModel(
     private val lab: LabRunner,
@@ -130,7 +131,9 @@ class AdapterLabViewModel(
         var answer: LabResult? = null
         var failure: Exception? = null
         try {
-            pacer.interactive {
+            // The tap may wait seconds for the gate and the 2 s gap, and a challenge or an expiry can be stored meanwhile: the
+            // Pacer asks again from inside the gate, right before it would send and log anything (R85, as R79 for the viewer).
+            pacer.interactive(precondition = { if (sessionState.first() !is SessionState.Valid) throw SessionNotValid() }) {
                 val result = lab.run(call, arg)
                 // Keep the answer first: the Pacer arms the cooldown only when the block THROWS RateLimited, and the
                 // screen must still get the shape of that 429.
@@ -140,6 +143,9 @@ class AdapterLabViewModel(
             }
         } catch (e: CancellationException) {
             throw e
+        } catch (e: SessionNotValid) {
+            // Nothing was sent or logged. Said nowhere else: the screen already shows that the session needs attention.
+            return
         } catch (e: Exception) {
             // A PacerRefusal (nothing was sent), a Transient or LoginRequired thrown by the lab, a RateLimited that was
             // thrown on purpose above (the answer is already kept), or something unexpected: shown, never rethrown.
@@ -211,6 +217,9 @@ class AdapterLabViewModel(
     }
 
     private fun fileOf(call: LabCall) = File(labDir, call.name.lowercase() + ".json")
+
+    /** The stored session stopped being Valid while a tap waited for the Pacer: thrown inside the gate, caught right outside it. */
+    private class SessionNotValid : Exception()
 
     private companion object {
         const val CALL_FAILED = "The call failed"

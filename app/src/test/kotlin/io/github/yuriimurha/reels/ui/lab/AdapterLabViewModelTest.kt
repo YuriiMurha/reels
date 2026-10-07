@@ -20,6 +20,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -339,6 +340,43 @@ class AdapterLabViewModelTest {
         assertEquals(emptyList(), runner.calls)
         assertEquals(0, log.countSince(0))
         assertNull(viewModel.ui.value.running)
+    }
+
+    /**
+     * R85: a tap that passed the session check can still wait seconds for the Pacer (the 2 s gap here), and a challenge can be
+     * stored meanwhile (by the viewer, say). The lab asks again from inside the gate, as the video resolver does (R79).
+     */
+    @Test
+    fun aChallengeStoredWhileTheTapWaitsForThePacerSendsNothing() = runTest {
+        val viewModel = viewModel()
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        viewModel.tap(LabCall.COLLECTIONS)
+        runCurrent() // passed its first check; now inside the Pacer, waiting out the 2 s gap after the first tap
+        assertEquals(LabCall.COLLECTIONS, viewModel.ui.value.running, "precondition: the second tap is queued")
+
+        sessionState.value = SessionState.Challenge(null, "tester")
+        advanceUntilIdle()
+
+        assertEquals(listOf(LabCall.CURRENT_USER), runner.calls.map { it.first }, "the queued call never reached Instagram")
+        assertEquals(1, log.countSince(0), "and was not logged: it used no budget")
+        assertNull(viewModel.ui.value.running, "the buttons come back")
+        assertNull(viewModel.ui.value.message, "no failure to report: the screen already says the session needs attention")
+        assertEquals(emptyList(), signals.events, "and nothing was signalled")
+    }
+
+    @Test
+    fun aTapThatPassesTheInGateCheckIsSent() = runTest {
+        val viewModel = viewModel()
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        viewModel.tap(LabCall.COLLECTIONS)
+        runCurrent()
+        sessionState.value = SessionState.Valid("tester2") // still a valid session: the call goes out
+        advanceUntilIdle()
+
+        assertEquals(listOf(LabCall.CURRENT_USER, LabCall.COLLECTIONS), runner.calls.map { it.first })
+        assertEquals(2, log.countSince(0))
     }
 
     @Test

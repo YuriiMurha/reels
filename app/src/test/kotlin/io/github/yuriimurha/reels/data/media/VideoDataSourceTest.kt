@@ -2,11 +2,16 @@ package io.github.yuriimurha.reels.data.media
 
 import android.content.Context
 import android.net.Uri
+import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSourceInputStream
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.R
@@ -21,6 +26,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.IOException
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -110,6 +116,42 @@ class VideoDataSourceTest {
         server.enqueue(MockResponse.Builder().code(404).build())
         val notFound = assertFailsWith<HttpDataSource.InvalidResponseCodeException> { read(server.url("/gone.mp4").toString(), key = "51") }
         assertTrue(!isExpiredLinkError(notFound), "a 404 is not a stale link")
+    }
+
+    private fun loadError(exception: IOException, errorCount: Int) = LoadErrorHandlingPolicy.LoadErrorInfo(
+        LoadEventInfo(LoadEventInfo.getNewId(), DataSpec(Uri.parse(server.url("/v.mp4").toString())), 0L),
+        MediaLoadData(C.DATA_TYPE_MEDIA),
+        exception,
+        errorCount,
+    )
+
+    /**
+     * R85: Media3's default policy retries an HTTP error up to 3 times before the player reports it, and video isn't on the
+     * Pacer's CDN lane. A refused link (403, 410, a 429) goes straight to `onPlayerError`, where the viewer renews it once.
+     */
+    @Test
+    fun anHttpErrorStatusIsNeverRetried() {
+        for (code in listOf(403, 410, 429, 404)) {
+            server.enqueue(MockResponse.Builder().code(code).build())
+            val refused = assertFailsWith<HttpDataSource.InvalidResponseCodeException> { read(server.url("/v.mp4?c=$code").toString(), key = "6$code") }
+            for (errorCount in 1..3) {
+                assertEquals(C.TIME_UNSET, VideoLoadErrorPolicy().getRetryDelayMsFor(loadError(refused, errorCount)), "HTTP $code, error $errorCount")
+            }
+            val wrapped = IOException("read failed", refused)
+            assertEquals(C.TIME_UNSET, VideoLoadErrorPolicy().getRetryDelayMsFor(loadError(wrapped, 1)), "HTTP $code as a cause")
+        }
+        assertEquals(4, server.requestCount, "one request per refused link")
+    }
+
+    /** Anything else (a dropped connection, a timeout) keeps Media3's default handling. */
+    @Test
+    fun otherLoadErrorsKeepTheDefaultRetries() {
+        for (errorCount in 1..4) {
+            val dropped = loadError(IOException("connection reset"), errorCount)
+            assertEquals(DefaultLoadErrorHandlingPolicy().getRetryDelayMsFor(dropped), VideoLoadErrorPolicy().getRetryDelayMsFor(dropped))
+        }
+        assertTrue(VideoLoadErrorPolicy().getRetryDelayMsFor(loadError(IOException("connection reset"), 2)) != C.TIME_UNSET, "still retried")
+        assertEquals(DefaultLoadErrorHandlingPolicy().getMinimumLoadableRetryCount(C.DATA_TYPE_MEDIA), VideoLoadErrorPolicy().getMinimumLoadableRetryCount(C.DATA_TYPE_MEDIA))
     }
 
     /** Mock mode: the bundled clip is an android.resource URI, which the cache's upstream must open too. */

@@ -67,6 +67,24 @@ class VideoWiringGuardTest {
     }
 
     /**
+     * R85: the policy that turns a refused link into an immediate player error (no retries) is only tested in isolation;
+     * only a phone could show the player using it, so the wiring is pinned: the viewer's ExoPlayer gets its media source
+     * factory from `videoMediaSourceFactory`, and that factory installs `VideoLoadErrorPolicy` over the cached data source.
+     */
+    @Test
+    fun theViewersPlayerNeverRetriesARefusedLink() {
+        val builders = callArguments(main("ui/viewer/ViewerScreen.kt"), "setMediaSourceFactory(")
+        assertEquals(1, builders.size, "expected exactly one setMediaSourceFactory in the viewer: $builders")
+        assertTrue(builders.single().trim().startsWith("videoMediaSourceFactory("), "the viewer's media source factory: ${builders.single()}")
+        assertTrue("DefaultMediaSourceFactory(" !in main("ui/viewer/ViewerScreen.kt"), "the viewer must not build a factory of its own")
+
+        val factory = Regex("""fun videoMediaSourceFactory\([^)]*\)[^=]*=([^\n]*\n){1,3}""").find(main("data/media/VideoCache.kt"))?.value
+        assertTrue(factory != null, "videoMediaSourceFactory must be defined in VideoCache.kt")
+        assertTrue("cachedDataSourceFactory(" in factory, "it reads through the cache: $factory")
+        assertTrue(Regex("""setLoadErrorHandlingPolicy\(\s*VideoLoadErrorPolicy\(\)\s*\)""").containsMatchIn(factory), "and never retries an HTTP error: $factory")
+    }
+
+    /**
      * The viewer draws video on a TextureView. With the default SurfaceView the surface of a page the owner had swiped
      * away from and back to often never arrived (emulator: 6 of 8 tries failed, 0 of 8 with a TextureView), and the clip
      * then played as sound under the thumbnail. Only a phone can show it, so the choice is pinned here.

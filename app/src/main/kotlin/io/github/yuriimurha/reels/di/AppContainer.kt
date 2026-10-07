@@ -84,9 +84,12 @@ class AppContainer(context: Context) {
 
     /**
      * Watched videos, in the cache directory (the OS may reclaim it; a video is only a download away). One instance per
-     * process: a second `SimpleCache` on the same directory throws. Built on first use.
+     * process: a second `SimpleCache` on the same directory throws. Built on first use. Each library has its own, like its
+     * thumbnails (R85): Mock mode's clip, cached under a fake pk, must never answer for a real item.
      */
-    val videoCache: VideoCache by lazy { VideoCache(File(context.cacheDir, "video"), StandaloneDatabaseProvider(context)) }
+    val videoCache: VideoCache by lazy {
+        VideoCache(File(context.cacheDir, if (usesFake) "fake-video" else "video"), StandaloneDatabaseProvider(context))
+    }
 
     /** The WebView's own user agent for video requests, read once and only when a video is first played. */
     val videoUserAgent: String by lazy { WebSettings.getDefaultUserAgent(context) }

@@ -52,7 +52,6 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.compose.ContentFrame
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -60,7 +59,7 @@ import androidx.paging.compose.itemKey
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.media.VideoSource
-import io.github.yuriimurha.reels.data.media.cachedDataSourceFactory
+import io.github.yuriimurha.reels.data.media.videoMediaSourceFactory
 import io.github.yuriimurha.reels.di.AppContainer
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Permalinks
@@ -178,7 +177,8 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
 
 /**
  * Plays through the video cache (spec 8.3). Mock mode never touches the network, so it does not load the WebView for its
- * user agent; a real library uses the WebView's own, read once per process.
+ * user agent; a real library uses the WebView's own, read once per process. A refused link is not retried by the player
+ * (R85, `VideoLoadErrorPolicy`): it reaches `onPlayerError` at once.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -187,7 +187,7 @@ private fun rememberViewerPlayer(container: AppContainer): ExoPlayer {
     val player = remember {
         val userAgent = if (container.usesFake) null else container.videoUserAgent
         ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(cachedDataSourceFactory(context, container.videoCache.cache, userAgent)))
+            .setMediaSourceFactory(videoMediaSourceFactory(context, container.videoCache.cache, userAgent))
             .build()
             .apply { repeatMode = Player.REPEAT_MODE_ONE }
     }

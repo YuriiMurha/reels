@@ -124,6 +124,29 @@ class BackendSelectionTest {
     }
 
     /**
+     * R85: cached videos live beside their library, like thumbnails. A shared directory would let Mock mode's clip, cached
+     * under a fake pk, answer for a real item with the same pk, and Delete library in one mode empty the other's cache.
+     */
+    private fun videosLiveIn(useFake: Boolean, own: String, other: String) {
+        listOf(own, other).forEach { File(context.cacheDir, it).deleteRecursively() } // whatever an earlier test left
+        val container = container(useFake)
+        try {
+            // Built here. SimpleCache creates its directory on its own init thread; any of its (synchronized) calls waits for that.
+            container.videoCache.cache.keys
+            assertTrue(File(context.cacheDir, own).isDirectory, "the ${if (useFake) "fake" else "real"} library caches videos in cacheDir/$own")
+            assertFalse(File(context.cacheDir, other).exists(), "and never in cacheDir/$other")
+        } finally {
+            container.videoCache.cache.release()
+        }
+    }
+
+    @Test
+    fun theFakeLibrarysVideosLiveInTheirOwnCache() = videosLiveIn(useFake = true, own = "fake-video", other = "video")
+
+    @Test
+    fun theRealLibrarysVideosKeepTheirCache() = videosLiveIn(useFake = false, own = "video", other = "fake-video")
+
+    /**
      * R84: the container's library and its account go together: the account is kept under this library's kind, and Delete
      * library forgets it. One container per test: two would open two DataStores on the one settings file.
      */

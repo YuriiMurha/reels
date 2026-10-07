@@ -133,10 +133,11 @@ and never contacts Instagram. A release build has no such switch and always uses
   first sync. The switch is greyed out while a sync is running (and for a moment after the screen opens, until it has
   read the latest run). Never turn it off on an emulator.
 - **Nothing is lost by switching back and forth.** The fake library and the real one are kept separately (fake:
-  `reels.db`, real: `library.db`; their thumbnails too). Only the request log behind the 600-per-24-hour budget is
-  shared: session checks and lab calls count against it even in Mock mode. In Mock mode the Sync screen shows the fake
-  library's counters and cooldown, so a real cooldown armed by a session check or a lab call is not shown there until
-  you switch Mock mode off (the app still refuses the requests).
+  `reels.db`, real: `library.db`; their thumbnails and cached videos too). Shared between them are only the Instagram
+  login and the request log behind the 600-per-24-hour budget, with its cooldown: session checks and lab calls count
+  against it even in Mock mode. In Mock mode the Sync screen shows the fake library's counters and cooldown, so a real
+  cooldown armed by a session check or a lab call is not shown there until you switch Mock mode off (the app still
+  refuses the requests).
 
 ## 4. Log in (on the phone only)
 
@@ -273,7 +274,8 @@ Videos are never downloaded during a sync. A reel is fetched when you open it:
   handles it on the phone (the Instagram app or a browser), so it uses whatever account is logged in there. If
   Instagram no longer has the reel, the app says so and keeps your copy of the item.
 - A link Instagram refuses (HTTP 403 or 410) is renewed once and retried; if that fails too you see "Can't play this
-  video". Video requests carry no cookies.
+  video". The player itself never retries a refused link (nor a 429 or 404): one refusal is one request. Video requests
+  carry no cookies; if Instagram's video server redirects, the redirect is followed (the player can't refuse it).
 - In Mock mode the bundled clip plays for every reel and nothing is requested.
 
 ## 7. Adapter lab and the spike handback
