@@ -56,6 +56,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -349,10 +350,41 @@ class SyncViewModelTest {
         cookies.events.clear()
 
         viewModel.logout()
-        withContext(Dispatchers.Default) { withTimeout(5_000) { session.state.first { it == SessionState.LoggedOut } } }
+        awaitLoggedOut()
 
         assertEquals(listOf("scheduler.cancel", "clear"), cookies.events, "the cancel was tried first, and its failure did not stop the logout")
         assertFalse(session.hasSessionCookies())
+    }
+
+    /**
+     * A CancellationException from inside the cancel (a WorkManager future that was cancelled, say) is not this scope being
+     * cancelled: the scope is shielded. The owner asked to log out, so the session is forgotten all the same.
+     */
+    @Test
+    fun logoutForgetsTheSessionEvenWhenCancellingTheRunThrowsACancellation() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        cancelFailure = CancellationException("the scheduler's own future was cancelled")
+        cookies.events.clear()
+
+        viewModel.logout()
+        awaitLoggedOut()
+
+        assertEquals(listOf("scheduler.cancel", "clear"), cookies.events, "the cancel was tried first, and its cancellation did not stop the logout")
+        assertFalse(session.hasSessionCookies(), "the jar is cleared")
+    }
+
+    /**
+     * Waits (in real time, off the virtual clock) until the stored session reads LoggedOut. It re-reads the stored value
+     * instead of waiting for an emission: a collector that subscribes while the logout's DataStore write lands can miss
+     * that one update and then wait for ever (seen here as a 5 s timeout while the stored value already was LoggedOut,
+     * about one run in ten with the old `first { ... }`).
+     */
+    private suspend fun awaitLoggedOut() {
+        withContext(Dispatchers.Default) {
+            withTimeout(5_000) { while (session.state.first() != SessionState.LoggedOut) delay(10) }
+        }
     }
 
     /** The screen can go away (the ViewModel is cleared, its scope cancelled) between the tap and the end of the logout. */
@@ -367,7 +399,7 @@ class SyncViewModelTest {
         runCurrent() // the logout has started and is waiting on the database write that pauses the run
         viewModel.viewModelScope.cancel()
         assertFalse(viewModel.viewModelScope.isActive)
-        withContext(Dispatchers.Default) { withTimeout(5_000) { session.state.first { it == SessionState.LoggedOut } } }
+        awaitLoggedOut()
 
         assertFalse(session.hasSessionCookies())
         assertEquals(SyncStatus.PAUSED, db.syncDao().latestRun()!!.status, "the run was cancelled too")
@@ -458,7 +490,14 @@ class SyncViewModelTest {
         probe.next = { throw InstagramException.ChallengeRequired("https://www.instagram.com/challenge/x/") }
         assertEquals(SessionState.Challenge("https://www.instagram.com/challenge/x/", null), session.validate())
         viewModel.sessionState.first { it is SessionState.Challenge }
-        assertFalse(screen(viewModel).canStart)
+        screen(viewModel).let {
+            assertFalse(it.canStart)
+            assertEquals(
+                LOG_IN_TO_SYNC,
+                it.banner,
+                "the loaded state's banner (a challenged session is not ready), not the null of still loading: the snapshot is provably taken after the load",
+            )
+        }
     }
 
     /** Defence in depth: the buttons are disabled, but nothing that reaches `start` may begin a sync the screen did not offer. */
