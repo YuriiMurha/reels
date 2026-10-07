@@ -5,15 +5,23 @@ import android.view.ViewGroup
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.di.AppContainer
+import io.github.yuriimurha.reels.session.LoginSession
+import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 
@@ -22,10 +30,35 @@ class LoginScreenTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
 
+    private val session = FakeLoginSession()
+    private var done = 0
+
     private fun findWebView(view: View): WebView? = when {
         view is WebView -> view
         view is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull { findWebView(view.getChildAt(it)) }
         else -> null
+    }
+
+    private fun webView(): WebView = checkNotNull(findWebView(compose.activity.window.decorView)) { "the login screen shows no WebView" }
+
+    /** The real screen over [session], so a test can count the Instagram requests it makes. */
+    private fun show(purpose: LoginPurpose, startUrl: String? = null) {
+        val container = AppContainer(ApplicationProvider.getApplicationContext())
+        val viewModel = LoginViewModel(session, purpose)
+        compose.setContent {
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) {
+                    LoginScreen(
+                        startUrl = startUrl,
+                        onDone = { done++ },
+                        onBack = {},
+                        purpose = purpose,
+                        viewModel = viewModel,
+                    )
+                }
+            }
+        }
+        compose.waitForIdle()
     }
 
     /**
@@ -35,18 +68,77 @@ class LoginScreenTest {
      */
     @Test
     fun theWebViewFillsTheScreenSoThePageIsLaidOutAtFullHeight() {
-        val container = AppContainer(ApplicationProvider.getApplicationContext())
-        compose.setContent {
-            ReelsTheme {
-                CompositionLocalProvider(LocalAppContainer provides container) {
-                    LoginScreen(startUrl = null, onDone = {}, onBack = {})
-                }
-            }
-        }
-        compose.waitForIdle()
+        session.fingerprint = null
+        show(LoginPurpose.LOGIN)
         val webView = findWebView(compose.activity.window.decorView)
         assertNotNull(webView, "the login screen shows no WebView")
         assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, webView.layoutParams.width)
         assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, webView.layoutParams.height)
+    }
+
+    @Test
+    fun aChallengeScreenOffersCheckAgainWhileItWaits() {
+        show(LoginPurpose.CHALLENGE)
+        compose.onNodeWithText("Finished verifying on Instagram?").assertIsDisplayed()
+        compose.onNodeWithText("Check again").assertIsDisplayed()
+        assertEquals(0, session.validations, "opening the challenge page costs no request")
+    }
+
+    @Test
+    fun checkAgainOnAChallengeScreenValidatesExactlyOnceAndMovesOn() {
+        show(LoginPurpose.CHALLENGE)
+        compose.onNodeWithText("Check again").performClick()
+        // The view model works on the main looper, which only moves while the compose rule idles it.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.waitForIdle()
+            session.validations >= 1 && done >= 1
+        }
+        // The 1 s poll keeps running; the same session must not be sent again.
+        compose.mainClock.advanceTimeBy(5_000)
+        compose.waitForIdle()
+        assertEquals(1, session.validations, "one tap is one Instagram request")
+        assertEquals(1, done, "a Valid result closes the screen")
+    }
+
+    @Test
+    fun aLoginScreenOffersNoCheckAgainUntilSomethingHappened() {
+        session.fingerprint = null
+        show(LoginPurpose.LOGIN)
+        compose.onAllNodesWithText("Check again").assertCountEquals(0)
+    }
+
+    @Test
+    fun aChallengeScreenWithoutAUsableUrlStartsOnInstagramHome() {
+        show(LoginPurpose.CHALLENGE, startUrl = null)
+        assertEquals("https://www.instagram.com/", shadowOf(webView()).lastLoadedUrl)
+    }
+
+    @Test
+    fun aChallengeScreenStartsOnItsChallengePage() {
+        show(LoginPurpose.CHALLENGE, startUrl = "https://www.instagram.com/challenge/x/")
+        assertEquals("https://www.instagram.com/challenge/x/", shadowOf(webView()).lastLoadedUrl)
+    }
+
+    @Test
+    fun aLoginScreenStartsOnTheLoginPage() {
+        session.fingerprint = null
+        show(LoginPurpose.LOGIN, startUrl = null)
+        assertEquals("https://www.instagram.com/accounts/login/", shadowOf(webView()).lastLoadedUrl)
+    }
+
+    private class FakeLoginSession : LoginSession {
+        var fingerprint: String? = "s1"
+        var validations = 0
+
+        override fun currentSessionFingerprint(): String? = fingerprint
+
+        override fun hasSessionCookies(): Boolean = fingerprint != null
+
+        override fun hasCsrfToken(): Boolean = false
+
+        override suspend fun validate(): SessionState {
+            validations++
+            return SessionState.Valid("tester")
+        }
     }
 }

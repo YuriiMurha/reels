@@ -104,6 +104,17 @@ class LoginNavigationTest {
     }
 
     @Test
+    fun theStartPageDependsOnThePurpose() {
+        val home = "https://www.instagram.com/"
+        assertEquals(loginPage, startPage(LoginPurpose.LOGIN, null))
+        assertEquals(loginPage, startPage(LoginPurpose.LOGIN, "https://example.com/"))
+        assertEquals(home, startPage(LoginPurpose.CSRF, home))
+        assertEquals(home, startPage(LoginPurpose.CHALLENGE, null), "no challenge URL: the home page redirects to the checkpoint")
+        assertEquals(home, startPage(LoginPurpose.CHALLENGE, "https://example.com/challenge/x/"))
+        assertEquals("https://www.instagram.com/challenge/x/", startPage(LoginPurpose.CHALLENGE, "https://www.instagram.com/challenge/x/"))
+    }
+
+    @Test
     fun aChallengeUrlLoadsOnlyWhenItIsAnAllowedPage() {
         assertEquals("https://www.instagram.com/challenge/x/", allowedUrlOrNull("https://www.instagram.com/challenge/x/"))
         assertNull(allowedUrlOrNull("http://www.instagram.com/challenge/x/"))

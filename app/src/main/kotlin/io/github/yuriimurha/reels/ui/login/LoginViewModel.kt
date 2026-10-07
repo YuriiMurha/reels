@@ -72,6 +72,7 @@ class LoginViewModel(
 
     /** The owner finished something in the WebView (a challenge, say) and wants the same session checked again. */
     fun retry() {
+        if (mutableStatus.value is Status.Checking) return // a check is already out: don't send the session twice
         lastChecked = null
         mutableStatus.value = Status.Waiting
     }

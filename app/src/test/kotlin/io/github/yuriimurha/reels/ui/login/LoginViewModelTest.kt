@@ -188,6 +188,24 @@ class LoginViewModelTest {
     }
 
     @Test
+    fun retryWhileACheckIsInFlightDoesNotStartASecondOne() = runTest {
+        session.fingerprint = "s1"
+        val gate = CompletableDeferred<Unit>()
+        session.gate = gate
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(LoginViewModel.Status.Checking, viewModel.status.value)
+        viewModel.retry()
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(1, session.validations, "a second request while the first is out would double the Instagram traffic")
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(LoginViewModel.Status.Done(SessionState.Valid("tester")), viewModel.status.value)
+    }
+
+    @Test
     fun aCsrfScreenNeverValidatesAndWaitsForTheToken() = runTest {
         session.fingerprint = "s1"
         val viewModel = LoginViewModel(session, LoginPurpose.CSRF)

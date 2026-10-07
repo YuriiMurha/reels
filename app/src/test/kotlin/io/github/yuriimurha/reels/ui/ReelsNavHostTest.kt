@@ -3,6 +3,7 @@ package io.github.yuriimurha.reels.ui
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -19,7 +20,10 @@ import io.github.yuriimurha.reels.data.db.CollectionMediaEntity
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.di.AppContainer
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.session.SessionState
+import io.github.yuriimurha.reels.session.toStored
 import io.github.yuriimurha.reels.testutil.mediaEntity
+import io.github.yuriimurha.reels.ui.login.LoginPurpose
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -209,5 +213,55 @@ class ReelsNavHostTest {
         }
         compose.waitForIdle()
         assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<SyncRoute>(), "a late result popped Sync as well")
+    }
+
+    private fun showFrom(start: Any) {
+        compose.setContent {
+            navController = rememberNavController()
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) {
+                    ReelsNavHost(navController, startDestination = start)
+                }
+            }
+        }
+        compose.waitForIdle()
+    }
+
+    @Test
+    fun resolveOnInstagramNavigatesToTheLoginRouteAsAChallenge() {
+        runBlocking {
+            container.settings.setSession(SessionState.Challenge("https://www.instagram.com/challenge/x/", "tester").toStored())
+        }
+        showFrom(SyncRoute)
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("Resolve on Instagram").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Resolve on Instagram").performClick()
+        compose.waitForIdle()
+        assertEquals(
+            LoginRoute("https://www.instagram.com/challenge/x/", LoginPurpose.CHALLENGE),
+            navController.currentBackStackEntry!!.toRoute<LoginRoute>(),
+        )
+    }
+
+    @Test
+    fun logInNavigatesToTheLoginRouteAsALogin() {
+        showFrom(SyncRoute)
+        compose.onNodeWithText("Log in").performClick()
+        compose.waitForIdle()
+        assertEquals(LoginRoute(null, LoginPurpose.LOGIN), navController.currentBackStackEntry!!.toRoute<LoginRoute>())
+    }
+
+    /** "Check again" is shown only on a CHALLENGE screen that is waiting, so it shows the route's purpose reached LoginScreen. */
+    @Test
+    fun theHostPassesTheRoutesPurposeToTheLoginScreen() {
+        showFrom(LoginRoute("https://www.instagram.com/challenge/x/", LoginPurpose.CHALLENGE))
+        compose.onNodeWithText("Check again").assertExists()
+    }
+
+    @Test
+    fun aLoginRouteWithTheLoginPurposeOffersNoCheckAgain() {
+        showFrom(LoginRoute(null, LoginPurpose.LOGIN))
+        compose.onNodeWithText("Check again").assertDoesNotExist()
     }
 }

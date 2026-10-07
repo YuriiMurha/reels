@@ -54,9 +54,9 @@ fun LoginScreen(
     onDone: () -> Unit,
     onBack: () -> Unit,
     purpose: LoginPurpose = LoginPurpose.LOGIN,
+    // A parameter only so tests can give the screen a fake session; the app always uses the default.
+    viewModel: LoginViewModel = LocalAppContainer.current.let { container -> viewModel { LoginViewModel(container.session, purpose) } },
 ) {
-    val container = LocalAppContainer.current
-    val viewModel = viewModel { LoginViewModel(container.session, purpose) }
     val status by viewModel.status.collectAsStateWithLifecycle()
     var webView by remember { mutableStateOf<WebView?>(null) }
 
@@ -95,7 +95,13 @@ fun LoginScreen(
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             when (val current = status) {
-                LoginViewModel.Status.Waiting -> if (purpose == LoginPurpose.CSRF) LinearProgressIndicator(Modifier.fillMaxWidth())
+                LoginViewModel.Status.Waiting -> when (purpose) {
+                    LoginPurpose.CSRF -> LinearProgressIndicator(Modifier.fillMaxWidth())
+                    // A challenge screen is seeded with the session it was opened for, so it never checks by itself: the
+                    // owner says when verification is finished (Instagram usually keeps the same sessionid).
+                    LoginPurpose.CHALLENGE -> RetryBar("Finished verifying on Instagram?", viewModel::retry)
+                    LoginPurpose.LOGIN -> Unit
+                }
                 LoginViewModel.Status.CsrfReady -> Unit
                 LoginViewModel.Status.Checking -> LinearProgressIndicator(Modifier.fillMaxWidth())
                 is LoginViewModel.Status.Failed -> RetryBar(current.message, viewModel::retry)
@@ -117,7 +123,7 @@ fun LoginScreen(
                         settings.domStorageEnabled = true
                         CookieManager.getInstance().setAcceptCookie(true)
                         webViewClient = InstagramOnlyClient()
-                        loadUrl(loginTarget(startUrl))
+                        loadUrl(startPage(purpose, startUrl))
                     }.also { webView = it }
                 },
                 onRelease = { it.destroy() },
@@ -129,6 +135,15 @@ fun LoginScreen(
 
 /** Where the WebView starts: the requested page when it is an allowed one, otherwise Instagram's login page. */
 internal fun loginTarget(startUrl: String?): String = allowedUrlOrNull(startUrl) ?: LOGIN_URL
+
+/**
+ * Where the WebView starts for [purpose]. A challenge without a usable URL opens Instagram's home, which redirects to
+ * the checkpoint, like a Challenge result does; the other purposes fall back to the login page.
+ */
+internal fun startPage(purpose: LoginPurpose, startUrl: String?): String = when (purpose) {
+    LoginPurpose.CHALLENGE -> challengeTarget(startUrl)
+    LoginPurpose.LOGIN, LoginPurpose.CSRF -> loginTarget(startUrl)
+}
 
 /** What to load for a Challenge result: its URL when allowed, else Instagram's home, which redirects to the checkpoint. */
 internal fun challengeTarget(challengeUrl: String?): String = allowedUrlOrNull(challengeUrl) ?: INSTAGRAM_HOME

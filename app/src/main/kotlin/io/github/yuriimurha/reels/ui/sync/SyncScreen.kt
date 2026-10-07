@@ -50,12 +50,15 @@ import io.github.yuriimurha.reels.ui.login.LoginPurpose
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SyncScreen(onBack: () -> Unit, onOpenLogin: (url: String?, purpose: LoginPurpose) -> Unit) {
-    val container = LocalAppContainer.current
+fun SyncScreen(
+    onBack: () -> Unit,
+    onOpenLogin: (url: String?, purpose: LoginPurpose) -> Unit,
+    // A parameter only so tests can give the screen a fake session; the app always uses the default.
+    viewModel: SyncViewModel = LocalAppContainer.current.let { container ->
+        viewModel { SyncViewModel(container.syncController, container.library, container.backend.pacer, container.session) }
+    },
+) {
     val context = LocalContext.current
-    val viewModel = viewModel {
-        SyncViewModel(container.syncController, container.library, container.backend.pacer, container.session)
-    }
     val run by viewModel.run.collectAsStateWithLifecycle()
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     val pacer by viewModel.pacerStatus.collectAsStateWithLifecycle()
