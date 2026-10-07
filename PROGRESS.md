@@ -53,3 +53,12 @@ Append-only log. Newest entry at the bottom; never edit past entries.
 - Unit tests cover the validation-once logic, the paste outcomes (only Valid is accepted; a rejection keeps the current login and never shows an account handle), the https-only WebView client and the Sync-to-Login navigation.
 - Not yet confirmed on a device: the login itself. Confirmed currentUser endpoint and X-IG-App-ID: pending owner check.
 - M2 stays open in `TODO.md` until the owner runs the on-phone checklist (login, relaunch with no request, Check now, logout, optional paste).
+
+## 2026-10-07: M0-M2 final-review fixes
+
+- Sync screen: Log out is now offered in every state but LoggedOut (Valid, Expired, Challenge), and Challenge also offers Paste sessionid; the buttons wrap instead of truncating. Check now is coalesced like a paste (a double tap is one request). Until the stored session state has been read the section shows "Checking session..." and no buttons, so an early tap can't open Log in for a challenged session.
+- Login screen: after any Challenge result it stops validating by itself for the rest of its life (Instagram may re-issue the sessionid mid-checkpoint) and shows the manual "Finished verifying on Instagram? / Check again" control. New `LoginPurpose.RELOGIN` for "Log in again": like LOGIN, but the stale session already in the jar is not re-checked. Both only remove requests; no pacing number, budget or concurrency changed.
+- Settings: a corrupt DataStore file is replaced by a 1 h cooldown plus a rate limit stamped now (ruling R54), not by empty preferences, so a corruption can't silently end an active cooldown.
+- `:app` no longer spells out Instagram URLs, the login host allowlist or cookie attributes: they moved to `:instagram` (`WebEndpoints`, `WebSessionCookies`), strings byte-identical.
+- Sync screen: "Requests this run" is now "Requests (all attempts)" without a per-run denominator, which a resumed run could exceed.
+- `TODO.md` ticked and given M3/M4/M5 gates and two owner checks for the M2 phone checklist; `ARCHITECTURE.md` brought up to date (settings keys, RELOGIN, where the Instagram strings live).
