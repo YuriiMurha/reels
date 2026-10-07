@@ -14,6 +14,7 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Page
 import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
+import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
@@ -23,12 +24,15 @@ import io.github.yuriimurha.reels.testutil.cacheWholeFile
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -59,6 +63,9 @@ class RealVideoSourceResolverTest {
     private val client = StubClient()
     private val signals = RecordingSignals(epoch = 7)
 
+    /** What the container's readiness check reads: the stored session. Only a valid one may be asked on. */
+    private var sessionState: SessionState = SessionState.Valid("tester")
+
     @After
     fun close() {
         videoCache.cache.release()
@@ -70,8 +77,10 @@ class RealVideoSourceResolverTest {
     private fun TestScope.resolver(): RealVideoSourceResolver {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
-        return RealVideoSourceResolver(client, pacer, db.mediaDao(), videoCache, signals, now = clock)
+        return RealVideoSourceResolver(client, pacer, db.mediaDao(), videoCache, signals, ::sessionIsValid, now = clock)
     }
+
+    private suspend fun sessionIsValid() = sessionState is SessionState.Valid
 
     private suspend fun stored(pk: String = "m1", videoUrl: String? = OLD_URL, expiresAt: Long? = START + 3_600_000): MediaEntity =
         mediaEntity(pk, MediaType.REEL, videoUrl = videoUrl, videoUrlExpiresAt = expiresAt).also { db.mediaDao().upsert(listOf(it)) }
@@ -125,15 +134,117 @@ class RealVideoSourceResolverTest {
         assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m1"), forced)
     }
 
+    /**
+     * The interactive lane waits at least 2 s after the previous request; the sync lane (the fast fake policy) 20 to 60 ms.
+     * So two refreshes in a row tell the lanes apart, which a refusal does not (both lanes refuse a cooldown).
+     */
     @Test
     fun theRefreshRunsOnTheInteractiveLane() = runTest {
-        // Cooling down refuses an interactive request before it is sent: proof that the refresh goes through the Pacer.
-        cooldowns.onRateLimited(START)
-        val media = stored(expiresAt = START - 1)
+        val resolver = resolver()
+        val first = stored("m1", expiresAt = START - 1)
+        val second = stored("m2", expiresAt = START - 1)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
 
-        resolver().resolve(media)
+        resolver.resolve(first)
+        val afterFirst = testScheduler.currentTime
+        resolver.resolve(second)
+        val waited = testScheduler.currentTime - afterFirst
+
+        assertEquals(listOf("m1", "m2"), client.calls)
+        assertTrue(waited >= PacingPolicy.Fast.interactiveMinGapMs, "the second refresh waited only $waited ms: that is the sync lane's gap, not the interactive lane's 2 s")
+    }
+
+    @Test
+    fun aRefusalComesBeforeAnyRequest() = runTest {
+        cooldowns.onRateLimited(START)
+
+        resolver().resolve(stored(expiresAt = START - 1))
 
         assertEquals(emptyList(), client.calls, "the Pacer refused, so the client was never called")
+    }
+
+    /** The paging snapshot a caller holds can be older than the row: a prefetch may have renewed the link since. */
+    @Test
+    fun aStaleSnapshotWhoseRowWasRefreshedSendsNoRequest() = runTest {
+        val snapshot = stored(expiresAt = START - 1)
+        db.mediaDao().setVideoLink("m1", NEW_URL, START + 7_200_000)
+
+        val source = resolver().resolve(snapshot)
+
+        assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m1"), source, "the row's link, not the snapshot's")
+        assertEquals(emptyList(), client.calls)
+    }
+
+    /** R78: the bytes are on disk, so the link that names them is beside the point. */
+    @Test
+    fun anExpiredButFullyCachedVideoPlaysWithoutARequest() = runTest {
+        val resolver = resolver()
+        cacheFully("m1")
+        val cached = stored("m1", expiresAt = START - 1)
+        val partial = stored("m2", expiresAt = START - 1)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), resolver.resolve(cached))
+        assertEquals(emptyList(), client.calls, "a fully cached video asks Instagram for nothing")
+        assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m2"), resolver.resolve(partial), "an uncached one still refreshes")
+        assertEquals(listOf("m2"), client.calls)
+        assertEquals(OLD_URL, row("m1").videoUrl, "and the cached item's stored link was left alone")
+    }
+
+    /** A forced refresh (the player was refused) asks even for a cached video: the cached bytes did not play. */
+    @Test
+    fun aForcedRefreshAsksEvenForACachedVideo() = runTest {
+        cacheFully("m1")
+        val cached = stored("m1", expiresAt = START + 3_600_000)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m1"), resolver().resolve(cached, forceRefresh = true))
+        assertEquals(listOf("m1"), client.calls)
+    }
+
+    /** R78: a link with no expiry of its own must not cost a request on every settle. */
+    @Test
+    fun aRefreshWithoutAnExpiryStoresOneHourAndTheNextSettleSendsNothing() = runTest {
+        val resolver = resolver()
+        val expired = stored(expiresAt = START - 1)
+        client.answer = { pk -> remote(pk, NEW_URL, expiresAt = null) }
+
+        assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m1"), resolver.resolve(expired))
+        assertEquals(START + 3_600_000, row().videoUrlExpiresAt, "fetch time plus one hour")
+
+        assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m1"), resolver.resolve(row()))
+        assertEquals(listOf("m1"), client.calls, "the next settle used the stored link")
+    }
+
+    /** R76 / spec 6.4: after a challenge, a login failure or a logout, nothing automatic may be sent to Instagram. */
+    @Test
+    fun withoutAUsableSessionNothingIsRequested() = runTest {
+        val resolver = resolver()
+        cacheFully("m1")
+        val cached = stored("m1", expiresAt = START - 1)
+        val uncached = stored("m2", expiresAt = START - 1)
+        val fresh = stored("m3", expiresAt = START + 3_600_000)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        val unusable = listOf(
+            SessionState.LoggedOut,
+            SessionState.Expired("tester"),
+            SessionState.Challenge("https://example.test/challenge/1/", "tester"),
+        )
+        for (state in unusable) {
+            sessionState = state
+            assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), resolver.resolve(cached), "$state: cached plays")
+            assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m3"), resolver.resolve(fresh), "$state: a fresh link plays")
+            val needsAttention = VideoSource.Unavailable("Instagram session needs attention (Sync screen)")
+            assertEquals(needsAttention, resolver.resolve(uncached), "$state: an expired uncached one says so")
+            assertEquals(needsAttention, resolver.resolve(uncached, forceRefresh = true), "$state: a forced refresh sends nothing either")
+            assertEquals(emptyList(), client.calls, "$state: no request")
+        }
+        assertEquals(emptyList(), signals.events, "and nothing is signalled to the session layer")
+
+        sessionState = SessionState.Valid("tester")
+        assertEquals(VideoSource.Play(Uri.parse(NEW_URL), "m2"), resolver.resolve(uncached), "a valid session asks again")
+        assertEquals(listOf("m2"), client.calls)
     }
 
     @Test
@@ -165,11 +276,11 @@ class RealVideoSourceResolverTest {
         val uncached = stored("m2", expiresAt = START - 1)
         val cachedWithoutUrl = stored("m3", videoUrl = null, expiresAt = null).also { cacheFully("m3") }
 
-        assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), resolver.resolve(cached), "a fully cached video plays from the cache")
+        assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), resolver.resolve(cached, forceRefresh = true), "a fully cached video plays from the cache")
         val message = assertIs<VideoSource.Unavailable>(resolver.resolve(uncached)).message
         assertTrue("Cooling down" in message, "the message says why: $message")
         assertTrue(message.startsWith("Video can't load right now: "), message)
-        assertIs<VideoSource.Unavailable>(resolver.resolve(cachedWithoutUrl), "no stored url, nothing to hand the player")
+        assertIs<VideoSource.Unavailable>(resolver.resolve(cachedWithoutUrl, forceRefresh = true), "no stored url, nothing to hand the player")
         assertEquals(emptyList(), client.calls, "a refusal sends nothing")
     }
 
@@ -177,7 +288,7 @@ class RealVideoSourceResolverTest {
     fun aBudgetRefusalFallsBackTheSameWay() = runTest {
         val clock = { START + testScheduler.currentTime }
         val log = InMemoryRequestLog(List(PacingPolicy.Fast.dailyBudget) { START - 1_000L })
-        val resolver = RealVideoSourceResolver(client, Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = clock), db.mediaDao(), videoCache, signals, clock)
+        val resolver = RealVideoSourceResolver(client, Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = clock), db.mediaDao(), videoCache, signals, ::sessionIsValid, clock)
         val media = stored(expiresAt = START - 1)
 
         val message = assertIs<VideoSource.Unavailable>(resolver.resolve(media)).message
@@ -195,7 +306,7 @@ class RealVideoSourceResolverTest {
 
         for (failure in listOf<Exception>(InstagramException.Transient(IOException("x")), IOException("no route"))) {
             client.answer = { throw failure }
-            assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), resolver.resolve(cached), "${failure::class.simpleName}: cached plays")
+            assertEquals(VideoSource.Play(Uri.parse(OLD_URL), "m1"), resolver.resolve(cached, forceRefresh = true), "${failure::class.simpleName}: cached plays")
             assertEquals(
                 VideoSource.Unavailable("Offline: this video isn't cached yet"),
                 resolver.resolve(uncached),
@@ -273,8 +384,8 @@ class RealVideoSourceResolverTest {
         var outcome: Any? = "unset"
         val job = launch { outcome = resolver().resolve(media) }
 
-        runCurrent()
-        assertTrue(requested.isCompleted, "the request is out")
+        // The resolver reads the row first (a real I/O thread), so the request is out a moment later, in real time.
+        withContext(Dispatchers.Default) { withTimeout(5_000) { requested.await() } }
         job.cancel()
         runCurrent()
 
@@ -286,7 +397,7 @@ class RealVideoSourceResolverTest {
 
     private class StubClient : InstagramClient {
         val calls = mutableListOf<String>()
-        var answer: suspend () -> RemoteMedia? = { null }
+        var answer: suspend (pk: String) -> RemoteMedia? = { null }
         override val reportsSavedCollectionIds = true
 
         override suspend fun currentUser(): Account = error("not used by the resolver")
@@ -297,7 +408,7 @@ class RealVideoSourceResolverTest {
 
         override suspend fun mediaInfo(mediaPk: String): RemoteMedia? {
             calls += mediaPk
-            return answer()
+            return answer(mediaPk)
         }
     }
 

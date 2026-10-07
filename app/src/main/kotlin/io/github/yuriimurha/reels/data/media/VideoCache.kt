@@ -31,8 +31,9 @@ class VideoCache(dir: File, databaseProvider: DatabaseProvider, maxBytes: Long =
     val cache: Cache = SimpleCache(dir, LeastRecentlyUsedCacheEvictor(maxBytes), databaseProvider)
 
     /**
-     * True when every byte of the video under [pk] is on disk. The length is known only once a read of the whole video went
-     * through the cache, so a partial span, however large, never counts.
+     * True when every byte of the video under [pk] is on disk: the content length is known AND the whole range from 0 to
+     * that length is cached. Knowing the length is not enough: `CacheDataSource` records it when a read OPENS, so a video
+     * the player only started (and stopped after a few KB) has a length too.
      */
     fun isFullyCached(pk: String): Boolean {
         val length = ContentMetadata.getContentLength(cache.getContentMetadata(pk))

@@ -19,8 +19,9 @@ import kotlin.coroutines.cancellation.CancellationException
  * one `mediaInfo` request on the Pacer's interactive lane renews it. Bytes are cached under the media pk
  * ([VideoSource.Play.cacheKey]), so a renewed link still finds what was already downloaded.
  *
- * When Instagram cannot be asked (cooling down, over budget, offline) a video that is fully on disk still plays, from its
- * stored link; anything else gets a message the viewer shows over the thumbnail, next to Open on Instagram.
+ * A video that is fully on disk plays from its stored link whatever that link's age: no request (R78). Without a valid
+ * session no request is made either (R76). When Instagram cannot be asked (no session, cooling down, over budget, offline)
+ * anything else gets a message the viewer shows over the thumbnail, next to Open on Instagram.
  */
 @OptIn(UnstableApi::class)
 class RealVideoSourceResolver(
@@ -29,27 +30,42 @@ class RealVideoSourceResolver(
     private val mediaDao: MediaDao,
     private val cache: VideoCache,
     private val signals: SessionSignals,
+    /**
+     * True only while the stored session is valid. Without one (logged out, expired, a challenge) nothing is sent to
+     * Instagram, however the resolve was started: spec 6.4 allows no automatic request after a challenge (R76).
+     */
+    private val isSessionReady: suspend () -> Boolean,
     private val now: () -> Long = System::currentTimeMillis,
 ) : VideoSourceResolver {
     override suspend fun resolve(media: MediaEntity, forceRefresh: Boolean): VideoSource? {
         if (!media.isVideo) return null
-        if (!forceRefresh && !media.videoLinkNeedsRefresh(now())) return media.stored()
         // The session this request starts under: a failure that outlives a logout or a paste must not expire the login after it.
         val epoch = signals.epoch()
+        var current = media
         return try {
-            val fresh = pacer.interactive { client.mediaInfo(media.pk) }
+            // The row is the truth: a link renewed a moment ago (by a prefetch) may not have reached the caller's paging snapshot yet.
+            current = mediaDao.byPks(listOf(media.pk)).firstOrNull() ?: media
+            if (!forceRefresh) {
+                if (!current.videoLinkNeedsRefresh(now())) return current.stored()
+                // The bytes are on disk, so the link that names them is beside the point (R78).
+                current.cachedPlay()?.let { return it }
+            }
+            // Nothing may go to Instagram without a usable session (R76); cached bytes still play.
+            if (!isSessionReady()) return current.cachedPlay() ?: NEEDS_ATTENTION
+            val fresh = pacer.interactive { client.mediaInfo(current.pk) }
             val url = fresh?.videoUrl ?: return GONE
-            val expiresAt = fresh.videoUrlExpiresAt?.toEpochMilli()
-            mediaDao.setVideoLink(media.pk, url, expiresAt)
-            VideoSource.Play(url.toUri(), media.pk)
+            // A link whose URL names no expiry is assumed good for an hour, so it cannot cost a request on every settle (R78).
+            val expiresAt = fresh.videoUrlExpiresAt?.toEpochMilli() ?: (now() + ASSUMED_LIFETIME_MS)
+            mediaDao.setVideoLink(current.pk, url, expiresAt)
+            VideoSource.Play(url.toUri(), current.pk)
         } catch (e: CancellationException) {
             throw e
         } catch (e: PacerRefusal) {
-            media.cachedOrElse { VideoSource.Unavailable("Video can't load right now: ${e.userMessage("try again later")}") }
+            current.cachedOrElse { VideoSource.Unavailable("Video can't load right now: ${e.userMessage("try again later")}") }
         } catch (e: InstagramException.Transient) {
-            media.cachedOrElse { OFFLINE }
+            current.cachedOrElse { OFFLINE }
         } catch (e: IOException) {
-            media.cachedOrElse { OFFLINE }
+            current.cachedOrElse { OFFLINE }
         } catch (e: InstagramException.LoginRequired) {
             notify { signals.loginRequired(epoch) }
             NEEDS_ATTENTION
@@ -69,11 +85,14 @@ class RealVideoSourceResolver(
     /** The stored link, unchanged: it was just judged fresh enough, so it is not null. */
     private fun MediaEntity.stored(): VideoSource = VideoSource.Play(checkNotNull(videoUrl).toUri(), pk)
 
-    /** Plays from disk when the whole video is cached and the stored link can still name it; [otherwise] when not. */
-    private inline fun MediaEntity.cachedOrElse(otherwise: () -> VideoSource): VideoSource {
+    /** The stored link when the whole video is cached and the link can still name it (the player needs a URI), else null. */
+    private fun MediaEntity.cachedPlay(): VideoSource? {
         val url = videoUrl
-        return if (url != null && cache.isFullyCached(pk)) VideoSource.Play(url.toUri(), pk) else otherwise()
+        return if (url != null && cache.isFullyCached(pk)) VideoSource.Play(url.toUri(), pk) else null
     }
+
+    /** [cachedPlay], or [otherwise] when the request failed and nothing is cached. */
+    private inline fun MediaEntity.cachedOrElse(otherwise: () -> VideoSource): VideoSource = cachedPlay() ?: otherwise()
 
     /** A failing receiver must not change what the viewer shows; cancellation still propagates. */
     private suspend fun notify(signal: suspend () -> Unit) {
@@ -89,6 +108,9 @@ class RealVideoSourceResolver(
     companion object {
         /** A stored link with at most this long left is renewed before it is used (spec 8.2). */
         const val FRESH_MARGIN_MS = 10 * 60_000L
+
+        /** What a renewed link with no expiry of its own is assumed to live for (R78). */
+        const val ASSUMED_LIFETIME_MS = 60 * 60_000L
 
         private val GONE = VideoSource.Unavailable("This item is no longer available on Instagram")
         private val OFFLINE = VideoSource.Unavailable("Offline: this video isn't cached yet")

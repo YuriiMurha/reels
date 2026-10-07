@@ -27,6 +27,16 @@ class VideoWiringGuardTest {
         assertTrue("Pacer(" !in arguments, "the resolver must not build a Pacer of its own: $arguments")
     }
 
+    /** R76: the link refresh may only run under a valid session; the container's readiness check reads the stored session state. */
+    @Test
+    fun theRealResolverIsGivenTheSessionReadinessCheck() {
+        val arguments = callArguments(main("di/AppContainer.kt"), "RealVideoSourceResolver(").single()
+        assertTrue(
+            Regex("""isSessionReady\s*=\s*\{[^}]*session\.state\.first\(\)\s+is\s+SessionState\.Valid""").containsMatchIn(arguments),
+            "the resolver needs isSessionReady = { session.state.first() is SessionState.Valid }: $arguments",
+        )
+    }
+
     @Test
     fun oneVideoCacheForTheProcess() {
         val container = main("di/AppContainer.kt")

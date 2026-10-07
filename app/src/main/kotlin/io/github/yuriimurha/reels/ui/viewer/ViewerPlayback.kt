@@ -41,19 +41,22 @@ suspend fun playIfStillSettled(
 /**
  * Follows the settled pages. Collected with `collectLatest`, so settling on a newer page cancels the resolve of the older
  * one instead of queueing behind it; [playIfStillSettled] covers an answer that arrives in the same instant.
- * [onSettled] runs first for every settle (stop the player, report the index, start the prefetch).
+ * [onSettled] runs first for every settle (stop the player, report the index); [afterResolved] runs once the settled item's
+ * own resolve has returned (the next item's link is prefetched there, never before: the visible item goes first, R77).
+ * A page that was swiped past before its resolve returned never reaches [afterResolved].
  */
 suspend fun playSettledPages(
     settled: Flow<SettledPage>,
     resolve: suspend (MediaEntity) -> VideoSource?,
     isStillSettled: (MediaEntity) -> Boolean,
     onSettled: (SettledPage) -> Unit,
+    afterResolved: (SettledPage) -> Unit,
     onSource: (MediaEntity, VideoSource) -> Unit,
 ) {
     settled.collectLatest { page ->
         onSettled(page)
-        val media = page.media ?: return@collectLatest
-        playIfStillSettled(media, resolve, isStillSettled) { source -> onSource(media, source) }
+        page.media?.let { media -> playIfStillSettled(media, resolve, isStillSettled) { source -> onSource(media, source) } }
+        afterResolved(page)
     }
 }
 

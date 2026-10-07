@@ -26,6 +26,7 @@ import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
 import io.github.yuriimurha.reels.session.AndroidCookieStore
 import io.github.yuriimurha.reels.session.LazySessionProbe
 import io.github.yuriimurha.reels.session.SessionRepository
+import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.SyncController
 import io.github.yuriimurha.reels.sync.SyncEngine
@@ -35,6 +36,7 @@ import io.github.yuriimurha.reels.sync.pacing.DataStoreCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import io.github.yuriimurha.reels.sync.pacing.RoomRequestLog
+import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
 import java.io.File
 
@@ -88,7 +90,11 @@ class AppContainer(context: Context) {
         if (usesFake) {
             FakeVideoSourceResolver(context.packageName)
         } else {
-            RealVideoSourceResolver(backend.client, instagramPacer, db.mediaDao(), videoCache, session)
+            RealVideoSourceResolver(
+                backend.client, instagramPacer, db.mediaDao(), videoCache, session,
+                // No request to Instagram without a valid session: after a challenge, an expiry or a logout the viewer sends nothing (R76).
+                isSessionReady = { session.state.first() is SessionState.Valid },
+            )
         }
     }
 

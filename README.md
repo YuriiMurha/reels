@@ -122,11 +122,15 @@ Videos are never downloaded during a sync. A reel is fetched when you open it:
 
 - **On demand.** The saved link is used as it is while it has more than 10 minutes left. Otherwise the app asks
   Instagram once for a fresh link (one request, paced like any other, and counted in the 600-per-24-hour budget), then
-  plays. While you watch, it may do the same for the next reel so swiping on is instant; it never asks when the link is
-  still good.
+  plays. While you watch, it may do the same for the next reel (after the one you are looking at has its link) so
+  swiping on is instant; it never asks when the link is still good, and never for a reel it already has in full.
+- **Only with a working login.** If Instagram wants verification, the session expired or you logged out, the viewer
+  sends nothing to Instagram: reels you have in full still play, others say "Instagram session needs attention (Sync
+  screen)". Fix the session on the Sync screen and they work again.
 - **Cache.** What you watch is kept on the phone (up to 512 MB, least recently used first) under the reel's id, not
-  its link, so a renewed link still finds what was already downloaded. A reel you unsave and then Full sync away, and
-  **Delete library**, drop their cached videos.
+  its link, so a renewed link still finds what was already downloaded. A reel you have watched in full plays from
+  the phone even when its link has long expired. A reel you unsave and then Full sync away, and **Delete library**,
+  drop their cached videos.
 - **Offline or limited.** A reel you watched all the way through still plays with no network, or while the app is
   cooling down after a rate limit. One you haven't says "Offline: this video isn't cached yet" (or why it can't load)
   over its thumbnail.

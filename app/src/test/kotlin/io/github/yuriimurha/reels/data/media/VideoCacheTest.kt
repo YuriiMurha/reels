@@ -2,12 +2,14 @@ package io.github.yuriimurha.reels.data.media
 
 import android.content.Context
 import android.net.Uri
+import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
+import androidx.media3.datasource.cache.ContentMetadata
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.testutil.cacheWholeFile
@@ -52,9 +54,9 @@ class VideoCacheTest {
         assertEquals(20_000L, videoCache.cache.cacheSpace)
     }
 
-    /** A span that stops early says nothing about how long the video is, so it can never count as the whole video. */
+    /** A bounded span: the content length is not even recorded, and the half that was written is not the video. */
     @Test
-    fun aPartialSpanIsNotFullyCached() {
+    fun aBoundedPartialSpanIsNotFullyCached() {
         val source = CacheDataSource.Factory()
             .setCache(videoCache.cache)
             .setUpstreamDataSourceFactory(FileDataSource.Factory())
@@ -64,6 +66,29 @@ class VideoCacheTest {
 
         assertEquals(10_000L, videoCache.cache.cacheSpace, "the half was written")
         assertFalse(videoCache.isFullyCached("7"))
+    }
+
+    /**
+     * What a player does: it opens the whole video (no length given) and may stop part way, as when the owner swipes on.
+     * `CacheDataSource` records the content length when the read OPENS, so the length is known although only 8 KB of the
+     * 20 KB are on disk. Knowing the length is not the video being cached.
+     */
+    @Test
+    fun aReadThatStopsHalfWayRecordsTheLengthButIsNotFullyCached() {
+        val source = CacheDataSource.Factory()
+            .setCache(videoCache.cache)
+            .setUpstreamDataSourceFactory(FileDataSource.Factory())
+            .createDataSource()
+        val whole = DataSpec.Builder().setUri(Uri.fromFile(clip("c.mp4", 20_000))).setKey("9").setLength(C.LENGTH_UNSET.toLong()).build()
+        source.open(whole)
+        val buffer = ByteArray(2_048)
+        var read = 0
+        while (read < 8_192) read += source.read(buffer, 0, buffer.size)
+        source.close()
+
+        assertEquals(20_000L, ContentMetadata.getContentLength(videoCache.cache.getContentMetadata("9")), "the length was recorded at open")
+        assertEquals(8_192L, videoCache.cache.cacheSpace, "only what was read is on disk")
+        assertFalse(videoCache.isFullyCached("9"), "length known is not fully cached")
     }
 
     @Test

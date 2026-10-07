@@ -121,10 +121,10 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
         onDispose { player.removeListener(listener) }
     }
     LaunchedEffect(pagerState, items) {
-        playSettledPages(
+        viewModel.followSettledPages(
             settled = snapshotFlow { SettledPage(pagerState.settledPage, items.itemSnapshotList.getOrNull(pagerState.settledPage)) }
                 .distinctUntilChanged { a, b -> a.index == b.index && a.media?.pk == b.media?.pk },
-            resolve = viewModel::resolveVideo,
+            nextOf = { page -> items.itemSnapshotList.getOrNull(page.index + 1) },
             isStillSettled = isStillSettled,
             onSettled = { page ->
                 onIndexSettled(page.index)
@@ -133,7 +133,6 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
                 playing = null
                 unavailable = null
                 failure = null
-                viewModel.onSettled(page.media, items.itemSnapshotList.getOrNull(page.index + 1))
             },
             onSource = present,
         )

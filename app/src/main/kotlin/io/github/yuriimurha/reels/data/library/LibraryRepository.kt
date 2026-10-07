@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.cancellation.CancellationException
 
 /** Read side of the library for the UI. */
 class LibraryRepository(
@@ -64,7 +65,13 @@ class LibraryRepository(
         db.deleteLibrary()
         withContext(Dispatchers.IO) {
             thumbnails.deleteAll()
-            clearVideoCache()
+            try {
+                clearVideoCache()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The library is already gone; cached videos only take space until the cache evicts them.
+            }
         }
     }
 }

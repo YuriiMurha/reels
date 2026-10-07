@@ -131,6 +131,27 @@ class LibraryRepositoryTest {
         assertEquals(emptyList(), repository.collectionCards().first())
     }
 
+    /** The library is already gone when the cache is cleared: a cache that cannot be emptied must not make Delete library fail. */
+    @Test
+    fun aVideoCacheThatCannotBeClearedDoesNotFailDeleteLibrary() = runTest {
+        givenLibrary()
+        val path = thumbs.write("m1", byteArrayOf(1))
+        val repository = LibraryRepository(db, thumbs, clearVideoCache = { throw java.io.IOException("disk error") })
+
+        repository.deleteLibrary()
+
+        assertEquals(emptyList(), repository.collectionCards().first(), "the rows are gone")
+        assertFalse(File(path).exists(), "and the thumbnails")
+    }
+
+    @Test
+    fun aCancelledClearStillPropagatesTheCancellation() = runTest {
+        givenLibrary()
+        val repository = LibraryRepository(db, thumbs, clearVideoCache = { throw kotlin.coroutines.cancellation.CancellationException("cancelled") })
+
+        kotlin.test.assertFailsWith<kotlin.coroutines.cancellation.CancellationException> { repository.deleteLibrary() }
+    }
+
     @Test
     fun mediaSourceSurvivesEncoding() {
         for (source in listOf(

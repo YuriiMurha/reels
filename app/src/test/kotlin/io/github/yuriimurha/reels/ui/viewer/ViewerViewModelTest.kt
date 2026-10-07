@@ -1,21 +1,37 @@
 package io.github.yuriimurha.reels.ui.viewer
 
+import android.content.Context
 import android.net.Uri
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.HttpDataSource
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.ALL_SAVED_ID
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.library.MediaSource
+import io.github.yuriimurha.reels.data.media.RealVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
+import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSource
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.settings.SettingsStore
+import io.github.yuriimurha.reels.instagram.Account
+import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.Page
+import io.github.yuriimurha.reels.instagram.RemoteCollection
+import io.github.yuriimurha.reels.instagram.RemoteMedia
+import io.github.yuriimurha.reels.sync.SessionSignals
+import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
+import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
+import io.github.yuriimurha.reels.sync.pacing.Pacer
+import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.CancellationException
@@ -25,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
@@ -44,10 +61,12 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.IOException
+import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+@UnstableApi
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(AndroidJUnit4::class)
 class ViewerViewModelTest {
@@ -69,13 +88,13 @@ class ViewerViewModelTest {
         storeScope.cancel()
     }
 
-    private fun viewModel(): ViewerViewModel {
+    private fun viewModel(videoResolver: VideoSourceResolver = resolver): ViewerViewModel {
         val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
         return ViewerViewModel(
             MediaSource.Collection(ALL_SAVED_ID),
             startIndex = 0,
             library = LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
-            resolver = resolver,
+            resolver = videoResolver,
             settings = settings,
             now = { now },
         )
@@ -95,9 +114,11 @@ class ViewerViewModelTest {
         val page = reel("m1", fresh)
         val next = reel("m2", expiresAt = expired)
 
-        viewModel.onSettled(page, next)
+        viewModel.onSettled(page)
+        viewModel.prefetch(next)
         runCurrent()
-        viewModel.onSettled(page, next)
+        viewModel.onSettled(page)
+        viewModel.prefetch(next)
         runCurrent()
 
         assertEquals(listOf("m2"), resolver.calls, "two settles on the same page make one prefetch")
@@ -107,7 +128,7 @@ class ViewerViewModelTest {
     @Test
     fun aNextLinkThatIsStillFreshIsLeftAlone() = runTest {
         val viewModel = viewModel()
-        viewModel.onSettled(reel("m1", fresh), reel("m2", expiresAt = now + 3_600_000))
+        viewModel.prefetch(reel("m2", expiresAt = now + 3_600_000))
         runCurrent()
         assertEquals(emptyList(), resolver.calls)
     }
@@ -115,7 +136,7 @@ class ViewerViewModelTest {
     @Test
     fun aNextLinkThatExpiresWithinTheMarginIsPrefetched() = runTest {
         val viewModel = viewModel()
-        viewModel.onSettled(reel("m1", fresh), reel("m2", expiresAt = now + 9 * 60_000))
+        viewModel.prefetch(reel("m2", expiresAt = now + 9 * 60_000))
         runCurrent()
         assertEquals(listOf("m2"), resolver.calls)
     }
@@ -123,8 +144,8 @@ class ViewerViewModelTest {
     @Test
     fun nothingIsPrefetchedForAnImageOrForTheLastItem() = runTest {
         val viewModel = viewModel()
-        viewModel.onSettled(reel("m1", fresh), mediaEntity("i1", MediaType.IMAGE))
-        viewModel.onSettled(reel("m2", fresh), null)
+        viewModel.prefetch(mediaEntity("i1", MediaType.IMAGE))
+        viewModel.prefetch(null)
         runCurrent()
         assertEquals(emptyList(), resolver.calls)
     }
@@ -132,9 +153,9 @@ class ViewerViewModelTest {
     @Test
     fun aNextLinkWithNoUrlOrNoExpiryIsPrefetched() = runTest {
         val viewModel = viewModel()
-        viewModel.onSettled(reel("m1", fresh), reel("m2", expiresAt = null))
+        viewModel.prefetch(reel("m2", expiresAt = null))
         runCurrent()
-        viewModel.onSettled(reel("m2", fresh), reel("m3", expiresAt = null, url = null))
+        viewModel.prefetch(reel("m3", expiresAt = null, url = null))
         runCurrent()
         assertEquals(listOf("m2", "m3"), resolver.calls)
     }
@@ -142,16 +163,144 @@ class ViewerViewModelTest {
     @Test
     fun aNewSettleCancelsThePrefetchStillInFlight() = runTest {
         val viewModel = viewModel()
-        resolver.hold = true
-        viewModel.onSettled(reel("m1", fresh), reel("m2", expiresAt = expired))
+        resolver.hold("m2")
+        viewModel.prefetch(reel("m2", expiresAt = expired))
         runCurrent()
         assertEquals(listOf("m2"), resolver.calls)
 
-        viewModel.onSettled(reel("m5", fresh), reel("m6", expiresAt = expired))
+        viewModel.onSettled(reel("m5", fresh))
+        viewModel.prefetch(reel("m6", expiresAt = expired))
         runCurrent()
 
         assertEquals(listOf("m2", "m6"), resolver.calls)
         assertEquals(listOf("m2"), resolver.cancelled, "only one prefetch is ever in flight")
+        resolver.releaseAll()
+    }
+
+    /** R77: swiping to the item whose link is already being renewed must not ask Instagram a second time. */
+    @Test
+    fun settlingOnTheItemBeingPrefetchedReusesItsRequest() = runTest {
+        val viewModel = viewModel()
+        val gate = resolver.hold("m2")
+        val next = reel("m2", expiresAt = expired)
+        viewModel.prefetch(next)
+        runCurrent()
+        assertEquals(listOf("m2"), resolver.calls)
+
+        viewModel.onSettled(next)
+        val answer = async { viewModel.resolveVideo(next) }
+        runCurrent()
+
+        assertEquals(listOf("m2"), resolver.calls, "the settle is waiting for the prefetch, not sending its own request")
+        assertEquals(emptyList(), resolver.cancelled, "and the prefetch was not cancelled by the settle on its own item")
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(VideoSource.Play(Uri.parse("https://video.example.test/m2.mp4"), "m2"), answer.await())
+        assertEquals(listOf("m2"), resolver.calls, "one request in all")
+    }
+
+    @Test
+    fun afterThePrefetchIsDoneASettleAsksTheResolverAgain() = runTest {
+        val viewModel = viewModel()
+        val next = reel("m2", expiresAt = expired)
+        viewModel.prefetch(next)
+        runCurrent()
+
+        viewModel.onSettled(next)
+        viewModel.resolveVideo(next)
+
+        assertEquals(listOf("m2", "m2"), resolver.calls, "nothing is in flight any more; the resolver itself sees the renewed row")
+    }
+
+    /** R77: the item the owner is looking at is requested before the one after it. */
+    @Test
+    fun theSettledItemIsRequestedBeforeTheNextOne() = runTest {
+        val viewModel = viewModel()
+        val m1 = reel("m1", expiresAt = expired)
+        val m2 = reel("m2", expiresAt = expired)
+        val gate = resolver.hold("m1")
+        val settled = MutableStateFlow(SettledPage(0, null))
+        val played = mutableListOf<String>()
+        val job = launch {
+            viewModel.followSettledPages(
+                settled = settled,
+                nextOf = { page -> m2.takeIf { page.media?.pk == "m1" } },
+                isStillSettled = { settled.value.media?.pk == it.pk },
+                onSettled = {},
+                onSource = { media, _ -> played += media.pk },
+            )
+        }
+        try {
+            runCurrent()
+            settled.value = SettledPage(1, m1)
+            runCurrent()
+            assertEquals(listOf("m1"), resolver.calls, "the visible item's request goes first, the next one waits for it")
+
+            gate.complete(Unit)
+            runCurrent()
+            assertEquals(listOf("m1", "m2"), resolver.calls)
+            assertEquals(listOf("m1"), played)
+        } finally {
+            resolver.releaseAll()
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun anImageDoesNotHoldBackThePrefetchOfTheNextVideo() = runTest {
+        val viewModel = viewModel()
+        val image = mediaEntity("i1", MediaType.IMAGE)
+        val next = reel("m2", expiresAt = expired)
+        val settled = MutableStateFlow(SettledPage(0, null))
+        val job = launch {
+            viewModel.followSettledPages(
+                settled = settled,
+                nextOf = { page -> next.takeIf { page.media?.pk == "i1" } },
+                isStillSettled = { true },
+                onSettled = {},
+                onSource = { _, _ -> },
+            )
+        }
+        try {
+            runCurrent()
+            settled.value = SettledPage(1, image)
+            runCurrent()
+            assertEquals(listOf("i1", "m2"), resolver.calls, "the image is resolved (to nothing), then the next video's link is renewed")
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun aSwipeBeforeTheSettledItemIsResolvedPrefetchesNothing() = runTest {
+        val viewModel = viewModel()
+        val m1 = reel("m1", expiresAt = expired)
+        val m2 = reel("m2", expiresAt = expired)
+        val m3 = reel("m3", expiresAt = expired)
+        val m4 = reel("m4", expiresAt = expired)
+        resolver.hold("m1")
+        val settled = MutableStateFlow(SettledPage(0, null))
+        val job = launch {
+            viewModel.followSettledPages(
+                settled = settled,
+                nextOf = { page -> mapOf("m1" to m2, "m3" to m4)[page.media?.pk] },
+                isStillSettled = { settled.value.media?.pk == it.pk },
+                onSettled = {},
+                onSource = { _, _ -> },
+            )
+        }
+        try {
+            runCurrent()
+            settled.value = SettledPage(1, m1)
+            runCurrent()
+            settled.value = SettledPage(2, m3)
+            runCurrent()
+
+            assertEquals(listOf("m1", "m3", "m4"), resolver.calls, "m2 (the next of the page that was swiped past) was never requested")
+        } finally {
+            resolver.releaseAll()
+            job.cancel()
+        }
     }
 
     @Test
@@ -159,11 +308,36 @@ class ViewerViewModelTest {
         val viewModel = viewModel()
         resolver.failWith = IllegalStateException("boom")
 
-        viewModel.onSettled(reel("m1", fresh), reel("m2", expiresAt = expired))
+        viewModel.prefetch(reel("m2", expiresAt = expired))
         runCurrent()
 
         assertEquals(listOf("m2"), resolver.calls)
         assertTrue(viewModel.viewModelScope.isActive, "an exception in the prefetch did not take the ViewModel's scope down")
+    }
+
+    /** R76: the prefetch goes through the resolver, whose readiness check keeps it from asking Instagram without a session. */
+    @Test
+    fun aPrefetchSendsNothingWhileTheSessionIsNotUsable() = runTest {
+        val context: Context = ApplicationProvider.getApplicationContext()
+        val databaseProvider = StandaloneDatabaseProvider(context)
+        val videoCache = VideoCache(File(tmp.root, "video"), databaseProvider)
+        try {
+            val client = CountingClient()
+            val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = { now })
+            val real = RealVideoSourceResolver(client, pacer, db.mediaDao(), videoCache, SessionSignals.None, isSessionReady = { false }, now = { now })
+            val next = reel("m2", expiresAt = expired)
+            db.mediaDao().upsert(listOf(next))
+            val viewModel = viewModel(real)
+
+            viewModel.prefetch(next)
+            val source = viewModel.resolveVideo(next) // waits for the prefetch, then asks again: both are refused locally
+
+            assertEquals(VideoSource.Unavailable("Instagram session needs attention (Sync screen)"), source)
+            assertEquals(emptyList(), client.calls, "no request without a usable session")
+        } finally {
+            videoCache.cache.release()
+            databaseProvider.close()
+        }
     }
 
     // --- one refresh after a 403 or 410 ---
@@ -172,7 +346,7 @@ class ViewerViewModelTest {
     fun aRefusedLinkIsRefreshedOnceAndThenGivenUp() = runTest {
         val viewModel = viewModel()
         val media = reel("m1", fresh)
-        viewModel.onSettled(media, null)
+        viewModel.onSettled(media)
         resolver.forcedAnswer = VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "m1")
 
         val first = viewModel.recover(media, playbackFailure(403))
@@ -188,7 +362,7 @@ class ViewerViewModelTest {
     fun a410IsRefreshedToo() = runTest {
         val viewModel = viewModel()
         val media = reel("m1", fresh)
-        viewModel.onSettled(media, null)
+        viewModel.onSettled(media)
         resolver.forcedAnswer = VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "m1")
 
         assertTrue(viewModel.recover(media, playbackFailure(410)) is VideoSource.Play)
@@ -199,7 +373,7 @@ class ViewerViewModelTest {
     fun anyOtherErrorGivesUpWithoutARequest() = runTest {
         val viewModel = viewModel()
         val media = reel("m1", fresh)
-        viewModel.onSettled(media, null)
+        viewModel.onSettled(media)
 
         for (error in listOf(playbackFailure(404), playbackFailure(500), PlaybackException("decoder", null, PlaybackException.ERROR_CODE_DECODING_FAILED), IOException("reset"))) {
             assertEquals(VideoSource.Unavailable(CANT_PLAY), viewModel.recover(media, error), error.toString())
@@ -212,7 +386,7 @@ class ViewerViewModelTest {
         val viewModel = viewModel()
         val a = reel("m1", fresh)
         val b = reel("m2", fresh)
-        viewModel.onSettled(a, null)
+        viewModel.onSettled(a)
         resolver.forcedAnswer = VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "x")
 
         assertTrue(viewModel.recover(a, playbackFailure(403)) is VideoSource.Play)
@@ -225,11 +399,11 @@ class ViewerViewModelTest {
         val viewModel = viewModel()
         val media = reel("m1", fresh)
         resolver.forcedAnswer = VideoSource.Play(Uri.parse("https://video.example.test/new.mp4"), "m1")
-        viewModel.onSettled(media, null)
+        viewModel.onSettled(media)
         viewModel.recover(media, playbackFailure(403))
 
-        viewModel.onSettled(reel("m2", fresh), null)
-        viewModel.onSettled(media, null)
+        viewModel.onSettled(reel("m2", fresh))
+        viewModel.onSettled(media)
 
         assertTrue(viewModel.recover(media, playbackFailure(403)) is VideoSource.Play, "coming back to the item is a new visit")
     }
@@ -238,7 +412,7 @@ class ViewerViewModelTest {
     fun aRefreshThatFindsNothingKeepsItsOwnMessage() = runTest {
         val viewModel = viewModel()
         val media = reel("m1", fresh)
-        viewModel.onSettled(media, null)
+        viewModel.onSettled(media)
         resolver.forcedAnswer = VideoSource.Unavailable("This item is no longer available on Instagram")
 
         assertEquals(
@@ -297,6 +471,7 @@ class ViewerViewModelTest {
             resolve = resolver::resolve,
             isStillSettled = screen::isStillSettled,
             onSettled = { screen.cleared += it.index },
+            afterResolved = {},
             onSource = { media, source -> if (source is VideoSource.Play) screen.played += media.pk },
         )
     }
@@ -394,23 +569,45 @@ class ViewerViewModelTest {
         val calls = mutableListOf<String>()
         val forced = mutableListOf<Boolean>()
         val cancelled = mutableListOf<String>()
-        var hold = false
         var failWith: Exception? = null
         var forcedAnswer: VideoSource? = null
+        private val gates = mutableMapOf<String, CompletableDeferred<Unit>>()
+
+        /** The resolve of [pk] waits until the returned gate is completed. */
+        fun hold(pk: String): CompletableDeferred<Unit> = CompletableDeferred<Unit>().also { gates[pk] = it }
+
+        /** So a test that fails half way cannot leave a resolve waiting for ever. */
+        fun releaseAll() = gates.values.forEach { it.complete(Unit) }
 
         override suspend fun resolve(media: MediaEntity, forceRefresh: Boolean): VideoSource? {
             calls += media.pk
             forced += forceRefresh
             failWith?.let { throw it }
-            if (hold) {
+            gates[media.pk]?.let { gate ->
                 try {
-                    CompletableDeferred<Unit>().await()
+                    gate.await()
                 } catch (e: CancellationException) {
                     cancelled += media.pk
                     throw e
                 }
             }
             return if (forceRefresh) forcedAnswer else VideoSource.Play(Uri.parse("https://video.example.test/${media.pk}.mp4"), media.pk)
+        }
+    }
+
+    private class CountingClient : InstagramClient {
+        val calls = mutableListOf<String>()
+        override val reportsSavedCollectionIds = true
+
+        override suspend fun currentUser(): Account = error("not used")
+
+        override suspend fun collections(cursor: String?): Page<RemoteCollection> = error("not used")
+
+        override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> = error("not used")
+
+        override suspend fun mediaInfo(mediaPk: String): RemoteMedia? {
+            calls += mediaPk
+            return null
         }
     }
 

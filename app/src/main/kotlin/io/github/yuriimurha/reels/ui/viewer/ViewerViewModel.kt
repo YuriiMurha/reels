@@ -12,7 +12,8 @@ import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.media.isVideo
 import io.github.yuriimurha.reels.data.media.videoLinkNeedsRefresh
 import io.github.yuriimurha.reels.data.settings.SettingsStore
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -33,13 +34,22 @@ class ViewerViewModel(
         viewModelScope.launch { settings.setMuted(!settings.muted.first()) }
     }
 
-    suspend fun resolveVideo(media: MediaEntity): VideoSource? = resolver.resolve(media)
+    /**
+     * The settled item's source. If the next-item prefetch still has a request out for this very item, that request is
+     * waited for instead of sending a second one (R77).
+     */
+    suspend fun resolveVideo(media: MediaEntity): VideoSource? =
+        // Only while it is still out: a finished prefetch's answer ages, the resolver (which reads the renewed row) does not.
+        prefetch?.takeIf { it.pk == media.pk && it.answer.isActive }?.answer?.await() ?: resolver.resolve(media)
 
     suspend fun collectionNames(pk: String): List<String> = library.collectionsOf(pk).map { it.name }
 
     // Everything below runs on the main thread (the screen's effects and viewModelScope), so no locking.
 
-    private var prefetchJob: Job? = null
+    /** The prefetch that is out (or finished): which item, and its answer for a settle that arrives while it is out. */
+    private class Prefetch(val pk: String, val answer: Deferred<VideoSource?>)
+
+    private var prefetch: Prefetch? = null
 
     /** Items whose link was prefetched (or whose prefetch was started): one prefetch per item, ever (spec 8.2). */
     private val prefetched = HashSet<String>()
@@ -48,25 +58,59 @@ class ViewerViewModel(
     private val refreshed = HashSet<String>()
 
     /**
-     * A page settled on [media]; [next] is the item after it. If [next] is a video whose link has run out, or is about to,
-     * its link is renewed now, so that swiping on finds it ready. One job at a time: a newer settle cancels the one still
-     * out. Through the same resolver, so on the interactive lane, never a second request path.
+     * A page settled on [media]. A coming back to an item is a new visit, with a new refresh. The prefetch still out is
+     * cancelled, unless it is for [media] itself: the settle then waits for that request ([resolveVideo]) instead.
      */
-    fun onSettled(media: MediaEntity?, next: MediaEntity?) {
-        media?.let { refreshed -= it.pk } // coming back to an item is a new visit with a new refresh
-        prefetchJob?.cancel()
-        prefetchJob = null
-        if (next == null || !next.isVideo || !next.videoLinkNeedsRefresh(now()) || !prefetched.add(next.pk)) return
-        prefetchJob = viewModelScope.launch {
-            try {
-                resolver.resolve(next)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                // A prefetch is a head start, nothing more: the real resolve on that page reports whatever is wrong.
-            }
-        }
+    fun onSettled(media: MediaEntity?) {
+        media?.let { refreshed -= it.pk }
+        prefetch?.takeIf { it.pk != media?.pk }?.answer?.cancel()
     }
+
+    /**
+     * If [next], the item after the settled one, is a video whose link has run out or is about to, renews it now, so that
+     * swiping on finds it ready. Called once the settled item's own resolve has returned (R77), so the visible item's
+     * request is never queued behind this one. Through the same resolver, so on the interactive lane and under the same
+     * session check: never a second request path. One at a time, and at most once per item.
+     */
+    fun prefetch(next: MediaEntity?) {
+        if (next == null || !next.isVideo || !next.videoLinkNeedsRefresh(now()) || !prefetched.add(next.pk)) return
+        prefetch?.answer?.cancel()
+        prefetch = Prefetch(
+            next.pk,
+            viewModelScope.async {
+                try {
+                    resolver.resolve(next)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // A prefetch is a head start, nothing more: the real resolve on that page reports whatever is wrong.
+                    null
+                }
+            },
+        )
+    }
+
+    /**
+     * Follows the settled pages ([playSettledPages]): settle, resolve the visible item, and only then prefetch the one
+     * after it ([nextOf]).
+     */
+    suspend fun followSettledPages(
+        settled: Flow<SettledPage>,
+        nextOf: (SettledPage) -> MediaEntity?,
+        isStillSettled: (MediaEntity) -> Boolean,
+        onSettled: (SettledPage) -> Unit,
+        onSource: (MediaEntity, VideoSource) -> Unit,
+    ) = playSettledPages(
+        settled = settled,
+        resolve = ::resolveVideo,
+        isStillSettled = isStillSettled,
+        onSettled = { page ->
+            this.onSettled(page.media)
+            onSettled(page)
+        },
+        afterResolved = { page -> prefetch(nextOf(page)) },
+        onSource = onSource,
+    )
 
     /**
      * The player failed on [media]. The first time that is a 403 or 410 (a link that expired or was revoked) the link is
