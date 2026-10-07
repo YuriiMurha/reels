@@ -24,19 +24,67 @@ class SessionSectionTest {
     val compose = createComposeRule()
 
     private var resolved: String? = "unset"
+    private var loggedOut = 0
 
-    private fun show(state: SessionState) = compose.setContent {
+    private fun show(state: SessionState?) = compose.setContent {
         ReelsTheme {
             SessionSection(
                 state = state,
                 message = null,
                 onLogin = {},
                 onResolveChallenge = { resolved = it },
-                onLogout = {},
+                onLogout = { loggedOut++ },
                 onCheck = {},
                 onPaste = {},
             )
         }
+    }
+
+    private val allButtons = listOf("Log in", "Log in again", "Resolve on Instagram", "Check now", "Paste sessionid", "Log out")
+
+    /** Exactly [present] are shown (all of them fully on screen: none truncated or pushed out of a Row) and no other button exists. */
+    private fun assertButtons(vararg present: String) {
+        for (label in allButtons) {
+            if (label in present) compose.onNodeWithText(label).assertIsDisplayed() else compose.onNodeWithText(label).assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun loggedOutOffersExactlyLoginAndPaste() {
+        show(SessionState.LoggedOut)
+        assertButtons("Log in", "Paste sessionid")
+    }
+
+    @Test
+    fun validOffersExactlyCheckNowAndLogout() {
+        show(SessionState.Valid("tester"))
+        assertButtons("Check now", "Log out")
+        compose.onNodeWithText("Log out").performClick()
+        assertEquals(1, loggedOut)
+    }
+
+    @Test
+    fun anExpiredSessionCanBeLoggedOutOrReplacedByAPaste() {
+        show(SessionState.Expired("tester"))
+        assertButtons("Log in again", "Paste sessionid", "Log out")
+        compose.onNodeWithText("Log out").performClick()
+        assertEquals(1, loggedOut)
+    }
+
+    @Test
+    fun aChallengedSessionCanBeLoggedOutOrReplacedByAPaste() {
+        show(SessionState.Challenge("https://www.instagram.com/challenge/x/", "tester"))
+        assertButtons("Resolve on Instagram", "Check now", "Paste sessionid", "Log out")
+        compose.onNodeWithText("Log out").performClick()
+        assertEquals(1, loggedOut)
+    }
+
+    @Test
+    fun whileTheStoredStateIsLoadingThereAreNoButtons() {
+        show(null)
+        compose.onNodeWithText("Instagram session").assertIsDisplayed()
+        compose.onNodeWithText("Checking session\u2026").assertIsDisplayed()
+        assertButtons()
     }
 
     @Test

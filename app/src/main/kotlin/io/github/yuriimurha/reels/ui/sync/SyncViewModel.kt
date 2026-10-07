@@ -98,7 +98,8 @@ class SyncViewModel(
         viewModelScope.launch { library.deleteLibrary() }
     }
 
-    val sessionState: StateFlow<SessionState> = session.state.stateIn(viewModelScope, sharing, SessionState.LoggedOut)
+    /** The stored session state; null until it has been read (the screen offers no session button before that). */
+    val sessionState: StateFlow<SessionState?> = session.state.stateIn(viewModelScope, sharing, null)
 
     private val mutableSessionMessage = MutableStateFlow<String?>(null)
     val sessionMessage: StateFlow<String?> = mutableSessionMessage
@@ -106,8 +107,12 @@ class SyncViewModel(
     private val mutablePasteError = MutableStateFlow<String?>(null)
     val pasteError: StateFlow<String?> = mutablePasteError
 
+    private var checkJob: Job? = null
+
+    /** A check is an Instagram request, so a tap while one is being made is ignored (a double tap is one request). */
     fun checkSession() {
-        viewModelScope.launch {
+        if (checkJob?.isActive == true) return
+        checkJob = viewModelScope.launch {
             mutableSessionMessage.value = null
             try {
                 session.validate()

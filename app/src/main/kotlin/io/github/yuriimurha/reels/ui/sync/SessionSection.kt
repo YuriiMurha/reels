@@ -2,7 +2,8 @@ package io.github.yuriimurha.reels.ui.sync
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -21,9 +22,15 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.github.yuriimurha.reels.session.SessionState
 
+/**
+ * The session controls (spec 9.5). [state] is null while the stored state is still being read: nothing can be offered
+ * yet, because a stale guess (LoggedOut) would let an early tap open Log in for a session that is actually challenged.
+ * Log out is offered in every state but LoggedOut: an expired or challenged session still has cookies on the phone.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SessionSection(
-    state: SessionState,
+    state: SessionState?,
     message: String?,
     onLogin: () -> Unit,
     onResolveChallenge: (String?) -> Unit,
@@ -34,37 +41,48 @@ fun SessionSection(
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Instagram session", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
         when (state) {
+            null -> Text("Checking session\u2026", color = MaterialTheme.colorScheme.onSurfaceVariant)
             SessionState.LoggedOut -> {
                 Text("Not logged in")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Buttons {
                     Button(onClick = onLogin) { Text("Log in") }
                     TextButton(onClick = onPaste) { Text("Paste sessionid") }
                 }
             }
             is SessionState.Valid -> {
                 Text("Logged in as @${state.handle}")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Buttons {
                     OutlinedButton(onClick = onCheck) { Text("Check now") }
                     TextButton(onClick = onLogout) { Text("Log out") }
                 }
             }
             is SessionState.Expired -> {
                 Text("Session expired" + (state.handle?.let { " (@$it)" } ?: ""))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Buttons {
                     Button(onClick = onLogin) { Text("Log in again") }
                     TextButton(onClick = onPaste) { Text("Paste sessionid") }
+                    TextButton(onClick = onLogout) { Text("Log out") }
                 }
             }
             is SessionState.Challenge -> {
                 Text("Instagram wants verification")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Buttons {
                     Button(onClick = { onResolveChallenge(state.challengeUrl) }) { Text("Resolve on Instagram") }
                     TextButton(onClick = onCheck) { Text("Check now") }
+                    TextButton(onClick = onPaste) { Text("Paste sessionid") }
+                    TextButton(onClick = onLogout) { Text("Log out") }
                 }
             }
         }
         message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
+}
+
+/** Wraps onto another line on a narrow phone instead of truncating a button. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun Buttons(content: @Composable () -> Unit) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) { content() }
 }
 
 /** The fallback from spec D3. The value is hidden while typing and is stored only in the WebView's cookie jar. */

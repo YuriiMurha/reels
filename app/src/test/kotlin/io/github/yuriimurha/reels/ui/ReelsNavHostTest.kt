@@ -181,6 +181,7 @@ class ReelsNavHostTest {
             }
         }
         compose.waitForIdle()
+        awaitText("Log in")
         compose.onNodeWithText("Log in").performClick()
         compose.waitForIdle()
         assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<LoginRoute>(), "Log in did not open the login page")
@@ -215,6 +216,11 @@ class ReelsNavHostTest {
         assertTrue(navController.currentBackStackEntry!!.destination.hasRoute<SyncRoute>(), "a late result popped Sync as well")
     }
 
+    /** The Sync screen reads the stored session off the main thread and offers no session button until it has. */
+    private fun awaitText(text: String) = compose.waitUntil(timeoutMillis = 10_000) {
+        compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+    }
+
     private fun showFrom(start: Any) {
         compose.setContent {
             navController = rememberNavController()
@@ -247,6 +253,7 @@ class ReelsNavHostTest {
     @Test
     fun logInNavigatesToTheLoginRouteAsALogin() {
         showFrom(SyncRoute)
+        awaitText("Log in")
         compose.onNodeWithText("Log in").performClick()
         compose.waitForIdle()
         assertEquals(LoginRoute(null, LoginPurpose.LOGIN), navController.currentBackStackEntry!!.toRoute<LoginRoute>())

@@ -25,15 +25,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -247,6 +251,43 @@ class SyncViewModelTest {
         viewModel.checkSession()
         assertEquals(SessionState.Valid("tester"), viewModel.sessionState.first { it is SessionState.Valid })
         assertNull(viewModel.sessionMessage.value)
+    }
+
+    /**
+     * A check's work hops to real I/O threads (the DataStore) and then waits out the Pacer's 2 s interactive gap in
+     * virtual time. Alternate real time and virtual time so a check that was wrongly started has certainly reached the probe.
+     */
+    private suspend fun TestScope.settle() = repeat(5) {
+        withContext(Dispatchers.Default) { delay(50) }
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun aSecondCheckNowWhileOneIsOutSendsNoSecondRequest() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        val gate = CompletableDeferred<Unit>()
+        probe.gate = gate
+        viewModel.checkSession()
+        probe.entered.await()
+        viewModel.checkSession()
+        viewModel.checkSession()
+        gate.complete(Unit)
+        session.state.first { it is SessionState.Valid }
+        settle()
+        assertEquals(1, probe.calls, "a double tap on Check now must be one currentUser request")
+
+        viewModel.checkSession()
+        settle()
+        assertEquals(2, probe.calls, "once the check is over, the next tap checks again")
+    }
+
+    @Test
+    fun theSessionStateIsUnknownUntilTheStoredOneHasBeenRead() = runTest {
+        val viewModel = viewModel()
+        assertNull(viewModel.sessionState.value, "null means still loading: showing LoggedOut would offer Log in too early")
+        backgroundScope.launch { viewModel.sessionState.collect {} }
+        assertEquals(SessionState.LoggedOut, viewModel.sessionState.first { it != null })
     }
 
     @Test

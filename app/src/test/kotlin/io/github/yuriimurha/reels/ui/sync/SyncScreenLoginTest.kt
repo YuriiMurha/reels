@@ -103,6 +103,7 @@ class SyncScreenLoginTest {
     @Test
     fun logInOpensTheLoginPageAsALogin() {
         show()
+        awaitText("Log in") // the stored state is read off the main thread; until then the section offers no buttons
         compose.onNodeWithText("Log in").performClick()
         assertEquals(null to LoginPurpose.LOGIN, opened)
     }
@@ -119,6 +120,7 @@ class SyncScreenLoginTest {
     }
 
     private fun paste() {
+        awaitText("Paste sessionid")
         compose.onNodeWithText("Paste sessionid").performClick()
         compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.Password)).performTextInput("42%3Aab")
         compose.onNodeWithText("Use it").performClick()
