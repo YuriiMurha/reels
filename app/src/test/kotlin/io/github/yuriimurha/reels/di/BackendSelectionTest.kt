@@ -123,6 +123,33 @@ class BackendSelectionTest {
         assertFalse(File(context.filesDir, "thumbs/p2.jpg").exists())
     }
 
+    /**
+     * R84: the container's library and its account go together: the account is kept under this library's kind, and Delete
+     * library forgets it. One container per test: two would open two DataStores on the one settings file.
+     */
+    private fun deleteLibraryForgetsTheAccountOf(useFake: Boolean) = runBlocking {
+        val container = container(useFake)
+        val (own, other) = if (useFake) "fake" to "real" else "real" to "fake"
+        try {
+            container.libraryAccount.remember("7")
+            assertEquals("7", container.settings.libraryAccountPk(own), "kept under this library's kind")
+            assertEquals(null, container.settings.libraryAccountPk(other), "and not the other library's")
+
+            container.library.deleteLibrary()
+
+            assertEquals(null, container.libraryAccount.pk())
+            assertEquals(null, container.settings.libraryAccountPk(own))
+        } finally {
+            container.videoCache.cache.release() // Delete library built it; SimpleCache allows one per directory per process
+        }
+    }
+
+    @Test
+    fun deleteLibraryForgetsTheRealLibrarysAccount() = deleteLibraryForgetsTheAccountOf(useFake = false)
+
+    @Test
+    fun deleteLibraryForgetsTheFakeLibrarysAccount() = deleteLibraryForgetsTheAccountOf(useFake = true)
+
     private fun lazyIsInitialised(container: AppContainer, property: String): Boolean =
         (AppContainer::class.java.getDeclaredField("$property\$delegate").apply { isAccessible = true }.get(container) as Lazy<*>)
             .isInitialized()

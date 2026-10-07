@@ -27,8 +27,10 @@ import io.github.yuriimurha.reels.session.AndroidCookieStore
 import io.github.yuriimurha.reels.session.LazySessionProbe
 import io.github.yuriimurha.reels.session.SessionRepository
 import io.github.yuriimurha.reels.session.SessionState
+import io.github.yuriimurha.reels.sync.LibraryAccount
 import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
+import io.github.yuriimurha.reels.sync.StoredLibraryAccount
 import io.github.yuriimurha.reels.sync.SyncController
 import io.github.yuriimurha.reels.sync.SyncEngine
 import io.github.yuriimurha.reels.sync.SyncWorker
@@ -67,7 +69,13 @@ class AppContainer(context: Context) {
     val db: ReelsDatabase by lazy { if (usesFake) ReelsDatabase.build(context, "reels.db") else requestLogDb }
 
     val thumbnails: ThumbnailStore by lazy { ThumbnailStore(File(context.filesDir, if (usesFake) "thumbs" else "library-thumbs")) }
-    val library: LibraryRepository by lazy { LibraryRepository(db, thumbnails, clearVideoCache = { videoCache.clear() }) }
+
+    /** R84: the Instagram account this process's library belongs to, kept per library in [settings]. */
+    val libraryAccount: LibraryAccount by lazy { StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake)) }
+
+    val library: LibraryRepository by lazy {
+        LibraryRepository(db, thumbnails, clearVideoCache = { videoCache.clear() }, forgetAccount = { libraryAccount.forget() })
+    }
 
     /** Queued work names a run id only, so it also carries which library it belongs to (R67). */
     private val syncScheduler: WorkManagerSyncScheduler by lazy { WorkManagerSyncScheduler(context, SyncWorker.kindOf(usesFake)) }
@@ -170,6 +178,7 @@ class AppContainer(context: Context) {
             backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals,
             eviction = MediaEviction { pks -> pks.forEach { videoCache.remove(it) } },
             sessionUsable = sessionUsable,
+            libraryAccount = libraryAccount,
         )
     }
 }

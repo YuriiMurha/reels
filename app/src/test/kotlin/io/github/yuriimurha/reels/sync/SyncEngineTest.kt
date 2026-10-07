@@ -24,6 +24,7 @@ import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import io.github.yuriimurha.reels.sync.pacing.RequestLog
+import io.github.yuriimurha.reels.testutil.InMemoryLibraryAccount
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.loadAll
 import kotlinx.coroutines.CompletableDeferred
@@ -50,6 +51,9 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+/** Spelled out, not [SyncEngine.ANOTHER_ACCOUNT]: the banner's text is what the README tells the owner to look for. */
+private const val ANOTHER_ACCOUNT = "This library belongs to another Instagram account. Delete library to switch."
+
 @RunWith(AndroidJUnit4::class)
 class SyncEngineTest {
     @get:Rule
@@ -59,6 +63,9 @@ class SyncEngineTest {
     private val thumbs by lazy { ThumbnailStore(File(tmp.root, "thumbs")) }
     private val fetcher = MediaFetcher { url -> if (url.startsWith("fake://missing/")) null else byteArrayOf(1, 2, 3) }
     private val signals = RecordingSignals()
+
+    /** The library's account, shared by every engine of a test as the app's settings are (R84). */
+    private val account = InMemoryLibraryAccount()
 
     @After
     fun close() = db.close()
@@ -80,7 +87,7 @@ class SyncEngineTest {
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
-            eviction = eviction, sessionUsable = sessionUsable,
+            eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account,
         )
     }
 
@@ -1106,11 +1113,160 @@ class SyncEngineTest {
         clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = { testScheduler.currentTime })
         // No sessionUsable argument, and SessionSignals.None, as AppContainer.syncEngine() builds it for Backend.Fake.
-        val engine = SyncEngine(client, pacer, db, fetcher, thumbs, SessionSignals.None, Random(1), now = { testScheduler.currentTime })
+        val engine = SyncEngine(
+            client, pacer, db, fetcher, thumbs, SessionSignals.None, Random(1), now = { testScheduler.currentTime },
+            libraryAccount = account,
+        )
 
         val run = runSync(engine, SyncMode.FULL)
 
         assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(client.library.allSaved().map { it.pk }, pks(ALL_SAVED_ID))
+    }
+
+    // ---- Final review I-2 (R83, R84): a foreign feed's items must not let a later Full sync remove the library ----
+
+    private class ForeignFeed(val client: FakeInstagramClient, val originals: List<String>, val foreign: List<String>)
+
+    /** A library of 40, synced; then the feed holds 100 items the library never had and none of the 40 (five pages). */
+    private suspend fun TestScope.fortyThenAHundredForeign(log: RequestLog = InMemoryRequestLog()): ForeignFeed {
+        val client = FakeInstagramClient(FakeLibrary(seed = 11, itemCount = 40, collectionCount = 2))
+        assertEquals(SyncStatus.DONE, runSync(engine(client, log = log), SyncMode.QUICK).status)
+        val originals = client.library.allSaved().map { it.pk }
+        originals.forEach(client.library::unsave)
+        val foreign = client.library.addNewSaves(100).map { it.pk }
+        return ForeignFeed(client, originals, foreign)
+    }
+
+    /** The Sync screen's Discard paused run, through the real controller. */
+    private suspend fun discard() {
+        val noWorker = object : SyncScheduler {
+            override fun enqueue(runId: Long) = Unit
+            override fun cancel() = Unit
+            override suspend fun isActive(): Boolean = false
+        }
+        SyncController(db, noWorker, now = clock).discardResumable()
+    }
+
+    /** The reviewer's first reproduction: a refused R1 left 80 foreign items; before R83, Discard then R2 removed all 40 originals. */
+    @Test
+    fun discardThenFullAfterARefusedForeignFeedRemovesNothing() = runTest {
+        val feed = fortyThenAHundredForeign()
+        val engine = engine(feed.client)
+        val first = runSync(engine, SyncMode.FULL)
+        assertEquals("Adapter needs repair: full sync would remove 40 of 40 items", first.lastError)
+        assertEquals(80, db.mediaDao().byPks(feed.foreign).size, "precondition: the refused run's first four pages stayed")
+        discard()
+
+        val second = runSync(engine, SyncMode.FULL)
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, second.status, "R83: what a refused run added is not library yet: ${second.lastError}")
+        assertEquals("Adapter needs repair: full sync would remove 40 of 40 items", second.lastError)
+        assertEquals(emptyList(), removedAmong(feed.originals))
+        assertTrue(pks(ALL_SAVED_ID).containsAll(feed.originals))
+    }
+
+    /** The same hole through a Full sync paused by the budget: Discard, then a new Full sync once the budget is back. */
+    @Test
+    fun aBudgetPausedForeignFullSyncThenDiscardThenFullRemovesNothing() = runTest {
+        // 590 requests in the last 24 h: the QUICK run's 4 and the Full sync's first 6 fit; its page 5 (the last) is refused.
+        val log = InMemoryRequestLog(List(590) { 0L })
+        val feed = fortyThenAHundredForeign(log)
+        val first = runSync(engine(feed.client, log = log), SyncMode.FULL)
+        assertEquals(SyncStatus.PAUSED, first.status)
+        assertEquals("24-hour budget reached", first.lastError)
+        assertEquals(80, db.mediaDao().byPks(feed.foreign).size, "precondition: four pages of foreign items are in the library")
+        discard()
+        delay(Pacer.DAY_MS) // the 24 h budget frees up
+
+        val second = runSync(engine(feed.client, log = log), SyncMode.FULL)
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, second.status, "R83: what a paused, discarded run added is not library yet: ${second.lastError}")
+        assertEquals("Adapter needs repair: full sync would remove 40 of 40 items", second.lastError)
+        assertEquals(emptyList(), removedAmong(feed.originals))
+    }
+
+    /** The feed and session of another account, as after a paste of that account's sessionid. */
+    private class AnotherAccount(private val delegate: InstagramClient) : InstagramClient by delegate {
+        override suspend fun currentUser(): Account {
+            delegate.currentUser() // recorded in the fake's call log, so a test can count it
+            return Account(pk = "2", username = "other_account")
+        }
+    }
+
+    /**
+     * The reviewer's QUICK path (Discard, then Sync, then Full sync), where the foreign feed is what it is in practice: another
+     * account's (R84). Each run stops at its session check, so nothing of that feed is ever written and nothing is removed.
+     */
+    @Test
+    fun anotherAccountsFeedNeverReachesTheLibraryThroughDiscardQuickAndFull() = runTest {
+        val feed = fortyThenAHundredForeign()
+        val engine = engine(AnotherAccount(feed.client))
+        val callsBefore = feed.client.calls.size
+
+        val first = runSync(engine, SyncMode.FULL)
+        discard()
+        val quick = runSync(engine, SyncMode.QUICK)
+        discard()
+        val full = runSync(engine, SyncMode.FULL)
+
+        for (run in listOf(first, quick, full)) {
+            assertEquals(SyncStatus.STOPPED_SHAPE, run.status)
+            assertEquals(ANOTHER_ACCOUNT, run.lastError)
+        }
+        assertEquals(List(3) { "currentUser" }, feed.client.calls.drop(callsBefore), "each run stopped right after its session check")
+        assertEquals(emptyList(), db.mediaDao().byPks(feed.foreign), "nothing of the other account's feed was written")
+        assertEquals(emptyList(), removedAmong(feed.originals))
+        assertEquals(feed.originals.toSet(), pks(ALL_SAVED_ID).toSet())
+        assertEquals("1", account.pk(), "the library still belongs to the first account")
+    }
+
+    @Test
+    fun aRunUnderAnotherAccountStopsBeforeWritingAnything() = runTest {
+        val client = smallClient()
+        runSync(engine(client), SyncMode.QUICK)
+        val itemsBefore = pks(ALL_SAVED_ID)
+        val collectionsBefore = db.collectionDao().liveCollections().first()
+        client.library.addNewSaves(5)
+        val callsBefore = client.calls.size
+
+        val run = runSync(engine(AnotherAccount(client)), SyncMode.FULL)
+
+        assertEquals(SyncStatus.STOPPED_SHAPE, run.status)
+        assertEquals(ANOTHER_ACCOUNT, run.lastError)
+        assertEquals(listOf("currentUser"), client.calls.drop(callsBefore), "not even the collection list")
+        assertEquals(itemsBefore, pks(ALL_SAVED_ID))
+        assertEquals(collectionsBefore, db.collectionDao().liveCollections().first())
+        assertEquals(0, run.newItems)
+        assertEquals("1", account.pk())
+    }
+
+    @Test
+    fun theFirstSuccessfulSessionCheckRemembersTheAccountOnce() = runTest {
+        val client = smallClient()
+        client.failures = FakeFailures { if (it == 1) InstagramException.LoginRequired() else null }
+        runSync(engine(client), SyncMode.QUICK)
+        assertNull(account.pk(), "a failed session check remembers nothing")
+
+        client.failures = FakeFailures { null }
+        assertEquals(SyncStatus.DONE, runSync(engine(client), SyncMode.QUICK).status)
+        assertEquals("1", account.pk(), "the fake account's pk")
+        assertEquals(SyncStatus.DONE, runSync(engine(client), SyncMode.FULL).status, "the fake library keeps working")
+        assertEquals(1, account.remembered, "written once, when none was stored")
+    }
+
+    /** After Delete library (which forgets the account) another account's library can be synced. */
+    @Test
+    fun aForgottenAccountLetsAnotherAccountSync() = runTest {
+        val client = smallClient()
+        runSync(engine(client), SyncMode.QUICK)
+        db.deleteLibrary()
+        account.forget()
+
+        val run = runSync(engine(AnotherAccount(client)), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals("2", account.pk())
         assertEquals(client.library.allSaved().map { it.pk }, pks(ALL_SAVED_ID))
     }
 

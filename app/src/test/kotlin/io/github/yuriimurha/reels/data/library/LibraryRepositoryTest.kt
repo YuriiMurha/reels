@@ -144,6 +144,19 @@ class LibraryRepositoryTest {
         assertFalse(File(path).exists(), "and the thumbnails")
     }
 
+    /** R84: Delete library also forgets which Instagram account the library belonged to, once its rows are gone. */
+    @Test
+    fun deleteLibraryForgetsTheLibrarysAccountAfterTheRowsAreGone() = runTest {
+        givenLibrary()
+        val cardsWhenForgotten = mutableListOf<Int>()
+        lateinit var repository: LibraryRepository
+        repository = LibraryRepository(db, thumbs, forgetAccount = { cardsWhenForgotten += repository.collectionCards().first().size })
+
+        repository.deleteLibrary()
+
+        assertEquals(listOf(0), cardsWhenForgotten, "forgotten exactly once, after the library itself was deleted")
+    }
+
     @Test
     fun aCancelledClearStillPropagatesTheCancellation() = runTest {
         givenLibrary()

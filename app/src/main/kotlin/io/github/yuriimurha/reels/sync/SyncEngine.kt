@@ -54,10 +54,15 @@ class SyncEngine(
      * every request through.
      */
     private val sessionUsable: suspend (epoch: Int) -> RunSession = { RunSession.USABLE },
+    /** R84: the account this library belongs to. A run under another account stops before it writes anything. */
+    private val libraryAccount: LibraryAccount,
 ) {
     companion object {
         /** P7: a FULL reconcile removing at least this many items AND more than half of those that existed before the run is refused. */
         internal const val RECONCILE_GUARD_MIN_ITEMS = 20
+
+        /** R84: the `lastError` (and the Sync screen's banner) of a run under another account than the library's. */
+        internal const val ANOTHER_ACCOUNT = "This library belongs to another Instagram account. Delete library to switch."
     }
 
     private val mediaDao = db.mediaDao()
@@ -83,6 +88,7 @@ class SyncEngine(
             progress.phase("Checking session")
             val account = call(progress) { client.currentUser() }
             notifySession { signals.sessionOk(account.username, epoch) }
+            ensureLibraryAccount(account.pk)
             progress.phase("Listing collections")
             val collections = fetchCollections(progress)
             val scopes = listOf(ALL_SAVED_ID to "All Saved") +
@@ -114,6 +120,8 @@ class SyncEngine(
             progress.finish(SyncStatus.STOPPED_RATE_LIMIT, "Cooling down")
         } catch (e: InstagramException.ShapeChanged) {
             progress.finish(SyncStatus.STOPPED_SHAPE, "Adapter needs repair: ${e.fieldPath}")
+        } catch (e: AnotherAccount) {
+            progress.finish(SyncStatus.STOPPED_SHAPE, ANOTHER_ACCOUNT)
         } catch (e: InstagramException.Transient) {
             progress.finish(SyncStatus.PAUSED, "Network problem, try again later")
         } catch (e: PacerRefusal.RunBudgetReached) {
@@ -156,6 +164,22 @@ class SyncEngine(
 
     /** [sessionUsable] said no: thrown inside the Pacer's gate before anything is sent or counted, mapped to a stop in [run]. */
     private class SessionNotUsable(val challenge: Boolean) : Exception()
+
+    /**
+     * R84: one library, one account. The first run whose session check succeeds remembers the account's [pk] (only while none
+     * is stored); a run under any other account stops right here, before the collection list is even requested, so nothing of
+     * that account's feed is written and no reconcile can count it. Delete library forgets the account, to switch.
+     */
+    private suspend fun ensureLibraryAccount(pk: String) {
+        when (libraryAccount.pk()) {
+            null -> libraryAccount.remember(pk)
+            pk -> Unit
+            else -> throw AnotherAccount()
+        }
+    }
+
+    /** The session belongs to another account than the library ([ensureLibraryAccount]). */
+    private class AnotherAccount : Exception()
 
     private suspend fun fetchCollections(progress: Progress): List<CollectionEntity> {
         val remote = mutableListOf<RemoteCollection>()
@@ -303,7 +327,12 @@ class SyncEngine(
         // attempt of this same run are new to the run too: they were first seen after its `startedAt`. Thrown inside the page's
         // transaction, so the page and its cursor roll back and the run stops. If the owner really did unsave (and save) that
         // much, Delete library then Full sync mirrors it.
-        val before = collectionDao.memberCountSeenBefore(ALL_SAVED_ID, runStartedAt)
+        // R83: and it ends no later than the last DONE run. Items a refused, paused or failed run added after that and that a
+        // Discard then left behind are not library either, or Discard and a new Full sync would count a foreign feed's own
+        // items in. The +1: a run's last page and its finish can fall in the same millisecond.
+        val lastDone = syncDao.lastDoneAt()
+        val cutoff = if (lastDone == null) runStartedAt else minOf(runStartedAt, lastDone + 1)
+        val before = collectionDao.memberCountSeenBefore(ALL_SAVED_ID, cutoff)
         if (unsaved.size >= RECONCILE_GUARD_MIN_ITEMS && unsaved.size * 2 > before) {
             throw InstagramException.ShapeChanged("full sync would remove ${unsaved.size} of $before items")
         }

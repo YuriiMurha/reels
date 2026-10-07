@@ -22,6 +22,8 @@ class LibraryRepository(
     private val thumbnails: ThumbnailStore,
     /** Empties the video cache with the library: cached videos belong to items that no longer exist (spec 8.3). */
     private val clearVideoCache: () -> Unit = {},
+    /** R84: forgets the library's account (`LibraryAccount.forget`). */
+    private val forgetAccount: suspend () -> Unit = {},
 ) {
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
@@ -60,9 +62,14 @@ class LibraryRepository(
 
     suspend fun collectionsOf(pk: String): List<CollectionEntity> = collectionDao.collectionsOf(pk)
 
-    /** Wipes synced items, collections, history, thumbnails and cached videos. Keeps the session and the request log (spec 9.5). */
+    /**
+     * Wipes synced items, collections, history, thumbnails and cached videos, and forgets which Instagram account the library
+     * belonged to (R84), so the next sync may be another account's. Keeps the session and the request log (spec 9.5). The
+     * account is forgotten only after the rows are gone: the other order could leave a library with no owner to check against.
+     */
     suspend fun deleteLibrary() {
         db.deleteLibrary()
+        forgetAccount()
         withContext(Dispatchers.IO) {
             thumbnails.deleteAll()
             try {

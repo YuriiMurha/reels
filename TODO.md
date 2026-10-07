@@ -69,6 +69,6 @@ All of these need your phone. [`README.md`](README.md) says how.
 
 From the reviews of M3–M6; none has been reproduced on a device.
 
-- After a Full sync is refused by the proportional guard (`STOPPED_SHAPE`), the items that run's earlier pages already added stay in All Saved. If the feed was foreign, **Discard paused run** followed by a new Full sync counts them as items from before the run, and can pass the guard. Resume is safe (same run, same start time). A fix would roll those items back on a refusal, or block Discard then Full until a Sync has run.
+- After a Full sync is refused by the proportional guard (`STOPPED_SHAPE`), or paused, the items its earlier pages added stay in All Saved. Fixed in the final review: the guard's "before the run" now ends at the last finished (Done) run (R83), so after **Discard paused run** those items no longer count towards M; and a library remembers its Instagram account, so a run under another account stops right after its session check and writes nothing (R84), which also closes Discard, then Sync, then Full sync with another account's feed. Left by design: a same-account feed that a Sync (QUICK) run has finished with counts as library from then on.
 - In Mock mode the Sync screen shows the fake library's Pacer, so a real cooldown armed by Check now or a lab call is not shown there (the requests are still refused). It shows once Mock mode is off.
 - The pre-commit hook refuses `keystore.properties`, `*.jks` and `*.keystore`, but not `.p12` or `.pfx` files.

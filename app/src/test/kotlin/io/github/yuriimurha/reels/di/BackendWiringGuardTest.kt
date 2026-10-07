@@ -69,6 +69,16 @@ class BackendWiringGuardTest {
         assertTrue(fake != null && Regex("""sessionUsable\s*=\s*\{\s*RunSession\.USABLE\s*}""").containsMatchIn(fake), "Backend.Fake's gate: $fake")
     }
 
+    /** R84: the engine checks the account against the container's one per-library store, the same one Delete library clears. */
+    @Test
+    fun theEngineChecksTheLibrarysOwnAccount() {
+        val container = main("di/AppContainer.kt")
+        val engine = callArguments(container, "SyncEngine(").single()
+        assertTrue(Regex("""libraryAccount\s*=\s*libraryAccount\b""").containsMatchIn(engine), "the engine's account: $engine")
+        val definition = container.lines().single { Regex("""val libraryAccount\b""").containsMatchIn(it) }
+        assertTrue(Regex("""StoredLibraryAccount\(\s*settings\s*,\s*SyncWorker\.kindOf\(usesFake\)\s*\)""").containsMatchIn(definition), definition)
+    }
+
     @Test
     fun theSyncScreenShowsTheBackendsPacer() {
         val screen = main("ui/sync/SyncScreen.kt")

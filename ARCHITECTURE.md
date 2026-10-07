@@ -40,11 +40,11 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
 | Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
 | Database | `app/.../data/db/` | Room v1: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `sync_run`, `sync_cursor`, `api_request`. Schema exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. |
-| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also clears thumbnails and the cached videos, through an injected `clearVideoCache` whose failure is ignored: the rows are already gone), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
+| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone, and a failure propagates) and clears thumbnails and the cached videos, through an injected `clearVideoCache` whose failure is ignored: the rows are already gone), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
 | Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
 | Video | `app/.../data/media/`, `ui/viewer/` | On-demand playback with a `pk`-keyed cache (spec 8). [Details](#video). |
 | Pacer | `app/.../sync/pacing/` | The single gate for Instagram API calls. [Details](#pacer). |
-| Settings | `app/.../data/settings/SettingsStore.kt` | DataStore preferences: `muted`; the persisted cooldown (`cooldown_until`, `last_rate_limit_at`); and the session state (`session_kind`, `session_handle`, `session_challenge_url`, encoded by the session package; the session itself is only in the cookie jar). A settings file that cannot be read is replaced by `corruptionFallback` (ruling R54), not by empty preferences: `cooldown_until = now + 1 h` (the Pacer's `Cooldowns.SHORT_MS`) and `last_rate_limit_at = now`, so a corruption never silently ends an active cooldown and a rate limit in the next 24 h escalates straight to the 24 h tier; the session keys stay empty, which reads as LoggedOut until validation runs. Budgets persist in `api_request` (`RoomRequestLog`). |
+| Settings | `app/.../data/settings/SettingsStore.kt` | DataStore preferences: `muted`; the persisted cooldown (`cooldown_until`, `last_rate_limit_at`); the session state (`session_kind`, `session_handle`, `session_challenge_url`, encoded by the session package; the session itself is only in the cookie jar); and the Instagram account each library belongs to (R84: `library_account_pk_real`, `library_account_pk_fake`, read and written through `sync/LibraryAccount.kt`'s `StoredLibraryAccount`; a corrupt file loses it, and the next run then adopts its own account). A settings file that cannot be read is replaced by `corruptionFallback` (ruling R54), not by empty preferences: `cooldown_until = now + 1 h` (the Pacer's `Cooldowns.SHORT_MS`) and `last_rate_limit_at = now`, so a corruption never silently ends an active cooldown and a rate limit in the next 24 h escalates straight to the 24 h tier; the session keys stay empty, which reads as LoggedOut until validation runs. Budgets persist in `api_request` (`RoomRequestLog`). |
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
 | Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. [Details](#wiring). |
@@ -280,10 +280,17 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
     is `ShapeChanged("full sync would remove N of M items")` (M is that pre-run count; `lastError` "Adapter needs repair:
     full sync would remove 70 of 100 items"), thrown inside the page's transaction so the page and its cursor roll back and
     the run stops `STOPPED_SHAPE`.
-    - "Before the run" is `CollectionDao.memberCountSeenBefore(ALL_SAVED_ID, run.startedAt)`: members whose media has
-      `firstSeenAt < startedAt`. The denominator must not include the feed's own new items: a feed that is not this library
+    - "Before the run" is `CollectionDao.memberCountSeenBefore(ALL_SAVED_ID, cutoff)`: members whose media has
+      `firstSeenAt < cutoff`. The denominator must not include the feed's own new items: a feed that is not this library
       (another account's, a wrong endpoint) with 100 new pks would otherwise double the count and let all 100 originals be
       marked removed.
+    - The cutoff (R83) is `min(run.startedAt, lastDoneAt + 1)`, where `SyncDao.lastDoneAt()` is the latest
+      `finishedAt` of a DONE run (either mode); with no DONE run it is `run.startedAt`. A refused or paused Full sync leaves
+      the pages it committed behind, and Discard then made them look older than the next run's start: a foreign feed's 80
+      items over a library of 40 would have let a second Full sync remove all 40. Now items no DONE run has finished with
+      are not "the library" yet. The `+ 1`: a run's last page and its finish can fall in the same millisecond (the
+      boundary tests fail without it). A DONE QUICK run does count what it added: a same-account feed that a QUICK run has
+      accepted is library by then, which the guard can't and doesn't try to tell from a real change.
     - `startedAt` (set by `SyncController` from `System::currentTimeMillis`) and `firstSeenAt` (set by the engine's `now`,
       the same default clock) agree, and a resumed run keeps its row and so its `startedAt`: items stored by an earlier
       attempt of the SAME run were first seen after it, so they count as new in the attempt that finishes the run (pinned
@@ -297,6 +304,13 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
       sync, is refused; Delete library then Full sync is the way to mirror that.
     - Strategy B's per-collection reconcile has no such guard by design (R72): it removes memberships only, rebuilt by the
       next good FULL walk.
+  - **One library, one account (R84).** Right after `currentUser()` succeeds (and `sessionOk` is signalled), the run
+    compares the account's pk with the library's `LibraryAccount`: none stored means this run's account is remembered;
+    the same pk goes on; another pk stops the run as STOPPED_SHAPE with `lastError` "This library belongs to another
+    Instagram account. Delete library to switch.", before the collection list is requested, so nothing of that
+    account's feed is written and no reconcile can count it. Delete library forgets the pk. The fake account's pk is
+    constant ("1"), so the fake library is unaffected. This is what closes Discard, then Sync (QUICK), then Full sync
+    under another account's session, and the mixing of two accounts' saves.
 - **Thumbnails.**
   - The first `CdnRateLimited` of a run sets `Progress.cdnBlocked`, and from then on no thumbnail is requested in that
     invocation: each download checks the flag before queuing and again once it holds a CDN permit (it may have queued
@@ -342,6 +356,7 @@ status chip shows the `lastError` for any stopped or paused run.
 | The session gate said no before a request (R82): a stored Challenge; or Expired, LoggedOut, or a logout or paste since the run started. Nothing more is sent, no signal | STOPPED_CHALLENGE for a Challenge, else STOPPED_LOGIN | Instagram wants verification, or Session expired | as the two rows above |
 | `RateLimited` (the Pacer armed the cooldown), or `PacerRefusal.CoolingDown` | STOPPED_RATE_LIMIT | Instagram is limiting requests, or Cooling down | Instagram limited requests. Tap Resume when you're ready. |
 | `ShapeChanged(path)` | STOPPED_SHAPE | Adapter needs repair: `<path>` | the `lastError` |
+| The session's account is not the library's (R84), before anything is written | STOPPED_SHAPE | This library belongs to another Instagram account. Delete library to switch. | the `lastError` |
 | `Transient` after the four backoffs | PAUSED | Network problem, try again later | the `lastError` |
 | `RunBudgetReached` (300 requests) | PAUSED | Run budget reached, tap Resume | the `lastError` |
 | `DailyBudgetReached` (600 in 24 h) | PAUSED | 24-hour budget reached | the `lastError` |
@@ -441,6 +456,9 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   under the run's own epoch). `runSession` never takes `SessionRepository`'s lock: a paste holds that lock while it waits
   for the Pacer's gate, and the gate's holder is the one asking, so the lock would deadlock both (pinned by a test that
   runs exactly that interleaving). It reads the state before the epoch, because logout and paste bump the epoch first.
+- **The library's account.** `libraryAccount` is `StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake))`, one per
+  library (R84); the engine checks it and `library` gets `forgetAccount = { libraryAccount.forget() }`, so Delete library
+  forgets the account of the library it deleted (`BackendSelectionTest` runs both modes).
 - **Lazy HTTP clients.** `instagramHttp` and `cdnHttp` (whose user agent comes from `WebSettings.getDefaultUserAgent`, a
   WebView provider load) are built by the first request that needs them, so constructing the container or the backend loads
   no WebView (tests pin this).

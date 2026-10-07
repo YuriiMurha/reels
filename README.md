@@ -205,8 +205,9 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
 - **Runs pause and resume.** Cancel, a lost connection, the 300-request budget, an Android kill and a few other stops
   leave the run with its place saved. The button turns into **Resume** and carries on from there (a resumed run gets a
   fresh 300, but the 600 per 24 hours still holds). **Discard paused run** abandons it and the next tap starts a
-  fresh run; nothing is deleted by either. Resume continues the same run with the same mode: a paused Full sync stays a
-  Full sync.
+  fresh run. Neither deletes anything. Items an abandoned run had already added stay in the library, but a later Full
+  sync judges what it may remove against the library as of the last sync that finished, so those items can't make a
+  large removal look small. Resume continues the same run with the same mode: a paused Full sync stays a Full sync.
 - **Nothing is deleted** except by a Full sync whose walk of a feed reached the end in that same run, and by
   **Delete library**.
 
@@ -225,6 +226,10 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
   Nothing was deleted. Don't keep tapping Resume (each tap sends the same request again). Run the Adapter lab once,
   and paste the banner and the lab's result in a Claude session. The common texts after the colon are explained in
   [Troubleshooting](#10-troubleshooting).
+- **"This library belongs to another Instagram account. Delete library to switch."** The session is a different
+  Instagram account from the one this library was first synced from. The run stopped right after its session check:
+  nothing was fetched, written or removed. To switch accounts, use **Delete library** (below), then **Sync**. Otherwise
+  log out, log in to the library's account, then **Resume**.
 - **"Instagram limited requests. Tap Resume when you're ready."** A rate limit. While the cooldown lasts the banner
   reads "Cooling down after a rate limit: N min left" and the buttons are off. When it ends, tap **Resume**.
 
@@ -233,12 +238,14 @@ The other stops (paused, not stopped) are listed in [Troubleshooting](#10-troubl
 ### Delete library: the escape hatch
 
 **Sync → Storage → Delete library**, then **Delete** in the dialog. It removes every synced item, collection, history
-row, thumbnail and cached video from the phone. It keeps your login **and the request log**, so the 600-per-24-hour
-budget and any cooldown carry on. Then **Sync** (or **Full sync**) refills from scratch. Use it when:
+row, thumbnail and cached video from the phone, and forgets which Instagram account the library belonged to. It keeps
+your login **and the request log**, so the 600-per-24-hour budget and any cooldown carry on. Then **Sync** (or **Full
+sync**) refills from scratch. Use it when:
 
 - a Full sync was refused with "full sync would remove N of M items" and you really did unsave that much;
 - you really did delete every collection on Instagram ("empty collection list");
-- you switch to a different Instagram account (log out, log in, Delete library, then Sync);
+- you switch to a different Instagram account (log out, log in, Delete library, then Sync). Without Delete library, a
+  sync under the other account stops with "This library belongs to another Instagram account";
 - the library looks wrong and you would rather start clean.
 
 It costs a full, paced re-sync.
@@ -638,10 +645,12 @@ A paused run shows its reason as the banner (and in the status chip on Saved). T
 The text after the colon says what broke. Nothing was deleted by any of these.
 
 - **`full sync would remove N of M items`**: the Full sync reached the end of the feed, but applying it would have
-  removed N of the M items the library held before the run (at least 20, and more than half). That is usually a broken,
-  partial or foreign answer, so nothing was removed and the run stopped. It can also happen for real: if you unsaved more
-  than half of your library and saved new items in the same stretch, the new ones don't count towards M. If that is what
-  happened, use **Delete library**, then **Full sync**: that mirrors Instagram exactly.
+  removed N of the M items the library held before the run (at least 20, and more than half). M counts only items a
+  finished sync had seen: not this run's new ones, and not what a stopped or discarded run added since the last sync that
+  finished. That is usually a broken, partial or foreign answer, so nothing was removed and the run stopped. It can also
+  happen for real: if you unsaved more than half of your library and saved new items in the same stretch, the new ones
+  don't count towards M. If that is what happened, use **Delete library**, then **Full sync**: that mirrors Instagram
+  exactly.
 - **`empty collection list`**: Instagram listed no collections although the library has some. Try **Sync** again later.
   If you really did delete every collection on Instagram, use **Delete library**, then **Sync**.
 - **`empty saved feed`**: a Full sync walked All Saved to its end without seeing a single item, over a library that has
@@ -652,6 +661,13 @@ The text after the colon says what broke. Nothing was deleted by any of these.
   said `fail`. Run the Adapter lab and paste the result.
 - **`http.<code>` or `http.<code>.unreadable`**: an HTTP error the app doesn't classify (an unreadable answer is
   reported conservatively, because it could hide a rate limit).
+
+### Sync: another Instagram account
+
+**"This library belongs to another Instagram account. Delete library to switch."**: the session is not the account this
+library was first synced from (a different account was pasted or logged in). The run stopped right after its session
+check, so nothing was fetched, written or removed, and every **Resume** stops the same way. To switch accounts, use
+**Delete library**, then **Sync**. To keep this library, log out, log in to its account, then **Resume**.
 
 ### Sync: thumbnails
 
