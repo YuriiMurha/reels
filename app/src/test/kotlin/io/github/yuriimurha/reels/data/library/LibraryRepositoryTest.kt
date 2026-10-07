@@ -120,6 +120,18 @@ class LibraryRepositoryTest {
     }
 
     @Test
+    fun deleteLibraryClearsTheVideoCacheToo() = runTest {
+        givenLibrary()
+        var cleared = 0
+        val repository = LibraryRepository(db, thumbs, clearVideoCache = { cleared++ })
+
+        repository.deleteLibrary()
+
+        assertEquals(1, cleared)
+        assertEquals(emptyList(), repository.collectionCards().first())
+    }
+
+    @Test
     fun mediaSourceSurvivesEncoding() {
         for (source in listOf(
             MediaSource.Collection("c1"),

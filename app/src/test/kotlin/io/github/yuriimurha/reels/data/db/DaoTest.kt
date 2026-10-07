@@ -45,6 +45,18 @@ class DaoTest {
     }
 
     @Test
+    fun setVideoLinkRewritesOnlyThatRowsLink() = runTest {
+        media.upsert(listOf(mediaEntity("m1", videoUrl = "https://v.test/old", videoUrlExpiresAt = 5), mediaEntity("m2", videoUrl = "https://v.test/two", videoUrlExpiresAt = 6)))
+
+        media.setVideoLink("m1", "https://v.test/new", 99)
+
+        val (one, two) = media.byPks(listOf("m1", "m2")).sortedBy { it.pk }
+        assertEquals("https://v.test/new" to 99L, one.videoUrl to one.videoUrlExpiresAt)
+        assertEquals("https://v.test/two" to 6L, two.videoUrl to two.videoUrlExpiresAt)
+        assertEquals("caption m1", one.caption, "nothing else on the row changed")
+    }
+
+    @Test
     fun collectionPagesAreNewestSavedFirstAndHideRemoved() = runTest {
         givenLibrary()
         assertEquals(listOf("m2", "m3", "m1"), media.pageCollection(ALL_SAVED_ID).loadAll().map { it.pk })

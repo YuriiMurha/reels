@@ -19,7 +19,8 @@ Current state: [`ARCHITECTURE.md`](ARCHITECTURE.md). Plan: [`TODO.md`](TODO.md).
 | M0 Skeleton, M1 Mock app | Done. Home, grid, viewer, search and sync work on a built-in fake library of 2,000 items. |
 | M2 Session | Code done. Logging in through Instagram's own page (or pasting a `sessionid`) needs your on-phone check (see below). |
 | M3–M4 Real sync | In progress. The real backend and its thumbnail downloader are wired in, behind **Mock mode** (debug builds, see section 3). It has not been run against Instagram yet, and the engine's safety gates in [`TODO.md`](TODO.md) are not all in. |
-| M5–M6 (video, release build) | Not started. |
+| M5 Video | Code done: reels play on demand and are cached. Needs your on-phone check (see **Watching**). |
+| M6 (release build) | Not started. |
 
 A debug build starts in Mock mode: the library you see comes from the fake backend, and tapping **Sync** fills it with
 generated placeholder items and never contacts Instagram. Turning Mock mode off (on the phone only) switches to the real
@@ -114,6 +115,26 @@ and never contacts Instagram. A release build has no such switch and always uses
   shared: session checks and lab calls count against it even in Mock mode.
 - Real sync is still being finished (the unticked M4 gates in [`TODO.md`](TODO.md)). Until they are in, use **Sync**
   (it only adds) and hold off on **Full sync** (it removes unsaves).
+
+### Watching
+
+Videos are never downloaded during a sync. A reel is fetched when you open it:
+
+- **On demand.** The saved link is used as it is while it has more than 10 minutes left. Otherwise the app asks
+  Instagram once for a fresh link (one request, paced like any other, and counted in the 600-per-24-hour budget), then
+  plays. While you watch, it may do the same for the next reel so swiping on is instant; it never asks when the link is
+  still good.
+- **Cache.** What you watch is kept on the phone (up to 512 MB, least recently used first) under the reel's id, not
+  its link, so a renewed link still finds what was already downloaded. A reel you unsave and then Full sync away, and
+  **Delete library**, drop their cached videos.
+- **Offline or limited.** A reel you watched all the way through still plays with no network, or while the app is
+  cooling down after a rate limit. One you haven't says "Offline: this video isn't cached yet" (or why it can't load)
+  over its thumbnail.
+- **Open on Instagram** is always under the thumbnail, also when a video can't play. If Instagram no longer has the
+  reel, the app says so and keeps your copy of the item.
+- A link Instagram refuses (HTTP 403 or 410) is renewed once and retried; if that fails too you see "Can't play this
+  video". Video requests carry no cookies.
+- In Mock mode the bundled clip plays for every reel and nothing is requested.
 
 ## 4. Log in (on the phone only)
 

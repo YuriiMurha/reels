@@ -39,5 +39,7 @@
   - [x] Gate: redact request lines if a challenge URL is ever requested through OkHttp (moot: redirects are never followed, the API client only requests `/api/v1/` paths on one host (P6), and challenge URLs only ever open in the WebView, never through OkHttp)
   - [ ] Check on the phone (R72): strategy B's per-collection FULL reconcile has no proportion guard (it removes memberships only; the next good Full sync rebuilds them, and a legitimately emptied collection must still mirror), so confirm that each collection feed ends correctly (`more_available` false on the last page, not a truncated feed)
 - [ ] M5 Video: on-demand playback, link refresh, `pk`-keyed cache
-  - [ ] Gate: `mediaInfo` needs a not-found outcome
+  - [x] Gate: `mediaInfo` needs a not-found outcome (P8: `RemoteMedia?`, null for 400/404 or an empty `items`; the viewer shows "This item is no longer available on Instagram" and deletes nothing)
+  - [x] Code: links renewed on the interactive lane only when expired, pk-keyed `SimpleCache`, one refresh after a 403/410, next-item prefetch, `collectLatest` on the settled page, eviction on unsave and on Delete library
+  - [ ] Check on the phone: a real reel plays, loops and replays from the cache offline (airplane mode); an expired link is renewed once; Open on Instagram shows under an unavailable video
 - [ ] M6 Polish: release signing, baseline profile, README

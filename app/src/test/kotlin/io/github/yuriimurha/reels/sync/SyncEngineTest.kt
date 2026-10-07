@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.media.CdnRateLimited
+import io.github.yuriimurha.reels.data.media.MediaEviction
 import io.github.yuriimurha.reels.data.media.MediaFetcher
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.Account
@@ -72,11 +73,13 @@ class SyncEngineTest {
         mediaFetcher: MediaFetcher = fetcher,
         store: ThumbnailStore = thumbs,
         sessionSignals: SessionSignals = signals,
+        eviction: MediaEviction = MediaEviction { },
     ): SyncEngine {
         clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
+            eviction = eviction,
         )
     }
 
@@ -177,6 +180,42 @@ class SyncEngineTest {
         assertFalse(thumbFile.exists())
         assertTrue(moved in pks("c2"))
         assertFalse(moved in pks("c1"))
+    }
+
+    /** Spec 8.3: an unsaved item's cached video goes with its thumbnail. Exactly the pks the reconcile removed, nothing else. */
+    @Test
+    fun reconcileEvictsCachedVideos() = runTest {
+        val evicted = mutableListOf<String>()
+        val client = smallClient()
+        val engine = engine(client, eviction = { evicted += it })
+        runSync(engine, SyncMode.QUICK)
+        val all = client.library.allSaved()
+        val gone = listOf(all[5].pk, all[9].pk)
+
+        runSync(engine, SyncMode.FULL)
+        assertEquals(emptyList(), evicted, "nothing was unsaved, so nothing is evicted")
+
+        gone.forEach(client.library::unsave)
+        runSync(engine, SyncMode.QUICK)
+        assertEquals(emptyList(), evicted, "a QUICK run never deletes, so it never evicts")
+
+        runSync(engine, SyncMode.FULL)
+        assertEquals(gone.sorted(), evicted.sorted(), "exactly the removed pks")
+    }
+
+    /** A cache that cannot be written must not strand the run: the reconcile is already committed. */
+    @Test
+    fun aFailingEvictionDoesNotStopTheRun() = runTest {
+        val client = smallClient()
+        val engine = engine(client, eviction = { throw java.io.IOException("disk full") })
+        runSync(engine, SyncMode.QUICK)
+        val gone = client.library.allSaved()[5].pk
+        client.library.unsave(gone)
+
+        val run = runSync(engine, SyncMode.FULL)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertNotNull(db.mediaDao().byPks(listOf(gone)).single().removedAt)
     }
 
     @Test

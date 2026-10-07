@@ -12,6 +12,7 @@ import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.db.ThumbnailTarget
 import io.github.yuriimurha.reels.data.media.CdnRateLimited
+import io.github.yuriimurha.reels.data.media.MediaEviction
 import io.github.yuriimurha.reels.data.media.MediaFetcher
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.instagram.InstagramClient
@@ -44,6 +45,8 @@ class SyncEngine(
     private val signals: SessionSignals = SessionSignals.None,
     private val random: Random = Random.Default,
     private val now: () -> Long = System::currentTimeMillis,
+    /** Told which items a reconcile removed, so their cached videos go with their thumbnails (spec 8.3). */
+    private val eviction: MediaEviction = MediaEviction { },
 ) {
     companion object {
         /** P7: a FULL reconcile removing at least this many items AND more than half of those that existed before the run is refused. */
@@ -167,9 +170,23 @@ class SyncEngine(
             val outcome = db.withTransaction { applyPage(progress, scope, current, page, knownCollections) }
             cursor = outcome.cursor
             outcome.removedPks.forEach(thumbnails::delete)
+            evictVideos(outcome.removedPks)
             cacheThumbnails(progress, outcome.needThumbnails.map { ThumbnailTarget(it.pk, it.thumbnailUrl) })
         }
         progress.update { it.copy(collectionsDone = it.collectionsDone + 1) }
+    }
+
+    /**
+     * Housekeeping after the reconcile has been committed: a cache that cannot be written (a full disk) must not stop the run,
+     * and it cannot undo the reconcile.
+     */
+    private fun evictVideos(pks: List<String>) {
+        if (pks.isEmpty()) return
+        try {
+            eviction.evict(pks)
+        } catch (e: Exception) {
+            // Intentionally ignored: a stale cached video only takes up space until the cache evicts it.
+        }
     }
 
     private class PageOutcome(

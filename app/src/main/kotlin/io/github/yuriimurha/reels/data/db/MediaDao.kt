@@ -50,6 +50,10 @@ interface MediaDao {
     )
     suspend fun withoutThumbnailSeenIn(scope: String, runId: Long): List<ThumbnailTarget>
 
+    /** A refreshed video link (spec 8.2). */
+    @Query("UPDATE media SET videoUrl = :url, videoUrlExpiresAt = :expiresAt WHERE pk = :pk")
+    suspend fun setVideoLink(pk: String, url: String?, expiresAt: Long?)
+
     @Query("UPDATE media SET removedAt = :at, thumbPath = NULL WHERE pk IN (:pks)")
     suspend fun markRemoved(pks: List<String>, at: Long)
 

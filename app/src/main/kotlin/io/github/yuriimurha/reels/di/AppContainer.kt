@@ -3,13 +3,19 @@ package io.github.yuriimurha.reels.di
 import android.content.Context
 import android.util.Log
 import android.webkit.WebSettings
+import androidx.annotation.OptIn
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.StandaloneDatabaseProvider
 import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.db.LegacyRequestLogCopy
 import io.github.yuriimurha.reels.data.db.ReelsDatabase
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.HttpMediaFetcher
+import io.github.yuriimurha.reels.data.media.MediaEviction
+import io.github.yuriimurha.reels.data.media.RealVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
+import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
@@ -32,7 +38,11 @@ import io.github.yuriimurha.reels.sync.pacing.RoomRequestLog
 import okhttp3.OkHttpClient
 import java.io.File
 
-/** Hand-wired dependencies, one instance per process (spec 4.1). */
+/**
+ * Hand-wired dependencies, one instance per process (spec 4.1). Opts in to Media3's unstable API: the video cache and its
+ * data sources are built here.
+ */
+@OptIn(UnstableApi::class)
 class AppContainer(context: Context) {
     val settings: SettingsStore by lazy { SettingsStore.create(context) }
 
@@ -54,15 +64,33 @@ class AppContainer(context: Context) {
     val db: ReelsDatabase by lazy { if (usesFake) ReelsDatabase.build(context, "reels.db") else requestLogDb }
 
     val thumbnails: ThumbnailStore by lazy { ThumbnailStore(File(context.filesDir, if (usesFake) "thumbs" else "library-thumbs")) }
-    val library: LibraryRepository by lazy { LibraryRepository(db, thumbnails) }
+    val library: LibraryRepository by lazy { LibraryRepository(db, thumbnails, clearVideoCache = { videoCache.clear() }) }
 
     /** Queued work names a run id only, so it also carries which library it belongs to (R67). */
     private val syncScheduler: WorkManagerSyncScheduler by lazy { WorkManagerSyncScheduler(context, SyncWorker.kindOf(usesFake)) }
 
     val syncController: SyncController by lazy { SyncController(db, syncScheduler) }
 
-    /** M5 replaces this with the real resolver (link refresh on the interactive lane, pk-keyed cache). */
-    val videoResolver: VideoSourceResolver by lazy { FakeVideoSourceResolver(context.packageName) }
+    /**
+     * Watched videos, in the cache directory (the OS may reclaim it; a video is only a download away). One instance per
+     * process: a second `SimpleCache` on the same directory throws. Built on first use.
+     */
+    val videoCache: VideoCache by lazy { VideoCache(File(context.cacheDir, "video"), StandaloneDatabaseProvider(context)) }
+
+    /** The WebView's own user agent for video requests, read once and only when a video is first played. */
+    val videoUserAgent: String by lazy { WebSettings.getDefaultUserAgent(context) }
+
+    /**
+     * Mock mode plays the bundled clip. The real resolver renews links on the Pacer's interactive lane (the one
+     * Conservative Pacer, so a link refresh counts against the same budget as sync) and keeps the bytes in [videoCache].
+     */
+    val videoResolver: VideoSourceResolver by lazy {
+        if (usesFake) {
+            FakeVideoSourceResolver(context.packageName)
+        } else {
+            RealVideoSourceResolver(backend.client, instagramPacer, db.mediaDao(), videoCache, session)
+        }
+    }
 
     val cookieStore: CookieStore by lazy { AndroidCookieStore() }
 
@@ -120,6 +148,9 @@ class AppContainer(context: Context) {
             is Backend.Fake -> SessionSignals.None
             is Backend.Real -> session
         }
-        return SyncEngine(backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals)
+        return SyncEngine(
+            backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals,
+            eviction = MediaEviction { pks -> pks.forEach { videoCache.remove(it) } },
+        )
     }
 }

@@ -75,6 +75,8 @@ dependencies {
     implementation(libs.work.runtime)
     implementation(libs.datastore.preferences)
     implementation(libs.media3.exoplayer)
+    implementation(libs.media3.datasource)
+    implementation(libs.media3.database)
     implementation(libs.media3.ui.compose)
     implementation(libs.coil.compose)
     implementation(libs.kotlinx.serialization.json)

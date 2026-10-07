@@ -16,7 +16,12 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
 
 /** Read side of the library for the UI. */
-class LibraryRepository(private val db: ReelsDatabase, private val thumbnails: ThumbnailStore) {
+class LibraryRepository(
+    private val db: ReelsDatabase,
+    private val thumbnails: ThumbnailStore,
+    /** Empties the video cache with the library: cached videos belong to items that no longer exist (spec 8.3). */
+    private val clearVideoCache: () -> Unit = {},
+) {
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
 
@@ -54,9 +59,12 @@ class LibraryRepository(private val db: ReelsDatabase, private val thumbnails: T
 
     suspend fun collectionsOf(pk: String): List<CollectionEntity> = collectionDao.collectionsOf(pk)
 
-    /** Wipes synced items, collections, history and thumbnails. Keeps the session and the request log (spec 9.5). */
+    /** Wipes synced items, collections, history, thumbnails and cached videos. Keeps the session and the request log (spec 9.5). */
     suspend fun deleteLibrary() {
         db.deleteLibrary()
-        withContext(Dispatchers.IO) { thumbnails.deleteAll() }
+        withContext(Dispatchers.IO) {
+            thumbnails.deleteAll()
+            clearVideoCache()
+        }
     }
 }
