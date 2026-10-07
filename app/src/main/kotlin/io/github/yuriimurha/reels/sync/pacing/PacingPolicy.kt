@@ -21,12 +21,25 @@ class PacingPolicy private constructor(
     val cdnConcurrency: Int,
     val cdnJitterMs: LongRange,
 ) {
-    /** Next gap between two sync requests: log-normal around the median, clamped to [minGapMs, maxGapMs]. */
-    fun sampleGap(random: Random): Long =
-        (medianGapMs * exp(GAP_SIGMA * random.nextGaussian())).toLong().coerceIn(minGapMs, maxGapMs)
+    /**
+     * Next gap between two sync requests: log-normal around the median, redrawn until it falls in
+     * [minGapMs, maxGapMs].
+     *
+     * Truncated, not clamped: clamping put about 18 % of the gaps at exactly 4 s (and 6 % at exactly 12 s), a timing
+     * signature no human has. Truncation also lifts the median from about 6.0 s to about 6.4 s, which is slower,
+     * not faster: it never raises the request rate.
+     */
+    fun sampleGap(random: Random): Long {
+        repeat(MAX_DRAWS) {
+            val gap = (medianGapMs * exp(GAP_SIGMA * random.nextGaussian())).toLong()
+            if (gap in minGapMs..maxGapMs) return gap
+        }
+        return random.nextLong(minGapMs, maxGapMs + 1) // vanishingly rare; still inside the bounds
+    }
 
     companion object {
         private const val GAP_SIGMA = 0.45
+        private const val MAX_DRAWS = 32
 
         /** The only policy allowed for real Instagram traffic. */
         val Conservative = PacingPolicy(

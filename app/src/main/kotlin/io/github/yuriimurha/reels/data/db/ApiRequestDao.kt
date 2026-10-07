@@ -15,6 +15,9 @@ interface ApiRequestDao {
     @Query("SELECT MIN(at) FROM api_request WHERE at > :since")
     suspend fun oldestSince(since: Long): Long?
 
+    @Query("SELECT MAX(at) FROM api_request")
+    suspend fun latest(): Long?
+
     @Query("DELETE FROM api_request WHERE at <= :before")
     suspend fun deleteUpTo(before: Long)
 }

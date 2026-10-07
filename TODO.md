@@ -27,8 +27,8 @@
   - [ ] Gate: offset-cursor stability
   - [ ] Gate (M3/M4, strategy A): limit `deleteRealMembershipsExcept` to `collectionId IN (:known)`; an empty `collections()` list while live collections exist means `STOPPED_SHAPE`
 - [ ] M4 Real sync: quick and full, resume, budgets, cooldowns, challenge hard stop, thumbnails
-  - [ ] Gate: truncated-resampling gaps instead of clamping (today about 18 % of gaps are exactly 4,000 ms)
-  - [ ] Gate: seed `lastRequestEndedAt` from `RequestLog`
+  - [x] Gate: truncated-resampling gaps instead of clamping (today about 18 % of gaps are exactly 4,000 ms)
+  - [x] Gate: seed `lastRequestEndedAt` from `RequestLog`
   - [ ] Gate: `Backend.Real` reuses `AppContainer.instagramPacer`, with a guard test, and the Sync screen shows that Pacer
   - [ ] Gate: a proportional reconcile guard (refuse to mark more than X % of All Saved removed in one run)
   - [ ] Gate: engine signals carry the session epoch

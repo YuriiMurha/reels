@@ -190,4 +190,16 @@ class SearchAndQueryTest {
         log.deleteUpTo(2_000)
         assertEquals(1, log.countSince(0))
     }
+
+    @Test
+    fun apiRequestLatestIsTheMaximumTimeOrNull() = runTest {
+        val log = db.apiRequestDao()
+        assertNull(log.latest(), "an empty log has no latest request")
+        listOf(2_000L, 3_000L, 1_000L).forEach { log.insert(ApiRequestEntity(at = it)) }
+        assertEquals(3_000L, log.latest(), "latest is the maximum, not the last inserted")
+        log.deleteUpTo(2_000)
+        assertEquals(3_000L, log.latest())
+        log.deleteUpTo(3_000)
+        assertNull(log.latest())
+    }
 }

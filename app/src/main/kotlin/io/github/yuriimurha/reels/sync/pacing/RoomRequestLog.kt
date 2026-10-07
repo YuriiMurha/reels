@@ -12,4 +12,6 @@ class RoomRequestLog(private val dao: ApiRequestDao) : RequestLog {
     override suspend fun countSince(since: Long): Int = dao.countSince(since)
 
     override suspend fun oldestSince(since: Long): Long? = dao.oldestSince(since)
+
+    override suspend fun latest(): Long? = dao.latest()
 }

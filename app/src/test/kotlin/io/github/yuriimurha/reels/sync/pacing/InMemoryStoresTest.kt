@@ -8,6 +8,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 /** The fake backend shares these across threads (a worker records while the Sync screen reads status). */
 class InMemoryStoresTest {
@@ -24,6 +25,17 @@ class InMemoryStoresTest {
             }
         }.joinAll()
         assertEquals(16_000, log.countSince(-1))
+    }
+
+    @Test
+    fun requestLogLatestIsTheMostRecentRecordedTimeOrNull() = runBlocking {
+        val log = InMemoryRequestLog()
+        assertNull(log.latest())
+        log.record(2_000)
+        log.record(5_000)
+        log.record(3_000)
+        assertEquals(5_000L, log.latest())
+        assertEquals(7_000L, InMemoryRequestLog(listOf(1_000L, 7_000L)).latest())
     }
 
     @Test

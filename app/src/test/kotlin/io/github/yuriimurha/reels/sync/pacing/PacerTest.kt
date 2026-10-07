@@ -274,6 +274,133 @@ class PacerTest {
         )
     }
 
+    /**
+     * Runs a sync request whose gap is already planned while an interactive request holds the gate for 20 s, and
+     * returns how long the sync request then waited after the interactive request ended.
+     */
+    private suspend fun TestScope.waitAfterInteractive(seed: Int): Long {
+        val pacer = pacer(random = Random(seed))
+        val run = pacer.newRun()
+        pacer.sync(run) {} // the first request: nothing to wait for
+        var syncStartedAt = -1L
+        val syncJob = launch { pacer.sync(run) { syncStartedAt = testScheduler.currentTime } }
+        runCurrent() // the second sync request has planned its gap (4-12 s) and waits for it without the gate
+        // The interactive request is still running when that planned gap has long passed.
+        pacer.interactive { delay(20_000) }
+        val interactiveEndedAt = testScheduler.currentTime
+        syncJob.join()
+        return syncStartedAt - interactiveEndedAt
+    }
+
+    @Test
+    fun syncAfterAnInteractiveRequestWaitsAFreshGap() = runTest {
+        val seed = 1
+        // Replay the Pacer's draws on a second stream with the same seed: the break interval (construction),
+        // the first sync request's gap, the second one's planned gap, then the fresh gap after the interleave.
+        val replay = Random(seed)
+        replay.nextInt(15, 31)
+        repeat(2) { PacingPolicy.Conservative.sampleGap(replay) }
+        val freshGap = PacingPolicy.Conservative.sampleGap(replay)
+
+        val wait = waitAfterInteractive(seed)
+
+        assertTrue(wait >= PacingPolicy.Conservative.minGapMs, "waited $wait")
+        assertTrue(freshGap > PacingPolicy.Conservative.minGapMs, "seed $seed must draw a gap above the minimum, got $freshGap")
+        assertEquals(freshGap, wait, "the wait after an interleaved request is the next draw from the stream")
+    }
+
+    @Test
+    fun theWaitAfterAnInteractiveRequestIsNotAlwaysTheMinimumGap() = runTest {
+        val waits = (1..50).map { waitAfterInteractive(it) }
+        assertTrue(waits.all { it in 4_000L..12_000L }, "waits $waits")
+        assertTrue(waits.toSet().size > 25, "waits barely vary: $waits")
+        assertTrue(waits.count { it == PacingPolicy.Conservative.minGapMs } < 5, "waits $waits")
+    }
+
+    @Test
+    fun firstRequestOfAProcessWaitsForTheLastLoggedOne() = runTest {
+        delay(100_000)
+        val latest = testScheduler.currentTime - 1_000
+        val pacer = pacer(log = InMemoryRequestLog(listOf(latest)))
+        var startedAt = -1L
+        pacer.sync(pacer.newRun()) { startedAt = testScheduler.currentTime }
+        assertTrue(startedAt >= latest + PacingPolicy.Conservative.minGapMs, "started at $startedAt, last logged at $latest")
+        assertTrue(startedAt <= latest + PacingPolicy.Conservative.maxGapMs, "started at $startedAt, last logged at $latest")
+    }
+
+    @Test
+    fun firstRequestWithAnEmptyLogIsStillImmediate() = runTest {
+        delay(100_000)
+        val pacer = pacer()
+        var startedAt = -1L
+        pacer.sync(pacer.newRun()) { startedAt = testScheduler.currentTime }
+        assertEquals(100_000, startedAt)
+    }
+
+    @Test
+    fun firstRequestLongAfterTheLastLoggedOneIsImmediate() = runTest {
+        delay(100_000)
+        val pacer = pacer(log = InMemoryRequestLog(listOf(testScheduler.currentTime - 60_000)))
+        var startedAt = -1L
+        pacer.sync(pacer.newRun()) { startedAt = testScheduler.currentTime }
+        assertEquals(100_000, startedAt)
+    }
+
+    /** Counts how often the Pacer asks the log for its latest entry. */
+    private class CountingLatestLog(private val delegate: RequestLog) : RequestLog by delegate {
+        var latestReads = 0
+
+        override suspend fun latest(): Long? {
+            latestReads++
+            return delegate.latest()
+        }
+    }
+
+    @Test
+    fun theLogIsReadForItsLatestEntryOnlyOnce() = runTest {
+        delay(100_000)
+        val log = CountingLatestLog(InMemoryRequestLog(listOf(testScheduler.currentTime - 60_000)))
+        val pacer = pacer(log = log)
+        val run = pacer.newRun()
+        repeat(3) { pacer.sync(run) {} }
+        pacer.interactive {}
+        repeat(2) { pacer.sync(run) {} }
+        assertEquals(1, log.latestReads)
+    }
+
+    /** An empty log whose latest-entry read takes (virtual) time, so a gate holder is mid-read while others queue. */
+    private class SlowEmptyLog(private val delegate: RequestLog = InMemoryRequestLog()) : RequestLog by delegate {
+        var latestReads = 0
+
+        override suspend fun latest(): Long? {
+            latestReads++
+            delay(10)
+            return null
+        }
+    }
+
+    @Test
+    fun anEmptyLogIsReadOnlyOnceEvenIfTheFirstGateHolderYieldsToAnInteractiveRequest() = runTest {
+        val log = SlowEmptyLog()
+        val pacer = pacer(log = log)
+        val syncJob = launch { pacer.sync(pacer.newRun()) {} }
+        runCurrent() // the sync request holds the gate and is reading the (empty) log
+        val interactiveJob = launch { pacer.interactive {} }
+        runCurrent() // the interactive request is queued for the gate; the sync request will yield to it
+        joinAll(syncJob, interactiveJob)
+        assertEquals(1, log.latestReads)
+    }
+
+    @Test
+    fun firstInteractiveRequestOfAProcessKeepsItsGapFromTheLastLoggedOne() = runTest {
+        delay(100_000)
+        val latest = testScheduler.currentTime - 500
+        val pacer = pacer(log = InMemoryRequestLog(listOf(latest)))
+        var startedAt = -1L
+        pacer.interactive { startedAt = testScheduler.currentTime }
+        assertEquals(latest + PacingPolicy.Conservative.interactiveMinGapMs, startedAt)
+    }
+
     @Test
     fun twoCallersSharingARunBudgetNeverExceedIt() = runTest {
         val log = InMemoryRequestLog()

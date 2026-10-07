@@ -38,6 +38,9 @@ class Pacer(
     private val interactiveWaiting = AtomicInteger(0)
     private val cdnLane = Semaphore(policy.cdnConcurrency)
     private var lastRequestEndedAt: Long? = null
+
+    /** True once [lastRequestEndedAt] was seeded from the persisted request log (see [sync] and [interactive]). */
+    private var seeded = false
     private var syncRequestsUntilBreak = sampleBreakInterval()
 
     fun newRun(): RunBudget = RunBudget()
@@ -46,7 +49,8 @@ class Pacer(
      * A sync request. It samples its gap (and a break, if one is due) once, then waits for that moment WITHOUT
      * holding the gate, so interactive requests are never queued behind a sync gap or break. Whenever it takes
      * the gate it first yields to waiting interactive requests, and after any other request ran in the meantime
-     * it keeps at least [PacingPolicy.minGapMs] from that request's end.
+     * it waits a fresh gap from that request's end (a new draw, so never less than [PacingPolicy.minGapMs]).
+     * The very first request of a process waits out the gap after the last request the log remembers.
      */
     suspend fun <T> sync(run: RunBudget, request: suspend () -> T): T {
         var planned = false
@@ -59,6 +63,8 @@ class Pacer(
             gate.lock()
             var holding = true
             try {
+                // A restarted process does not know when the last request ended; the persisted log does.
+                if (!seeded) { lastRequestEndedAt = lastRequestEndedAt ?: requestLog.latest(); seeded = true }
                 if (interactiveWaiting.get() > 0) {
                     gate.unlock()
                     holding = false
@@ -73,8 +79,9 @@ class Pacer(
                     plannedFrom = last
                     planned = true
                 } else if (last != null && last != plannedFrom) {
-                    // Another request (an interactive one) ran while this one waited.
-                    notBefore = maxOf(notBefore, last + policy.minGapMs)
+                    // Another request (an interactive one) ran while this one waited. The gap after it is a fresh
+                    // draw, so it is never exactly minGapMs (a constant gap is a timing signature) and never shorter.
+                    notBefore = maxOf(notBefore, last + policy.sampleGap(random))
                     plannedFrom = last
                 }
                 if (!includesBreak && breakIsDue()) {
@@ -109,6 +116,7 @@ class Pacer(
             gate.lock()
             holding = true
             interactiveWaiting.decrementAndGet()
+            if (!seeded) { lastRequestEndedAt = lastRequestEndedAt ?: requestLog.latest(); seeded = true }
             waitSinceLastRequest(policy.interactiveMinGapMs)
             ensureAllowed()
             return execute(request)
