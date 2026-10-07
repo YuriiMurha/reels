@@ -160,8 +160,10 @@ captions and links) on the phone, and the path shows under the result.
 2. Tap each button once, from top to bottom, and wait for its result before the next tap:
    **Who am I**, **Collections**, **All Saved (page 1)**, **First collection (page 1)** (enabled once Collections has
    returned a collection) and **Media info (first saved item)** (enabled once All Saved has returned an item).
-3. Each button overwrites its own file, so export after the whole run. A button you never tapped, or whose answer
-   was not JSON, has no file.
+3. Each button overwrites its own file, so export after the whole run. A button you never tapped has no file, and
+   neither does one whose latest answer was not JSON: that answer removes the button's earlier file, so an exported
+   file is never older than the result the screen showed. A tap that was refused (cooldown) or failed before any
+   answer arrived leaves the earlier file as it was.
 
 **Export the scrubbed files.** In an empty folder outside the repo:
 
@@ -169,7 +171,15 @@ captions and links) on the phone, and the path shows under the result.
 mkdir -p ~/reels-lab && cd ~/reels-lab
 ```
 
-One command per file, with the phone connected (see section 2 if more than one device is attached):
+One command per file, with the phone connected. If an emulator or a second device is attached too, `adb` stops with
+`error: more than one device/emulator`. Unplug the other devices or stop the emulator, or name the phone by its serial
+from `adb devices` on every command, for example:
+
+```bash
+ANDROID_SERIAL=<serial from adb devices> adb exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_all.json > saved_all.json
+```
+
+With only the phone attached, the plain commands are:
 
 ```bash
 adb exec-out run-as io.github.yuriimurha.reels cat files/lab/current_user.json > current_user.json
@@ -191,7 +201,7 @@ adb exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_collection.js
 adb exec-out run-as io.github.yuriimurha.reels cat files/lab/media_info.json > media_info.json
 ```
 
-If an exported file contains an error such as `No such file or directory`, that button produced no scrubbed copy.
+If an exported file contains an error such as `No such file or directory`, that button has no scrubbed copy (never tapped, or its latest answer was not JSON).
 
 **Read each scrubbed file before committing it as a fixture: redaction is heuristic.** A bare lowercase handle used
 as a key, or as a one-word value, can't be told from schema and is kept. The pre-commit guard only catches session

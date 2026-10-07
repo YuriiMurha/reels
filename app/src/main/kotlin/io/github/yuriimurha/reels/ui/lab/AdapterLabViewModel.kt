@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
 import kotlin.coroutines.cancellation.CancellationException
 
 /** What the lab asks of [AdapterLab]; an interface so the ViewModel's tests need no HTTP. */
@@ -145,10 +146,18 @@ class AdapterLabViewModel(
         val result = answer
         val problem: Exception? = result?.error ?: failure
 
+        // An answer with a scrubbed copy replaces the call's file; one without removes it, so an export can never return a
+        // stale copy of an older answer. No answer at all (a refusal, a network error) leaves the file as it was.
         var saveFailed = false
-        val path = result?.scrubbedJson?.let { json ->
+        val path = result?.let {
             try {
-                write(call, json)
+                val json = it.scrubbedJson
+                if (json != null) {
+                    write(call, json)
+                } else {
+                    discard(call)
+                    null
+                }
             } catch (e: IOException) {
                 saveFailed = true
                 null
@@ -189,10 +198,17 @@ class AdapterLabViewModel(
     /** Overwrites `<call name lowercased>.json` with the scrubbed JSON, the only thing the lab ever writes. */
     private suspend fun write(call: LabCall, json: String): String = withContext(io) {
         labDir.mkdirs()
-        val file = File(labDir, call.name.lowercase() + ".json")
+        val file = fileOf(call)
         file.writeText(json)
         file.path
     }
+
+    /** Removes this call's own file, if any (never another call's). Throws [IOException] when it cannot be removed. */
+    private suspend fun discard(call: LabCall) {
+        withContext(io) { Files.deleteIfExists(fileOf(call).toPath()) }
+    }
+
+    private fun fileOf(call: LabCall) = File(labDir, call.name.lowercase() + ".json")
 
     private companion object {
         const val CALL_FAILED = "The call failed"

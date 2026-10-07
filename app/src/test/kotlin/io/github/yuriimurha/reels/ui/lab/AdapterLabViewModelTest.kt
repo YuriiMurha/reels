@@ -200,6 +200,43 @@ class AdapterLabViewModelTest {
         assertNull(viewModel.ui.value.shown?.savedPath)
     }
 
+    /** An export after the run must never hand back an answer older than the one the screen shows. */
+    @Test
+    fun anAnswerWithNoScrubbedCopyRemovesThatCallsOldFileAndOnlyThat() = runTest {
+        val viewModel = viewModel()
+        runner.next = { call, _ -> labResult(call, scrubbedJson = "{\"call\": \"${call.name}\"}") }
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        viewModel.tap(LabCall.COLLECTIONS)
+        advanceUntilIdle()
+        assertEquals(listOf("collections.json", "current_user.json"), labDir.list()!!.sorted())
+
+        // The same button again, now answered with something that is not JSON.
+        runner.next = { call, _ -> labResult(call, shape = "(not JSON: text/html, 120 chars)", scrubbedJson = null) }
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+
+        assertEquals(listOf("collections.json"), labDir.list()!!.sorted(), "only the call that was just answered loses its file")
+        assertEquals("{\"call\": \"COLLECTIONS\"}", File(labDir, "collections.json").readText())
+        assertEquals("(not JSON: text/html, 120 chars)", viewModel.ui.value.shown?.shape)
+        assertNull(viewModel.ui.value.shown?.savedPath, "no file, so no path on screen")
+        assertNull(viewModel.ui.value.message, "removing a stale copy is not a failure")
+    }
+
+    /** No answer at all (a refusal, a network error) says nothing about the file, so a refused tap keeps the last one. */
+    @Test
+    fun aTapThatGetsNoAnswerLeavesTheEarlierFileAlone() = runTest {
+        val viewModel = viewModel()
+        runner.next = { call, _ -> labResult(call, scrubbedJson = "{}") }
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        runner.next = { _, _ -> throw InstagramException.Transient() }
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+
+        assertEquals(listOf("current_user.json"), labDir.list()!!.toList())
+    }
+
     @Test
     fun aWriteFailureIsSaidWithoutItsPathOrText() = runTest {
         val blocker = File(tmp.root, "not-a-folder").apply { writeText("x") }
@@ -267,6 +304,22 @@ class AdapterLabViewModelTest {
         viewModel.tap(LabCall.COLLECTIONS)
         viewModel.tap(LabCall.CURRENT_USER)
         gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, runner.calls.size, "a double tap is one request")
+        assertEquals(1, log.countSince(0))
+        assertNull(viewModel.ui.value.running)
+    }
+
+    /**
+     * Two taps in the same main-thread frame, before the first coroutine has run at all: the guard must already be up when
+     * `tap` returns, not only once the Pacer block is entered.
+     */
+    @Test
+    fun aSynchronousDoubleTapIsOneRequest() = runTest {
+        val viewModel = viewModel()
+        viewModel.tap(LabCall.CURRENT_USER)
+        viewModel.tap(LabCall.CURRENT_USER) // no advance in between
         advanceUntilIdle()
 
         assertEquals(1, runner.calls.size, "a double tap is one request")
