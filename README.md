@@ -141,6 +141,68 @@ If step 2 says "Adapter needs repair" instead, look up the request that returns 
 `chrome://inspect` Network tab and note its path. Send the answers back in a Claude session, and they get recorded
 in `ARCHITECTURE.md` and `TODO.md`.
 
+## 6. Adapter lab (M3 spike, debug builds)
+
+The lab shows what Instagram's endpoints really send back, so the parsers can be checked against real responses. It is
+in debug builds only (`./gradlew installDebug`); a release build has no Developer section. Use it on the phone, logged
+in to the throwaway account.
+
+**What it does.** Each button sends exactly **one** request as the logged-in account, through the app's one pacer: at
+least 2 seconds after the previous request, counted in the 600-per-24-hour budget, and refused during a cooldown. A
+rate-limit answer starts the usual cooldown (1 hour, then 24 hours) and the lab refuses further taps until it ends:
+don't tap again to retry. The screen shows the call, the HTTP code, how the app classified the answer, and the
+response **shape** (key names, types and lengths; identifying values are redacted). It also saves a scrubbed copy (synthetic ids, handles,
+captions and links) on the phone, and the path shows under the result.
+
+**Run it once.**
+
+1. **Sync → Developer → Adapter lab.** The button is enabled only while Sync says "Logged in as @handle".
+2. Tap each button once, from top to bottom, and wait for its result before the next tap:
+   **Who am I**, **Collections**, **All Saved (page 1)**, **First collection (page 1)** (enabled once Collections has
+   returned a collection) and **Media info (first saved item)** (enabled once All Saved has returned an item).
+3. Each button overwrites its own file, so export after the whole run. A button you never tapped, or whose answer
+   was not JSON, has no file.
+
+**Export the scrubbed files.** In an empty folder outside the repo:
+
+```bash
+mkdir -p ~/reels-lab && cd ~/reels-lab
+```
+
+One command per file, with the phone connected (see section 2 if more than one device is attached):
+
+```bash
+adb exec-out run-as io.github.yuriimurha.reels cat files/lab/current_user.json > current_user.json
+```
+
+```bash
+adb exec-out run-as io.github.yuriimurha.reels cat files/lab/collections.json > collections.json
+```
+
+```bash
+adb exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_all.json > saved_all.json
+```
+
+```bash
+adb exec-out run-as io.github.yuriimurha.reels cat files/lab/saved_collection.json > saved_collection.json
+```
+
+```bash
+adb exec-out run-as io.github.yuriimurha.reels cat files/lab/media_info.json > media_info.json
+```
+
+If an exported file contains an error such as `No such file or directory`, that button produced no scrubbed copy.
+
+**Read each scrubbed file before committing it as a fixture: redaction is heuristic.** A bare lowercase handle used
+as a key, or as a one-word value, can't be told from schema and is kept. The pre-commit guard only catches session
+material, not personal data.
+
+**Then:** give the five files and the on-screen shapes (long-press the shape text to select and copy it, or send a
+screenshot) to a Claude session and ask it to answer the seven spike questions in section 6.3 of the design doc: the
+working endpoints and headers, whether saved items carry `saved_collection_ids`, whether a save timestamp exists, the
+page size and cursor, the media-type mapping, the error payload formats, and the CDN expiry parameter. The answers
+get recorded in `ARCHITECTURE.md` and `TODO.md`, and the files you have read become test fixtures.
+
 ## Troubleshooting
 
 - **`SDK location not found`**: `local.properties` is missing or points to the wrong folder (step 1.3).

@@ -10,6 +10,7 @@ import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.settings.SettingsStore
+import io.github.yuriimurha.reels.instagram.lab.AdapterLab
 import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
 import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
@@ -53,6 +54,9 @@ class AppContainer(context: Context) {
             logger = if (BuildConfig.DEBUG) { line -> Log.d("InstagramHttp", line) } else null,
         )
     }
+
+    /** The debug Adapter lab. Built without the HTTP client: that is only built when a lab call reaches the network. */
+    val adapterLab: AdapterLab by lazy { AdapterLab({ instagramHttp }, cookieStore) }
 
     /**
      * Building this loads no WebView: the HTTP client (whose user agent comes from the WebView provider) is only built

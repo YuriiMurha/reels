@@ -41,10 +41,12 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
+import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.sync.pacing.PacerStatus
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.login.LoginPurpose
@@ -54,6 +56,7 @@ import io.github.yuriimurha.reels.ui.login.LoginPurpose
 fun SyncScreen(
     onBack: () -> Unit,
     onOpenLogin: (url: String?, purpose: LoginPurpose) -> Unit,
+    onOpenLab: () -> Unit,
     // A parameter only so tests can give the screen a fake session; the app always uses the default.
     viewModel: SyncViewModel = LocalAppContainer.current.let { container ->
         viewModel { SyncViewModel(container.syncController, container.library, container.backend.pacer, container.session) }
@@ -115,6 +118,18 @@ fun SyncScreen(
                     onPaste = { viewModel.clearPasteError(); pasting = true },
                 )
             },
+            developerSection = {
+                // Debug builds only. The lab sends real requests, so it needs a valid session.
+                if (BuildConfig.DEBUG) {
+                    DeveloperSection(
+                        mockMode = null,
+                        mockSwitchEnabled = false,
+                        onMockModeChange = {},
+                        onOpenLab = onOpenLab,
+                        labEnabled = sessionState is SessionState.Valid,
+                    )
+                }
+            },
         )
     }
 
@@ -160,6 +175,7 @@ fun SyncContent(
     onDeleteLibrary: () -> Unit,
     modifier: Modifier = Modifier,
     sessionSection: @Composable () -> Unit = {},
+    developerSection: @Composable () -> Unit = {},
 ) {
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -194,6 +210,7 @@ fun SyncContent(
         Section("Storage") {
             OutlinedButton(onClick = onDeleteLibrary, enabled = ui.canDeleteLibrary) { Text("Delete library") }
         }
+        developerSection()
     }
 }
 
