@@ -6,6 +6,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -66,12 +67,19 @@ class FakeInstagramClientTest {
 
         // With reportsSavedCollectionIds = false, mediaInfo should hide the ids
         val clientHiding = FakeInstagramClient(library, reportsSavedCollectionIds = false)
-        val mediaHiding = clientHiding.mediaInfo(itemWithCollections.pk)
+        val mediaHiding = assertNotNull(clientHiding.mediaInfo(itemWithCollections.pk))
         assertNull(mediaHiding.savedCollectionIds)
 
         // With reportsSavedCollectionIds = true, mediaInfo should expose the ids
         val clientReporting = FakeInstagramClient(library, reportsSavedCollectionIds = true)
-        val mediaReporting = clientReporting.mediaInfo(itemWithCollections.pk)
+        val mediaReporting = assertNotNull(clientReporting.mediaInfo(itemWithCollections.pk))
         assertEquals(itemWithCollections.savedCollectionIds, mediaReporting.savedCollectionIds)
+    }
+
+    @Test
+    fun mediaInfoForAnUnknownPkIsNull() = runTest {
+        val client = FakeInstagramClient(FakeLibrary(itemCount = 5))
+        assertNull(client.mediaInfo("9999999999999999999"))
+        assertEquals(listOf("mediaInfo:9999999999999999999"), client.calls)
     }
 }

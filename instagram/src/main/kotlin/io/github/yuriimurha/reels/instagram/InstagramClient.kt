@@ -14,6 +14,6 @@ interface InstagramClient : SessionProbe {
     /** Saved items newest first. [collectionId] null means All Saved. */
     suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia>
 
-    /** One item with fresh media links. */
-    suspend fun mediaInfo(mediaPk: String): RemoteMedia
+    /** One item with fresh media links, or null when Instagram no longer has it (P8). */
+    suspend fun mediaInfo(mediaPk: String): RemoteMedia?
 }
