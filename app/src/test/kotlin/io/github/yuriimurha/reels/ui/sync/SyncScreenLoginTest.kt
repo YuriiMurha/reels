@@ -119,6 +119,15 @@ class SyncScreenLoginTest {
         assertEquals("https://www.instagram.com/challenge/x/" to LoginPurpose.CHALLENGE, opened)
     }
 
+    @Test
+    fun logInAgainOpensTheLoginPageAsARelogin() {
+        runBlocking { settings.setSession(SessionState.Expired("tester").toStored()) }
+        show()
+        awaitText("Log in again")
+        compose.onNodeWithText("Log in again").performClick()
+        assertEquals(null to LoginPurpose.RELOGIN, opened)
+    }
+
     private fun paste() {
         awaitText("Paste sessionid")
         compose.onNodeWithText("Paste sessionid").performClick()

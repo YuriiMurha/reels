@@ -11,7 +11,8 @@ import kotlinx.coroutines.launch
 import kotlin.coroutines.cancellation.CancellationException
 
 /**
- * What the login screen may ask Instagram, by [purpose] (see [LoginPurpose]). [now] times the csrftoken wait.
+ * What the login screen may ask Instagram, by [purpose] (see [LoginPurpose]), and never again by itself once a check
+ * has come back as a Challenge: from then on only [retry] validates. [now] times the csrftoken wait.
  */
 class LoginViewModel(
     private val session: LoginSession,
@@ -35,13 +36,26 @@ class LoginViewModel(
 
     /**
      * The fingerprint of the last session sent for validation; never the sessionid itself. A challenge screen starts
-     * with the session it was opened for: Instagram just told us what that session needs.
+     * with the session it was opened for (Instagram just told us what that session needs), and so does a relogin
+     * screen (that session is already known to be dead): neither is sent again.
      */
-    private var lastChecked: String? = if (purpose == LoginPurpose.CHALLENGE) session.currentSessionFingerprint() else null
+    private var lastChecked: String? =
+        if (purpose == LoginPurpose.CHALLENGE || purpose == LoginPurpose.RELOGIN) session.currentSessionFingerprint() else null
+
+    /**
+     * Set by a [SessionState.Challenge] result. Instagram may re-issue the sessionid during a checkpoint flow, and a
+     * new fingerprint must not turn that into automatic requests for a challenged account: from then on only the
+     * owner's [retry] validates, for the rest of this screen's life.
+     */
+    private var autoValidationStopped = false
+
+    /** True from [retry] until the next validation starts: the one thing that may validate after a challenge. */
+    private var retryRequested = false
 
     /**
      * Called every second by the screen. Reading cookies is local and free; validating is an Instagram
-     * request, so each session is checked at most once until the owner asks to [retry].
+     * request, so each session is checked at most once until the owner asks to [retry], and not at all
+     * by itself once a check has come back as a Challenge.
      */
     fun onCookiesMaybeReady() {
         if (purpose == LoginPurpose.CSRF) {
@@ -49,18 +63,22 @@ class LoginViewModel(
             return
         }
         if (mutableStatus.value is Status.Checking || !session.hasSessionCookies()) return
+        if (autoValidationStopped && !retryRequested) return
         val fingerprint = session.currentSessionFingerprint() ?: return
         if (fingerprint == lastChecked) return
         lastChecked = fingerprint
+        retryRequested = false
         mutableStatus.value = Status.Checking
         viewModelScope.launch {
-            mutableStatus.value = try {
+            val result = try {
                 Status.Done(session.validate())
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Status.Failed(e.userMessage("Couldn't check the session"))
             }
+            if (result is Status.Done && result.state is SessionState.Challenge) autoValidationStopped = true
+            mutableStatus.value = result
         }
     }
 
@@ -74,6 +92,7 @@ class LoginViewModel(
     fun retry() {
         if (mutableStatus.value is Status.Checking) return // a check is already out: don't send the session twice
         lastChecked = null
+        retryRequested = true
         mutableStatus.value = Status.Waiting
     }
 

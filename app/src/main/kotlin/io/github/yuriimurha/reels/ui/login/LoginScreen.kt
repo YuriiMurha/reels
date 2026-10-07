@@ -42,6 +42,8 @@ import kotlinx.coroutines.delay
 private const val LOGIN_URL = "https://www.instagram.com/accounts/login/"
 private const val INSTAGRAM_HOME = "https://www.instagram.com/"
 
+private const val FINISHED_VERIFYING = "Finished verifying on Instagram?"
+
 /**
  * Instagram's own login page in a WebView (spec 9.6). The session lands in CookieManager, shared with the API client.
  * [purpose] says what the screen may spend an Instagram request on; see [LoginPurpose].
@@ -99,14 +101,16 @@ fun LoginScreen(
                     LoginPurpose.CSRF -> LinearProgressIndicator(Modifier.fillMaxWidth())
                     // A challenge screen is seeded with the session it was opened for, so it never checks by itself: the
                     // owner says when verification is finished (Instagram usually keeps the same sessionid).
-                    LoginPurpose.CHALLENGE -> RetryBar("Finished verifying on Instagram?", viewModel::retry)
-                    LoginPurpose.LOGIN -> Unit
+                    LoginPurpose.CHALLENGE -> RetryBar(FINISHED_VERIFYING, viewModel::retry)
+                    LoginPurpose.LOGIN, LoginPurpose.RELOGIN -> Unit
                 }
                 LoginViewModel.Status.CsrfReady -> Unit
                 LoginViewModel.Status.Checking -> LinearProgressIndicator(Modifier.fillMaxWidth())
                 is LoginViewModel.Status.Failed -> RetryBar(current.message, viewModel::retry)
                 is LoginViewModel.Status.Done -> when (current.state) {
-                    is SessionState.Challenge -> RetryBar("Instagram wants verification. Finish it below, then check again.", viewModel::retry)
+                    // After a Challenge result nothing validates by itself any more (see LoginViewModel): the same manual
+                    // control as a challenge screen, because Instagram may issue a new sessionid while it is being finished.
+                    is SessionState.Challenge -> RetryBar(FINISHED_VERIFYING, viewModel::retry)
                     is SessionState.Expired, SessionState.LoggedOut ->
                         RetryBar("That session isn't valid yet. Finish logging in, then check again.", viewModel::retry)
                     is SessionState.Valid -> Unit
@@ -142,7 +146,7 @@ internal fun loginTarget(startUrl: String?): String = allowedUrlOrNull(startUrl)
  */
 internal fun startPage(purpose: LoginPurpose, startUrl: String?): String = when (purpose) {
     LoginPurpose.CHALLENGE -> challengeTarget(startUrl)
-    LoginPurpose.LOGIN, LoginPurpose.CSRF -> loginTarget(startUrl)
+    LoginPurpose.LOGIN, LoginPurpose.RELOGIN, LoginPurpose.CSRF -> loginTarget(startUrl)
 }
 
 /** What to load for a Challenge result: its URL when allowed, else Instagram's home, which redirects to the checkpoint. */

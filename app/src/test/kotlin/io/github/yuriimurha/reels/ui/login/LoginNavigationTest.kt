@@ -108,6 +108,7 @@ class LoginNavigationTest {
         val home = "https://www.instagram.com/"
         assertEquals(loginPage, startPage(LoginPurpose.LOGIN, null))
         assertEquals(loginPage, startPage(LoginPurpose.LOGIN, "https://example.com/"))
+        assertEquals(loginPage, startPage(LoginPurpose.RELOGIN, null))
         assertEquals(home, startPage(LoginPurpose.CSRF, home))
         assertEquals(home, startPage(LoginPurpose.CHALLENGE, null), "no challenge URL: the home page redirects to the checkpoint")
         assertEquals(home, startPage(LoginPurpose.CHALLENGE, "https://example.com/challenge/x/"))

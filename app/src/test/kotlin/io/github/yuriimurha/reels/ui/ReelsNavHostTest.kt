@@ -259,6 +259,16 @@ class ReelsNavHostTest {
         assertEquals(LoginRoute(null, LoginPurpose.LOGIN), navController.currentBackStackEntry!!.toRoute<LoginRoute>())
     }
 
+    @Test
+    fun logInAgainNavigatesToTheLoginRouteAsARelogin() {
+        runBlocking { container.settings.setSession(SessionState.Expired("tester").toStored()) }
+        showFrom(SyncRoute)
+        awaitText("Log in again")
+        compose.onNodeWithText("Log in again").performClick()
+        compose.waitForIdle()
+        assertEquals(LoginRoute(null, LoginPurpose.RELOGIN), navController.currentBackStackEntry!!.toRoute<LoginRoute>())
+    }
+
     /** "Check again" is shown only on a CHALLENGE screen that is waiting, so it shows the route's purpose reached LoginScreen. */
     @Test
     fun theHostPassesTheRoutesPurposeToTheLoginScreen() {

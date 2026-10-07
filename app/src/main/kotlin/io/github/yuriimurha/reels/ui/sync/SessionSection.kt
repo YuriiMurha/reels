@@ -33,6 +33,7 @@ fun SessionSection(
     state: SessionState?,
     message: String?,
     onLogin: () -> Unit,
+    onRelogin: () -> Unit,
     onResolveChallenge: (String?) -> Unit,
     onLogout: () -> Unit,
     onCheck: () -> Unit,
@@ -59,7 +60,7 @@ fun SessionSection(
             is SessionState.Expired -> {
                 Text("Session expired" + (state.handle?.let { " (@$it)" } ?: ""))
                 Buttons {
-                    Button(onClick = onLogin) { Text("Log in again") }
+                    Button(onClick = onRelogin) { Text("Log in again") }
                     TextButton(onClick = onPaste) { Text("Paste sessionid") }
                     TextButton(onClick = onLogout) { Text("Log out") }
                 }

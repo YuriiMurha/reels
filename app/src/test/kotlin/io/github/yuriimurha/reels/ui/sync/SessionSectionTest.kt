@@ -25,13 +25,16 @@ class SessionSectionTest {
 
     private var resolved: String? = "unset"
     private var loggedOut = 0
+    private var loggedIn = 0
+    private var reloggedIn = 0
 
     private fun show(state: SessionState?) = compose.setContent {
         ReelsTheme {
             SessionSection(
                 state = state,
                 message = null,
-                onLogin = {},
+                onLogin = { loggedIn++ },
+                onRelogin = { reloggedIn++ },
                 onResolveChallenge = { resolved = it },
                 onLogout = { loggedOut++ },
                 onCheck = {},
@@ -56,6 +59,13 @@ class SessionSectionTest {
     }
 
     @Test
+    fun logInOpensAPlainLoginAndLogInAgainOpensARelogin() {
+        show(SessionState.LoggedOut)
+        compose.onNodeWithText("Log in").performClick()
+        assertEquals(1 to 0, loggedIn to reloggedIn)
+    }
+
+    @Test
     fun validOffersExactlyCheckNowAndLogout() {
         show(SessionState.Valid("tester"))
         assertButtons("Check now", "Log out")
@@ -69,6 +79,8 @@ class SessionSectionTest {
         assertButtons("Log in again", "Paste sessionid", "Log out")
         compose.onNodeWithText("Log out").performClick()
         assertEquals(1, loggedOut)
+        compose.onNodeWithText("Log in again").performClick()
+        assertEquals(0 to 1, loggedIn to reloggedIn, "Log in again is a RELOGIN, not a plain login")
     }
 
     @Test
@@ -120,7 +132,7 @@ class SessionSectionTest {
                 SessionSection(
                     state = SessionState.Expired("tester"),
                     message = "Temporary network or server problem",
-                    onLogin = {}, onResolveChallenge = {}, onLogout = {}, onCheck = {}, onPaste = {},
+                    onLogin = {}, onRelogin = {}, onResolveChallenge = {}, onLogout = {}, onCheck = {}, onPaste = {},
                 )
             }
         }

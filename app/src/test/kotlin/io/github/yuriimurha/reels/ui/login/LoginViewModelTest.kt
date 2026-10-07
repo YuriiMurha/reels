@@ -188,6 +188,129 @@ class LoginViewModelTest {
     }
 
     @Test
+    fun afterAChallengeResultALoginScreenNeverValidatesByItselfAgain() = runTest {
+        session.fingerprint = "s1"
+        session.result = { SessionState.Challenge("https://www.instagram.com/challenge/x/", null) }
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(1, session.validations)
+
+        // Instagram re-issues the sessionid during the checkpoint flow: each new one used to cost a request.
+        for (fingerprint in listOf("s2", "s3", "s4")) {
+            session.fingerprint = fingerprint
+            repeat(2) {
+                viewModel.onCookiesMaybeReady()
+                advanceUntilIdle()
+            }
+        }
+        assertEquals(1, session.validations, "a challenged account must not be polled by the 1 s cookie poll")
+        assertIs<LoginViewModel.Status.Done>(viewModel.status.value)
+    }
+
+    @Test
+    fun afterAChallengeOnlyCheckAgainValidatesAndEachTapIsOneRequest() = runTest {
+        session.fingerprint = "s1"
+        session.result = { SessionState.Challenge(null, null) }
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        session.fingerprint = "s2"
+
+        viewModel.retry()
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(2, session.validations, "one tap on Check again is one request")
+
+        // Still challenged: the screen stops again until the owner taps again.
+        session.fingerprint = "s3"
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(2, session.validations)
+        session.result = { SessionState.Valid("tester") }
+        viewModel.retry()
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(3, session.validations)
+        assertEquals(LoginViewModel.Status.Done(SessionState.Valid("tester")), viewModel.status.value)
+    }
+
+    @Test
+    fun aChallengeScreenAlsoStopsAfterAChallengeResult() = runTest {
+        session.fingerprint = "s1"
+        session.result = { SessionState.Challenge(null, null) }
+        val viewModel = LoginViewModel(session, LoginPurpose.CHALLENGE)
+        viewModel.retry()
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(1, session.validations)
+        session.fingerprint = "s2"
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(1, session.validations)
+    }
+
+    @Test
+    fun aFailedCheckDoesNotStopTheScreenFromCheckingANewSession() = runTest {
+        session.fingerprint = "s1"
+        session.result = { throw InstagramException.Transient() }
+        val viewModel = LoginViewModel(session, LoginPurpose.LOGIN)
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        session.fingerprint = "s2"
+        session.result = { SessionState.Valid("tester") }
+        viewModel.onCookiesMaybeReady()
+        advanceUntilIdle()
+        assertEquals(2, session.validations, "only a Challenge result stops the automatic checks")
+    }
+
+    @Test
+    fun aReloginScreenDoesNotCheckTheExpiredSessionItWasOpenedWith() = runTest {
+        session.fingerprint = "s1" // the session that just came back Expired: known to be dead
+        val viewModel = LoginViewModel(session, LoginPurpose.RELOGIN)
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(0, session.validations, "opening the login page again must not cost an Instagram request")
+        assertEquals(LoginViewModel.Status.Waiting, viewModel.status.value)
+    }
+
+    @Test
+    fun aReloginScreenChecksTheNewSessionOnceWhenTheOwnerLogsIn() = runTest {
+        session.fingerprint = "s1"
+        val viewModel = LoginViewModel(session, LoginPurpose.RELOGIN)
+        viewModel.onCookiesMaybeReady()
+        session.fingerprint = "s2" // the owner logged in: Instagram issued a new sessionid
+        repeat(3) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(1, session.validations)
+        assertEquals(LoginViewModel.Status.Done(SessionState.Valid("tester")), viewModel.status.value)
+    }
+
+    @Test
+    fun aReloginScreenWithNoSessionInTheJarChecksTheFirstOneThatAppears() = runTest {
+        session.fingerprint = null // logged out meanwhile: nothing to seed
+        val viewModel = LoginViewModel(session, LoginPurpose.RELOGIN)
+        viewModel.onCookiesMaybeReady()
+        assertEquals(0, session.validations)
+        session.fingerprint = "s1"
+        repeat(2) {
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+        }
+        assertEquals(1, session.validations)
+    }
+
+    @Test
     fun retryWhileACheckIsInFlightDoesNotStartASecondOne() = runTest {
         session.fingerprint = "s1"
         val gate = CompletableDeferred<Unit>()

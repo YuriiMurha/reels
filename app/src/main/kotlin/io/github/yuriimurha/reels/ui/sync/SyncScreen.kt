@@ -107,6 +107,7 @@ fun SyncScreen(
                     state = sessionState,
                     message = sessionMessage,
                     onLogin = { onOpenLogin(null, LoginPurpose.LOGIN) },
+                    onRelogin = { onOpenLogin(null, LoginPurpose.RELOGIN) },
                     onResolveChallenge = { url -> onOpenLogin(url, LoginPurpose.CHALLENGE) },
                     onLogout = viewModel::logout,
                     onCheck = viewModel::checkSession,

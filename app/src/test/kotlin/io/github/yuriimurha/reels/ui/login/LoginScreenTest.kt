@@ -100,6 +100,54 @@ class LoginScreenTest {
         assertEquals(1, done, "a Valid result closes the screen")
     }
 
+    /** Lets the 1 s cookie poll run [seconds] times, the way the real screen does. */
+    private fun pollFor(seconds: Int) {
+        repeat(seconds) {
+            compose.mainClock.advanceTimeBy(1_000)
+            compose.waitForIdle()
+        }
+    }
+
+    @Test
+    fun afterAChallengeResultALoginScreenStopsValidatingAndOffersCheckAgain() {
+        session.fingerprint = "s1"
+        session.result = { SessionState.Challenge("https://www.instagram.com/challenge/x/", null) }
+        show(LoginPurpose.LOGIN)
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.waitForIdle()
+            session.validations >= 1
+        }
+        session.fingerprint = "s2" // Instagram re-issues the sessionid during the checkpoint flow
+        pollFor(5)
+        session.fingerprint = "s3"
+        pollFor(5)
+        assertEquals(1, session.validations, "a challenged account must not be validated by the poll")
+        compose.onNodeWithText("Finished verifying on Instagram?").assertIsDisplayed()
+        compose.onNodeWithText("Check again").assertIsDisplayed()
+    }
+
+    @Test
+    fun aReloginScreenOpensWithoutARequestAndOnTheLoginPage() {
+        show(LoginPurpose.RELOGIN) // the jar still holds the expired session
+        pollFor(3)
+        assertEquals(0, session.validations, "the expired session is known to be dead")
+        assertEquals("https://www.instagram.com/accounts/login/", shadowOf(webView()).lastLoadedUrl)
+        compose.onAllNodesWithText("Check again").assertCountEquals(0)
+    }
+
+    @Test
+    fun aReloginScreenChecksTheSessionTheOwnerLogsInWithExactlyOnce() {
+        show(LoginPurpose.RELOGIN)
+        session.fingerprint = "s2"
+        compose.waitUntil(timeoutMillis = 10_000) {
+            pollFor(1)
+            session.validations >= 1 && done >= 1
+        }
+        pollFor(5)
+        assertEquals(1, session.validations)
+        assertEquals(1, done, "a Valid result closes the screen")
+    }
+
     @Test
     fun aLoginScreenOffersNoCheckAgainUntilSomethingHappened() {
         session.fingerprint = null
@@ -129,6 +177,7 @@ class LoginScreenTest {
     private class FakeLoginSession : LoginSession {
         var fingerprint: String? = "s1"
         var validations = 0
+        var result: () -> SessionState = { SessionState.Valid("tester") }
 
         override fun currentSessionFingerprint(): String? = fingerprint
 
@@ -138,7 +187,7 @@ class LoginScreenTest {
 
         override suspend fun validate(): SessionState {
             validations++
-            return SessionState.Valid("tester")
+            return result()
         }
     }
 }
