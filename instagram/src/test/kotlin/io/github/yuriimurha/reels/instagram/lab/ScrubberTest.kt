@@ -115,10 +115,17 @@ class ScrubberTest {
     }
 
     @Test
-    fun aFreshScrubberStartsItsMappingOver() {
-        val a = render(Scrubber().scrub(fixture("saved_page_more.json")))
-        val b = render(Scrubber().scrub(fixture("saved_page_more.json")))
-        assertEquals(a, b)
+    fun aFreshScrubberStartsItsCountersOverWhileOneScrubberKeepsCounting() {
+        fun cursor(scrubbed: JsonElement) = scrubbed.jsonObject["next_max_id"]!!.jsonPrimitive.content
+
+        val shared = Scrubber()
+        shared.scrub(fixture("collections_list.json")) // four collection names: s_1 to s_4
+        val afterOther = shared.scrub(fixture("saved_page_more.json"))
+        val fresh = Scrubber().scrub(fixture("saved_page_more.json"))
+
+        assertEquals("s_1", cursor(fresh))
+        assertEquals("s_5", cursor(afterOther))
+        assertNotEquals(render(afterOther), render(fresh))
     }
 
     @Test
@@ -136,7 +143,7 @@ class ScrubberTest {
         val scrubbed = Scrubber().scrub(
             parse("""{"a":"https://h.example.invalid/p?oe=tomorrow&k=1&k=2&john.doe=3","b":"https://h.example.invalid/q","c":"https://"}"""),
         ).jsonObject
-        assertEquals("https://cdn.example.invalid/m/1?oe=x&k=x&k=x&p3=x", scrubbed["a"]!!.jsonPrimitive.content)
+        assertEquals("https://cdn.example.invalid/m/1?oe=x&k=x&k=x&p_3=x", scrubbed["a"]!!.jsonPrimitive.content)
         assertEquals("https://cdn.example.invalid/m/2", scrubbed["b"]!!.jsonPrimitive.content)
         // Not a parseable URL: an ordinary string.
         assertEquals("s_1", scrubbed["c"]!!.jsonPrimitive.content)
@@ -313,8 +320,8 @@ class ScrubberTest {
         val scrubbed = Scrubber().scrub(
             parse("""{"message":"Hi @someone, media 3100000000000000001","status":"https://h.example.invalid/x","error_type":"ok_type"}"""),
         ).jsonObject
-        assertEquals("s_1", scrubbed["message"]!!.jsonPrimitive.content)
-        assertEquals("https://cdn.example.invalid/m/1", scrubbed["status"]!!.jsonPrimitive.content)
+        assertEquals("text 1", scrubbed["message"]!!.jsonPrimitive.content)
+        assertEquals("text 2", scrubbed["status"]!!.jsonPrimitive.content)
         assertEquals("ok_type", scrubbed["error_type"]!!.jsonPrimitive.content)
     }
 
@@ -323,8 +330,8 @@ class ScrubberTest {
         val scrubbed = Scrubber().scrub(
             parse("""{"message":"Your ${"session" + "id"} expired","feedback_title":"Bad ${"csrf" + "token"}","status":"fine"}"""),
         ).jsonObject
-        assertEquals("s_1", scrubbed["message"]!!.jsonPrimitive.content)
-        assertEquals("s_2", scrubbed["feedback_title"]!!.jsonPrimitive.content)
+        assertEquals("text 1", scrubbed["message"]!!.jsonPrimitive.content)
+        assertEquals("text 2", scrubbed["feedback_title"]!!.jsonPrimitive.content)
         assertEquals("fine", scrubbed["status"]!!.jsonPrimitive.content)
     }
 
@@ -340,6 +347,243 @@ class ScrubberTest {
         assertEquals(parse("""["s_1","s_2"]"""), Scrubber().scrub(parse("""["a1","b2"]""")))
         assertEquals(parse("null"), Scrubber().scrub(parse("null")))
         assertEquals(parse("true"), Scrubber().scrub(parse("true")))
+    }
+
+    // ---- visible-value keys: the Scrubber output may be committed to a public repo, so it is stricter than the screen ----
+
+    private fun scrubVisible(key: String, value: String): String =
+        Scrubber().scrub(JsonObject(mapOf(key to JsonPrimitive(value)))).jsonObject[key]!!.jsonPrimitive.content
+
+    private fun assertRedactedInTheScrubber(key: String, value: String) =
+        assertEquals("text 1", scrubVisible(key, value), "'$value' under $key must not survive")
+
+    @Test
+    fun aHandleUnderMessageIsRedactedInTheScrubber() = assertRedactedInTheScrubber("message", "john.doe")
+
+    @Test
+    fun aHandleInASentenceIsRedactedInTheScrubber() = assertRedactedInTheScrubber("message", "Sorry, john.doe is private")
+
+    @Test
+    fun aFullNameUnderFeedbackTitleIsRedactedInTheScrubber() = assertRedactedInTheScrubber("feedback_title", "John Doe")
+
+    @Test
+    fun aCommaGroupedIdIsRedactedInTheScrubber() = assertRedactedInTheScrubber("message", "Item 3,100,000,000,000,000,001 gone")
+
+    @Test
+    fun aHyphenGroupedIdIsRedactedInTheScrubber() = assertRedactedInTheScrubber("message", "pk 3100-0000-0000-0000-001")
+
+    @Test
+    fun aSpaceGroupedIdIsRedactedInTheScrubber() = assertRedactedInTheScrubber("message", "user 3100 0000 0000 0000 001")
+
+    @Test
+    fun aThreeDigitRunIsRedactedInTheScrubber() {
+        assertRedactedInTheScrubber("message", "Code 1234")
+        assertEquals("text 1", scrubVisible("message", "Item 1 2 3"))
+    }
+
+    @Test
+    fun anEmailishAHostWithAnUncommonTldAndAnUppercaseHostAreRedactedInTheScrubber() {
+        assertRedactedInTheScrubber("message", "john.doe at gmail dot com")
+        assertRedactedInTheScrubber("message", "see evil.example.xyz now")
+        assertRedactedInTheScrubber("message", "see WWW.EXAMPLE.ORG now")
+    }
+
+    @Test
+    fun nonAsciiAndOverlongVisibleStringsAreRedactedInTheScrubber() {
+        assertRedactedInTheScrubber("message", "Жанна")
+        // A sentence is at most 200 characters.
+        assertRedactedInTheScrubber("message", "a".repeat(201))
+        assertEquals("a".repeat(200), scrubVisible("message", "a".repeat(200)))
+    }
+
+    @Test
+    fun nestedArraysUnderAVisibleKeyAreRedactedInTheScrubber() {
+        val scrubbed = Scrubber().scrub(parse("""{"message":[["john.doe","Please wait a few minutes before you try again."]]}"""))
+        assertEquals(parse("""{"message":[["text 1","Please wait a few minutes before you try again."]]}"""), scrubbed)
+    }
+
+    @Test
+    fun aHandleUnderStatusOrErrorTypeIsAcceptedAsEnumLikeAndSurvives() {
+        // Documented limit: a bare lowercase word under an enum-like key cannot be told from an enum value.
+        val scrubbed = Scrubber().scrub(parse("""{"status":"johndoe","error_type":"jane_doe"}"""))
+        assertEquals(parse("""{"status":"johndoe","error_type":"jane_doe"}"""), scrubbed)
+    }
+
+    @Test
+    fun enumValuesAndPlainSentencesStillSurvive() {
+        assertEquals("ALL_MEDIA_AUTO_COLLECTION", scrubVisible("collection_type", "ALL_MEDIA_AUTO_COLLECTION"))
+        assertEquals("challenge_required", scrubVisible("message", "challenge_required"))
+        assertEquals("fail", scrubVisible("status", "fail"))
+        val sentence = "Please wait a few minutes before you try again."
+        assertEquals(sentence, scrubVisible("message", sentence))
+        assertEquals("Try again later", scrubVisible("feedback_title", "Try again later"))
+        assertEquals("Wait 2 minutes, 30 seconds", scrubVisible("message", "Wait 2 minutes, 30 seconds"))
+        // Capitalised words in a row are a name until proven otherwise.
+        assertEquals("text 1", scrubVisible("feedback_title", "Try Again Later"))
+    }
+
+    @Test
+    fun aVisibleNumberSurvivesOnlyWithSixDigitsOrFewer() {
+        val scrubbed = Scrubber().scrub(parse("""{"width":123456,"height":1234567,"status":25025320,"original_width":250253201,"num_results":3}""")).jsonObject
+        assertEquals("123456", scrubbed["width"]!!.jsonPrimitive.content)
+        assertEquals("1", scrubbed["height"]!!.jsonPrimitive.content)
+        assertEquals("2", scrubbed["status"]!!.jsonPrimitive.content)
+        assertEquals("3", scrubbed["original_width"]!!.jsonPrimitive.content)
+        assertEquals("3", scrubbed["num_results"]!!.jsonPrimitive.content)
+    }
+
+    // ---- names ----
+
+    @Test
+    fun aHashLikeAMixedCaseAndADigitHeavyKeyAreRedacted() {
+        val scrubbed = Scrubber().scrub(
+            parse("""{"ab12cd34ef56ab78cd90ab12":1,"AbCdEfGhIjKlMnOpQrStUv":2,"u3100_0000_0000_0000_001":3,"Media":4,"abcdefghijklmno1":5}"""),
+        ).jsonObject
+        assertEquals(listOf("key_1", "key_2", "key_3", "key_4", "key_5"), scrubbed.keys.toList())
+    }
+
+    @Test
+    fun aKeyOfSixteenLettersWithoutADigitAndAShortOneWithADigitAreKept() {
+        val scrubbed = Scrubber().scrub(parse("""{"abcdefghijklmnop":1,"image_versions2":2,"a1":3,"is_dash_eligible":4}""")).jsonObject
+        assertEquals(listOf("abcdefghijklmnop", "image_versions2", "a1", "is_dash_eligible"), scrubbed.keys.toList())
+    }
+
+    @Test
+    fun aBareLowercaseKeyIsKeptBecauseItCannotBeToldFromASchemaKey() {
+        // Documented limit (ARCHITECTURE.md): read a scrubbed file before committing it.
+        val scrubbed = Scrubber().scrub(parse("""{"johndoe":{"a":1},"jane_doe":2}"""))
+        assertEquals(parse("""{"johndoe":{"a":1},"jane_doe":2}"""), scrubbed)
+    }
+
+    @Test
+    fun unicodeKeysAreRedactedAndUnicodeValuesAreScrubbed() {
+        val scrubbed = Scrubber().scrub(parse("""{"jöhn":1,"text":"Ｊｏｈｎ","note":"Жанна"}""")).jsonObject
+        assertEquals(listOf("key_1", "text", "note"), scrubbed.keys.toList())
+        assertEquals("caption 1", scrubbed["text"]!!.jsonPrimitive.content)
+        assertEquals("s_1", scrubbed["note"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun aHandleAnIdAndALinkInsideAnOrdinaryStringAreScrubbedWhole() {
+        val scrubbed = Scrubber().scrub(
+            parse("""{"accessibility_caption":"Photo by john.doe id 3100000000000000001 https://x.example.invalid/p"}"""),
+        )
+        assertEquals(parse("""{"accessibility_caption":"s_1"}"""), scrubbed)
+    }
+
+    @Test
+    fun overlongNonVisibleStringsAreScrubbed() {
+        val scrubbed = Scrubber().scrub(JsonObject(mapOf("note" to JsonPrimitive("b".repeat(5000))))).jsonObject
+        assertEquals("s_1", scrubbed["note"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun urlParameterNamesThatAreDataAreRedactedAndTheRestAreKept() {
+        val scrubbed = Scrubber().scrub(
+            parse("""{"u":"https://h.example.invalid/a?AbCd=1&oe=deadbeefcafebabe&ab12cd34ef56ab78cd90ab12=2&johndoe=3"}"""),
+        ).jsonObject
+        // johndoe is a bare lowercase name: kept, like a bare lowercase key (documented limit). Its value is x.
+        assertEquals(
+            "https://cdn.example.invalid/m/1?p_0=x&oe=deadbeefcafebabe&p_2=x&johndoe=x",
+            scrubbed["u"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun aSyntheticKeyNeverOverwritesARealOne() {
+        val scrubbed = Scrubber().scrub(parse("""{"key_1":1,"john.doe":2}""")).jsonObject
+        assertEquals(2, scrubbed.size, scrubbed.toString())
+        assertEquals("1", scrubbed["key_1"]!!.jsonPrimitive.content)
+        val other = scrubbed.keys.single { it != "key_1" }
+        assertEquals("2", scrubbed[other]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun severalSyntheticKeysAvoidEveryRealKeyAndEachOther() {
+        val scrubbed = Scrubber().scrub(parse("""{"key_1":1,"a b":2,"c d":3,"key_2":4,"e f":5}""")).jsonObject
+        assertEquals(5, scrubbed.size, scrubbed.toString())
+        assertEquals("1", scrubbed["key_1"]!!.jsonPrimitive.content)
+        assertEquals("4", scrubbed["key_2"]!!.jsonPrimitive.content)
+        // The same real key maps to the same synthetic name in another object of the same document.
+        val twice = Scrubber().scrub(parse("""{"x":{"a b":1},"y":{"a b":2}}""")).jsonObject
+        assertEquals(twice["x"]!!.jsonObject.keys, twice["y"]!!.jsonObject.keys)
+    }
+
+    // ---- ids ----
+
+    @Test
+    fun twelveDistinctTwoDigitIdsGetTwelveDistinctStandIns() {
+        val pks = (10..21).joinToString(",") { "{\"pk\":$it}" }
+        val scrubbed = Scrubber().scrub(parse("""{"items":[$pks]}"""))
+        val out = valuesOf(scrubbed, "pk")
+        assertEquals(12, out.distinct().size, out.toString())
+        out.zip(10..21).forEach { (synthetic, real) ->
+            assertEquals(2, synthetic.length)
+            assertNotEquals(real.toString(), synthetic)
+        }
+    }
+
+    @Test
+    fun theSpaceOfAGivenLengthRunsOutIntoALongerStandInInsteadOfRepeating() {
+        val twoDigits = (10..99).joinToString(",") { "{\"pk\":$it}" }
+        val out2 = valuesOf(Scrubber().scrub(parse("""{"items":[$twoDigits]}""")), "pk")
+        assertEquals(90, out2.distinct().size)
+        assertTrue(out2.first().length == 2 && out2.all { it.all { c -> c in '0'..'9' } })
+        val oneDigit = (0..9).joinToString(",") { "{\"pk\":$it}" }
+        val out1 = valuesOf(Scrubber().scrub(parse("""{"items":[$oneDigit]}""")), "pk")
+        assertEquals(10, out1.distinct().size, out1.toString())
+        out1.forEachIndexed { i, synthetic -> assertNotEquals(i.toString(), synthetic) }
+    }
+
+    // ---- memory ----
+
+    /** Every String reachable from [root] through maps, collections, arrays and this package's own objects. */
+    private fun heldStrings(root: Any): List<String> {
+        val seen = java.util.IdentityHashMap<Any, Boolean>()
+        val out = mutableListOf<String>()
+        fun walk(o: Any?) {
+            if (o == null || seen.put(o, true) != null) return
+            when (o) {
+                is CharSequence -> out += o.toString()
+                is Map<*, *> -> o.forEach { (k, v) -> walk(k); walk(v) }
+                is Iterable<*> -> o.forEach { walk(it) }
+                is Array<*> -> o.forEach { walk(it) }
+                else -> if (o.javaClass.name.startsWith("io.github.yuriimurha.reels.instagram.lab")) {
+                    var type: Class<*>? = o.javaClass
+                    while (type != null && type != Any::class.java) {
+                        type.declaredFields.filterNot { java.lang.reflect.Modifier.isStatic(it.modifiers) }.forEach { field ->
+                            field.isAccessible = true
+                            walk(field.get(o))
+                        }
+                        type = type.superclass
+                    }
+                }
+            }
+        }
+        walk(root)
+        return out
+    }
+
+    @Test
+    fun theScrubberKeepsNoRawValueInMemory() {
+        val scrubber = Scrubber()
+        val raws = listOf(
+            "3100000000000000001", "7700000001", "alice_secret", "Alice Secretson", "my secret caption", "Cx1aBcDeFg1",
+            "https://h.example.invalid/very/secret/path?x=1", "john.doe", "Some Odd Visible Text", "plain string value", "987654321",
+        )
+        scrubber.scrub(
+            parse(
+                """{"pk":${raws[0]},"user":{"pk":${raws[1]},"username":"${raws[2]}","full_name":"${raws[3]}"},
+                "caption":{"text":"${raws[4]}"},"code":"${raws[5]}","url":"${raws[6]}","${raws[7]}":1,
+                "message":"${raws[8]}","note":"${raws[9]}","count":${raws[10]},"taken_at":1700003000,"strong_id":"${raws[0]}_42"}""",
+            ),
+        )
+        val held = heldStrings(scrubber)
+        assertTrue(held.isNotEmpty(), "the walker must see the mappings")
+        for (raw in raws + "1700003000") assertTrue(held.none { raw in it }, "the Scrubber still holds '$raw'")
+        // The mappings still work: the same scrubber maps the same id the same way.
+        val again = scrubber.scrub(parse("""{"pk":${raws[0]}}""")).jsonObject["pk"]!!.jsonPrimitive.content
+        assertEquals(19, again.length)
     }
 
     private fun assertNoForbiddenWord(text: String, label: String) {

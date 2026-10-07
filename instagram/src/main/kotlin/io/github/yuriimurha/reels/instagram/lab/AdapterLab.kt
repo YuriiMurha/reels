@@ -4,6 +4,7 @@ import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.ErrorClassifier
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
+import io.github.yuriimurha.reels.instagram.web.classifyUnreadable
 import io.github.yuriimurha.reels.instagram.web.getRaw
 import io.github.yuriimurha.reels.instagram.web.idString
 import io.github.yuriimurha.reels.instagram.web.sessionUserId
@@ -65,15 +66,22 @@ class AdapterLab(
 
     /**
      * Sends exactly one request. [arg] is a collection id (SAVED_COLLECTION) or a media pk (MEDIA_INFO). An HTTP error
-     * status is an answer, not an exception; a failure to connect or to read the body is a [InstagramException.Transient].
+     * status is an answer, not an exception, even when its body can't be read (then it is classified from its headers);
+     * a failure to connect, or to read the body of a 2xx or 5xx, is a [InstagramException.Transient].
      */
     suspend fun run(call: LabCall, arg: String?): LabResult {
         // Built first: a missing session or a bad id throws before the lazy client exists and before any request.
         val url = urlFor(call, arg)
         val raw = http.getRaw(url)
-        val error = ErrorClassifier.classify(raw.code, raw.location, raw.contentType, raw.body)
+        // A 3xx or 4xx whose body was cut still says what it was in its headers (a rate limit must arm the cooldown).
+        val error = if (raw.bodyUnreadable) {
+            classifyUnreadable(raw.code, raw.location, raw.contentType)
+        } else {
+            ErrorClassifier.classify(raw.code, raw.location, raw.contentType, raw.body)
+        }
         val json = if (raw.body.isEmpty()) null else runCatching { Json.parseToJsonElement(raw.body) }.getOrNull()
         val shape = when {
+            raw.bodyUnreadable -> "(unreadable body)"
             raw.body.isEmpty() -> "(empty body)"
             json == null -> "(not JSON: ${mediaType(raw.contentType)}, ${raw.body.length} chars)"
             else -> ShapeDump.of(json)

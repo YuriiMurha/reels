@@ -41,23 +41,53 @@ private suspend fun OkHttpClient.send(url: HttpUrl): Response =
         throw InstagramException.Transient(e)
     }
 
-/** One HTTP response with the headers a classifier needs. [toString] omits the body: it is never logged. */
-internal class RawResponse(val code: Int, val location: String?, val contentType: String?, val body: String) {
-    override fun toString(): String = "RawResponse(code=$code, body=<${body.length} chars>)"
+/**
+ * One HTTP response with the headers a classifier needs. [bodyUnreadable] is true when the headers arrived but reading
+ * the body failed (a 3xx or 4xx only: see [getRaw]); [body] is then empty. [toString] omits the body: it is never logged.
+ */
+internal class RawResponse(
+    val code: Int,
+    val location: String?,
+    val contentType: String?,
+    val body: String,
+    val bodyUnreadable: Boolean = false,
+) {
+    override fun toString(): String =
+        if (bodyUnreadable) "RawResponse(code=$code, body=<unreadable>)" else "RawResponse(code=$code, body=<${body.length} chars>)"
+}
+
+/**
+ * What a 3xx or 4xx whose body could not be read still tells, from its headers alone: a rate limit, a login bounce or a
+ * challenge redirect keep their own classification. A plain 4xx (which with an empty body would be `ShapeChanged("http.400")`,
+ * a not-found to some callers) becomes `ShapeChanged("http.<code>.unreadable")`, because the lost body may have held a
+ * challenge or rate limit. One rule for [getJsonObject] and the Adapter lab.
+ */
+internal fun classifyUnreadable(code: Int, location: String?, contentType: String?): InstagramException {
+    val plain = "http.$code"
+    val classified = ErrorClassifier.classify(code, location, contentType, "")
+    return if (classified == null || (classified is InstagramException.ShapeChanged && classified.fieldPath == plain)) {
+        InstagramException.ShapeChanged("$plain.unreadable")
+    } else {
+        classified
+    }
 }
 
 /**
  * GETs [url] and returns the response as it is, whatever the status: classifying it is the caller's job (the Adapter
- * lab). Only an IOException, from connecting or from reading the body, throws, as [InstagramException.Transient].
+ * lab). A connect failure, and a body that can't be read on a 2xx or 5xx (worth a retry), throw
+ * [InstagramException.Transient]. An unreadable body on a 3xx or 4xx is a response with [RawResponse.bodyUnreadable]:
+ * its headers still say whether it was a rate limit, a login bounce or a challenge, and the caller must see that.
  */
 internal suspend fun OkHttpClient.getRaw(url: HttpUrl): RawResponse =
     send(url).use {
-        val body = try {
-            it.body.string()
+        val location = it.header("Location")
+        val contentType = it.header("Content-Type")
+        try {
+            RawResponse(it.code, location, contentType, it.body.string())
         } catch (e: IOException) {
-            throw InstagramException.Transient(e)
+            if (it.code !in 300..499) throw InstagramException.Transient(e)
+            RawResponse(it.code, location, contentType, body = "", bodyUnreadable = true)
         }
-        RawResponse(it.code, it.header("Location"), it.header("Content-Type"), body)
     }
 
 /** GETs [url] and returns its JSON object, or throws the InstagramException the response signals. */
@@ -69,17 +99,7 @@ internal suspend fun OkHttpClient.getJsonObject(url: HttpUrl): JsonObject {
         } catch (e: IOException) {
             // The headers already said what happened. Only a 2xx or 5xx is worth a retry; a redirect or a 4xx
             // (challenge, login, rate limit) must still stop the run even though its body could not be read.
-            if (it.code in 300..499) {
-                // With no body a plain 400 or 404 would classify as ShapeChanged("http.400"), which a caller may read as
-                // "not found". The body could have held a challenge or rate limit, so mark it unreadable instead.
-                val plain = "http.${it.code}"
-                val classified = ErrorClassifier.classify(it.code, it.header("Location"), it.header("Content-Type"), "")
-                throw if (classified == null || (classified is InstagramException.ShapeChanged && classified.fieldPath == plain)) {
-                    InstagramException.ShapeChanged("$plain.unreadable")
-                } else {
-                    classified
-                }
-            }
+            if (it.code in 300..499) throw classifyUnreadable(it.code, it.header("Location"), it.header("Content-Type"))
             throw InstagramException.Transient(e)
         }
         ErrorClassifier.classify(it.code, it.header("Location"), it.header("Content-Type"), body)?.let { error -> throw error }

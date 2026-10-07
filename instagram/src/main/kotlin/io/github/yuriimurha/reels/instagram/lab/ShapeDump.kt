@@ -82,32 +82,51 @@ internal object LabRules {
     /** The word list of FixtureGuardTest: nothing a lab result shows or saves may contain one, whatever the case. */
     fun hasForbiddenWord(text: String): Boolean = FORBIDDEN_WORDS.any { text.contains(it, ignoreCase = true) }
 
-    private val SAFE_NAME = Regex("[A-Za-z_][A-Za-z0-9_]{0,47}")
+    private val SAFE_NAME = Regex("[a-z_][a-z0-9_]{0,47}")
     private val LONG_DIGITS = Regex("[0-9]{5,}")
 
     /**
-     * True for a plain identifier: a schema key such as `image_versions2` or a query parameter such as `_nc_ht`. A key
-     * that is an id, a handle with dots, a token or a hash is data, not schema, and is redacted like a value.
+     * True for a name that looks like schema, not data: 1 to 48 characters from `a-z`, `0-9` and `_`, starting with a
+     * letter or `_`, with no run of 5 or more digits, not 16 or more characters long with a digit in it (hashes, tokens
+     * and ids glued to a prefix), and with no word of the fixture guard list. Any uppercase letter, dot, dash or
+     * non-ASCII character makes it data. This is a heuristic: a bare lowercase handle (`johndoe`, `jane_doe`) cannot
+     * be told from a schema key such as `product_type` and is kept.
      */
     fun isSafeName(name: String): Boolean =
-        SAFE_NAME.matches(name) && !LONG_DIGITS.containsMatchIn(name) && !hasForbiddenWord(name)
+        SAFE_NAME.matches(name) && !LONG_DIGITS.containsMatchIn(name) &&
+            !(name.length >= 16 && name.any { it in '0'..'9' }) && !hasForbiddenWord(name)
 
     /** How ShapeDump prints a key: itself when it is a schema name, else only its length and character class. */
     fun keyLabel(key: String): String = if (isSafeName(key)) key else "key(len ${key.length}, ${stringClass(key)})"
 
-    private val VISIBLE_TEXT = Regex("[A-Za-z0-9 _.,:;!?'()\\-]{0,200}")
-    private val HOSTISH = Regex("[A-Za-z0-9-]+\\.(?:com|net|org|io|me|co|dev|app|invalid)\\b", RegexOption.IGNORE_CASE)
+    private val ENUM_LIKE = Regex("[A-Za-z_]{1,40}")
+    private val SENTENCE = Regex("[A-Za-z0-9 .,:;!?'()\\-_]{0,200}")
+    private val DIGIT_SEPARATORS = Regex("[,\\- ]")
+    private val DIGIT_RUN = Regex("[0-9]{3,}")
+    private val WORD_SEPARATORS = Regex("[ ,;:!?'()\\-]+")
 
     /**
-     * Whether a string under a visible-value key may be shown: short plain text with no URL, no host, no handle, no
-     * long number (an id) and no forbidden word. Instagram's `message` is free text, so it gets this check.
+     * Whether a string under a visible-value key may be shown or kept: an enum-like value (1 to 40 letters and
+     * underscores, `clips`, `challenge_required`), or a plain sentence. A plain sentence is at most 200 ASCII
+     * characters; no word has a `.`, `_` or `@` inside it (a handle, a host, an address); no run of 3 or more digits
+     * even when written with `,`, `-` or spaces between them (an id); no two capitalised words in a row (a name); and
+     * no word of the fixture guard list. Instagram's `message` is free text, so it gets this check. A single bare
+     * lowercase word (`johndoe`) passes, as enum-like: it can't be told from an enum value.
      */
-    fun isVisibleString(text: String): Boolean =
-        VISIBLE_TEXT.matches(text) && !LONG_DIGITS.containsMatchIn(text) && !HOSTISH.containsMatchIn(text) &&
-            !hasForbiddenWord(text)
+    fun isVisibleString(text: String): Boolean {
+        if (hasForbiddenWord(text)) return false
+        if (ENUM_LIKE.matches(text)) return true
+        if (!SENTENCE.matches(text)) return false
+        if (DIGIT_RUN.containsMatchIn(text.replace(DIGIT_SEPARATORS, ""))) return false
+        val words = text.split(WORD_SEPARATORS).map { it.trim('.') }.filter { it.isNotEmpty() }
+        if (words.any { word -> word.any { it == '.' || it == '_' || it == '@' } }) return false
+        return words.zipWithNext().none { (a, b) -> isCapitalised(a) && isCapitalised(b) }
+    }
 
-    /** Counts and sizes are short. A long number under a visible key could be an id, so it is treated like any number. */
-    fun isVisibleNumber(text: String): Boolean = text.length <= 9
+    private fun isCapitalised(word: String): Boolean = word.length >= 2 && word[0] in 'A'..'Z'
+
+    /** Counts and sizes are short. A longer number under a visible key could be an id, so it is treated like any number. */
+    fun isVisibleNumber(text: String): Boolean = text.length <= 6
 
     fun stringClass(text: String): String = when {
         text.isNotEmpty() && text.all { it in '0'..'9' } -> "digits"

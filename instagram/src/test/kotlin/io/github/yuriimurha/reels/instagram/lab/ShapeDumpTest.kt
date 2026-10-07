@@ -131,6 +131,31 @@ class ShapeDumpTest {
     }
 
     @Test
+    fun digitGroupsNamesAndHostsInAVisibleStringAreHiddenOnScreenToo() {
+        val rows = listOf(
+            "Item 3,100,000,000,000,000,001 gone", "pk 3100-0000-0000-0000-001", "user 3100 0000 0000 0000 001", "Code 1234",
+            "John Doe", "john.doe", "Sorry, john.doe is private", "see evil.example.xyz now", "john.doe at gmail dot com",
+        )
+        for (row in rows) {
+            val shape = ShapeDump.of(JsonObject(mapOf("message" to JsonPrimitive(row))))
+            assertEquals("message string(len ${row.length}, text)", shape, row)
+        }
+    }
+
+    @Test
+    fun anEnumLikeValueUnderAVisibleKeyIsShownEvenWhenItLooksLikeAHandle() {
+        // Documented limit: a bare lowercase word under an enum-like key cannot be told from an enum value.
+        val shape = dump("""{"status":"johndoe","error_type":"jane_doe"}""")
+        assertEquals("status string = \"johndoe\"\nerror_type string = \"jane_doe\"", shape)
+    }
+
+    @Test
+    fun aVisibleNumberIsShownOnlyWithSixCharactersOrFewer() {
+        val shape = dump("""{"width":123456,"height":1234567,"status":250253201}""")
+        assertEquals("width number = 123456\nheight number(7 digits)\nstatus number(9 digits)", shape)
+    }
+
+    @Test
     fun aLongNumberUnderAVisibleKeyIsStillHidden() {
         val shape = dump("""{"width":1080,"height":3100000000000000001}""")
         assertTrue("width number = 1080" in shape, shape)

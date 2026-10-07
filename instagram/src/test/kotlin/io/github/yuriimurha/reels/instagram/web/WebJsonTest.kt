@@ -4,7 +4,6 @@ import io.github.yuriimurha.reels.instagram.InstagramException
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.SocketEffect
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -23,13 +22,7 @@ class WebJsonTest {
     @AfterTest
     fun stop() = server.close()
 
-    private fun cutOff(code: Int, location: String? = null): MockResponse =
-        MockResponse.Builder()
-            .code(code)
-            .apply { location?.let { addHeader("Location", it) } }
-            .body("x".repeat(4096))
-            .onResponseBody(SocketEffect.CloseSocket())
-            .build()
+    private fun cutOff(code: Int, location: String? = null): MockResponse = cutResponse(code, location)
 
     private suspend fun fetch() = client.getJsonObject(server.url("/api/v1/x/"))
 
@@ -111,16 +104,61 @@ class WebJsonTest {
     }
 
     @Test
-    fun getRawMapsAConnectFailureAndAnUnreadableBodyToTransient() = runTest {
-        server.enqueue(cutOff(200))
-        assertFailsWith<InstagramException.Transient> { client.getRaw(server.url("/api/v1/x/")) }
-        // Unlike getJsonObject, there is no classification from the headers: the caller gets either a response or Transient.
-        server.enqueue(cutOff(429))
-        assertFailsWith<InstagramException.Transient> { client.getRaw(server.url("/api/v1/x/")) }
-
+    fun getRawMapsAConnectFailureToTransient() = runTest {
         val dead = MockWebServer().apply { start() }
         val url = dead.url("/")
         dead.close()
         assertFailsWith<InstagramException.Transient> { client.getRaw(url) }
+    }
+
+    @Test
+    fun getRawStillThrowsTransientForAnUnreadable2xxOr5xxBody() = runTest {
+        server.enqueue(cutOff(200))
+        server.enqueue(cutOff(503))
+        assertFailsWith<InstagramException.Transient> { client.getRaw(server.url("/api/v1/x/")) }
+        assertFailsWith<InstagramException.Transient> { client.getRaw(server.url("/api/v1/x/")) }
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun getRawReportsAnUnreadable3xxOr4xxBodyAsAResponseSoItsHeadersStillCount() = runTest {
+        server.enqueue(cutOff(429))
+        server.enqueue(cutOff(403))
+        server.enqueue(cutOff(302, location = "/challenge/x/"))
+        val url = server.url("/api/v1/x/")
+
+        val limited = client.getRaw(url)
+        assertEquals(429, limited.code)
+        assertEquals(true, limited.bodyUnreadable)
+        assertEquals("", limited.body)
+        assertEquals("RawResponse(code=429, body=<unreadable>)", limited.toString())
+
+        assertEquals(403, client.getRaw(url).code)
+        val redirect = client.getRaw(url)
+        assertEquals(302, redirect.code)
+        assertEquals("/challenge/x/", redirect.location)
+        assertEquals(true, redirect.bodyUnreadable)
+        assertEquals(3, server.requestCount)
+    }
+
+    @Test
+    fun aReadableBodyIsNotMarkedUnreadable() = runTest {
+        server.enqueue(MockResponse.Builder().code(429).body("{}").build())
+        assertEquals(false, client.getRaw(server.url("/api/v1/x/")).bodyUnreadable)
+    }
+
+    @Test
+    fun anUnreadableBodyIsClassifiedFromTheHeadersAlone() {
+        assertIs<InstagramException.RateLimited>(classifyUnreadable(429, null, null))
+        assertIs<InstagramException.LoginRequired>(classifyUnreadable(401, null, null))
+        assertIs<InstagramException.LoginRequired>(classifyUnreadable(403, null, null))
+        assertIs<InstagramException.LoginRequired>(classifyUnreadable(302, "/accounts/login/?next=/", null))
+        val challenge = assertIs<InstagramException.ChallengeRequired>(classifyUnreadable(302, "/challenge/x/", null))
+        assertEquals("https://www.instagram.com/challenge/x/", challenge.challengeUrl)
+        assertIs<InstagramException.ChallengeRequired>(classifyUnreadable(301, null, null))
+        // A plain 4xx is marked unreadable, never a bare http.<code> a caller could read as "not found".
+        for (code in listOf(400, 404, 410, 418)) {
+            assertEquals("http.$code.unreadable", assertIs<InstagramException.ShapeChanged>(classifyUnreadable(code, null, null)).fieldPath)
+        }
     }
 }

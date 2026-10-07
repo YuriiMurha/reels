@@ -3,6 +3,7 @@ package io.github.yuriimurha.reels.instagram.lab
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
 import io.github.yuriimurha.reels.instagram.web.InMemoryCookieStore
+import io.github.yuriimurha.reels.instagram.web.cutResponse
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -11,7 +12,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.SocketEffect
 import okhttp3.OkHttpClient
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -154,6 +154,54 @@ class AdapterLabTest {
         assertFalse("/challenge/x/" in result.shape)
         assertFalse("/challenge/x/" in assertNotNull(result.scrubbedJson))
         assertFalse("/challenge/x/" in result.toString())
+    }
+
+    private fun cut(code: Int, location: String? = null): MockResponse = cutResponse(code, location)
+
+    @Test
+    fun aRateLimitWhoseBodyIsCutIsStillRateLimitedSoTheCooldownArms() = runTest {
+        server.enqueue(cut(429))
+        val result = lab().run(LabCall.SAVED_ALL, null)
+        assertEquals(429, result.httpCode)
+        assertEquals("RateLimited", result.classification)
+        assertIs<InstagramException.RateLimited>(result.error)
+        assertEquals("(unreadable body)", result.shape)
+        assertNull(result.scrubbedJson)
+        assertNull(result.ids.firstMediaPk)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun aForbiddenWhoseBodyIsCutIsStillLoginRequired() = runTest {
+        server.enqueue(cut(403))
+        val result = lab().run(LabCall.COLLECTIONS, null)
+        assertEquals(403, result.httpCode)
+        assertEquals("LoginRequired", result.classification)
+        assertIs<InstagramException.LoginRequired>(result.error)
+        assertEquals("(unreadable body)", result.shape)
+        assertNull(result.scrubbedJson)
+    }
+
+    @Test
+    fun aChallengeRedirectWhoseBodyIsCutIsStillAChallenge() = runTest {
+        server.enqueue(cut(302, location = "/challenge/x/"))
+        val result = lab().run(LabCall.MEDIA_INFO, mediaPk)
+        assertEquals(302, result.httpCode)
+        assertEquals("ChallengeRequired", result.classification)
+        val error = assertIs<InstagramException.ChallengeRequired>(result.error)
+        assertEquals("https://www.instagram.com/challenge/x/", error.challengeUrl)
+        assertEquals("(unreadable body)", result.shape)
+        assertNull(result.scrubbedJson)
+        assertFalse("/challenge/x/" in result.toString())
+    }
+
+    @Test
+    fun aPlainClientErrorWhoseBodyIsCutIsAnUnreadableShapeChangeNotANotFound() = runTest {
+        server.enqueue(cut(400))
+        val result = lab().run(LabCall.MEDIA_INFO, mediaPk)
+        assertEquals("ShapeChanged", result.classification)
+        assertEquals("http.400.unreadable", assertIs<InstagramException.ShapeChanged>(result.error).fieldPath)
+        assertEquals("(unreadable body)", result.shape)
     }
 
     @Test
@@ -315,6 +363,7 @@ class AdapterLabTest {
         for (text in listOf(result.shape, result.scrubbedJson!!, result.toString())) {
             words.forEach { assertFalse(text.contains(it, ignoreCase = true), "'$it' in $text") }
         }
+        assertFalse(result.shape.startsWith("(withheld"), "the shape was withheld instead of being clean: ${result.shape}")
         // The id was still found for chaining: only the saved text is clean.
         assertEquals(mediaPk, result.ids.firstMediaPk)
     }
@@ -364,9 +413,7 @@ class AdapterLabTest {
         val unreachable = AdapterLab({ HttpClientFactory.create(cookies, "test-agent") }, cookies, base = url)
         assertFailsWith<InstagramException.Transient> { unreachable.run(LabCall.SAVED_ALL, null) }
 
-        server.enqueue(
-            MockResponse.Builder().code(200).body("x".repeat(4096)).onResponseBody(SocketEffect.CloseSocket()).build(),
-        )
+        server.enqueue(cut(200))
         assertFailsWith<InstagramException.Transient> { lab().run(LabCall.SAVED_ALL, null) }
         assertEquals(1, server.requestCount)
     }
