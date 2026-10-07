@@ -1,9 +1,17 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.room)
+}
+
+// Release signing (P10). keystore.properties is gitignored and written by the owner (see README, "Release build"); without it
+// the release build is signed with the debug key.
+val keystoreProperties = rootProject.file("keystore.properties").takeIf { it.isFile }?.let { file ->
+    Properties().apply { file.inputStream().use(::load) }
 }
 
 android {
@@ -19,8 +27,23 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        if (keystoreProperties != null) {
+            // A key missing from the file fails here by name, not as a bare null further down.
+            fun required(key: String) = checkNotNull(keystoreProperties.getProperty(key)) { "keystore.properties has no '$key'" }
+            create("release") {
+                storeFile = rootProject.file(required("storeFile"))
+                storePassword = required("storePassword")
+                keyAlias = required("keyAlias")
+                keyPassword = required("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // P10: without keystore.properties the release build is signed with the debug key, so installRelease still works.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
@@ -79,6 +102,8 @@ dependencies {
     implementation(libs.media3.database)
     implementation(libs.media3.ui.compose)
     implementation(libs.coil.compose)
+    // Installs the baseline profiles (the libraries' own and baseline-prof.txt) on a sideloaded build, which Play would otherwise do (P9).
+    implementation(libs.androidx.profileinstaller)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 

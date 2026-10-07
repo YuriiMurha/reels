@@ -11,6 +11,7 @@ paging = "3.5.1"
 work = "2.12.0"
 datastore = "1.2.1"
 media3 = "1.11.1"
+profileinstaller = "1.4.1"
 coreKtx = "1.19.1"
 coil = "3.6.3"
 okhttp = "5.5.0"
@@ -60,6 +61,7 @@ kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-t
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }
 junit = { module = "junit:junit", version.ref = "junit" }
 robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
+androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "profileinstaller" }
 androidx-test-core = { module = "androidx.test:core-ktx", version.ref = "androidxTestCore" }
 androidx-test-ext-junit = { module = "androidx.test.ext:junit-ktx", version.ref = "androidxTestExtJunit" }
 

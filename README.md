@@ -20,7 +20,7 @@ Current state: [`ARCHITECTURE.md`](ARCHITECTURE.md). Plan: [`TODO.md`](TODO.md).
 | M2 Session | Code done. Logging in through Instagram's own page (or pasting a `sessionid`) needs your on-phone check (see below). |
 | M3–M4 Real sync | In progress. The real backend and its thumbnail downloader are wired in, behind **Mock mode** (debug builds, see section 3). It has not been run against Instagram yet, and the engine's safety gates in [`TODO.md`](TODO.md) are not all in. |
 | M5 Video | Code done: reels play on demand and are cached. Needs your on-phone check (see **Watching**). |
-| M6 (release build) | Not started. |
+| M6 (release build) | Code done: `installRelease` builds a minified, baseline-profiled app (section 7). Needs your signing key and an on-phone look at scrolling. |
 
 A debug build starts in Mock mode: the library you see comes from the fake backend, and tapping **Sync** fills it with
 generated placeholder items and never contacts Instagram. Turning Mock mode off (on the phone only) switches to the real
@@ -254,6 +254,58 @@ screenshot) to a Claude session and ask it to answer the seven spike questions i
 working endpoints and headers, whether saved items carry `saved_collection_ids`, whether a save timestamp exists, the
 page size and cursor, the media-type mapping, the error payload formats, and the CDN expiry parameter. The answers
 get recorded in `ARCHITECTURE.md` and `TODO.md`, and the files you have read become test fixtures.
+
+## 7. Release build (optional)
+
+A release build is minified (R8), carries a baseline profile that Android compiles ahead of time on first launch
+(`androidx.profileinstaller` installs it on a sideloaded app; the rules are the hand-written
+`app/src/main/baseline-prof.txt`), and always uses the real library: it has no Mock mode. Until you have logged in
+(section 4), **Sync** says "Not logged in" and **Sync**/**Full sync** are disabled. It needs no key to try: **without
+`keystore.properties`, the release build is signed with the debug key**, so `installRelease` replaces an installed debug
+build and keeps the app's data.
+
+```bash
+ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installRelease
+```
+
+To sign with your own key instead, do this once. The key and its passwords are yours to create: nothing in the repo
+generates or stores them, and both files below are gitignored.
+
+1. From the repo root (the folder with `gradlew`), create the key. `keytool` asks you to choose a keystore password and a
+   key password, and for some details about you (any answers will do). It writes `reels-release.jks` here. It uses the
+   `JAVA_HOME` from step 1.4:
+
+   ```bash
+   "$JAVA_HOME/bin/keytool" -genkeypair -v -keystore reels-release.jks -keyalg RSA -keysize 4096 -validity 10000 -alias reels
+   ```
+
+2. Create `keystore.properties` in the same folder with these four keys, and fill in the two passwords you just chose
+   in that file. `storeFile` is relative to the repo root:
+
+   ```properties
+   storeFile=reels-release.jks
+   storePassword=
+   keyAlias=reels
+   keyPassword=
+   ```
+
+3. Keep a copy of `reels-release.jks` and both passwords outside the repo. If they are lost, the app installed with that
+   key can't be updated: it has to be uninstalled first.
+4. A build signed with your key and a build signed with the debug key can't replace each other. **Switching between them
+   needs an uninstall, which deletes the library and the session** (you log in and sync again):
+
+   ```bash
+   adb -d uninstall io.github.yuriimurha.reels
+   ```
+
+5. Install it on the phone:
+
+   ```bash
+   ANDROID_SERIAL="$(adb -d get-serialno)" ./gradlew installRelease
+   ```
+
+If `keystore.properties` lacks one of the four keys, Gradle stops and names it. A crash report from a release build
+shows short, meaningless names; `app/build/outputs/mapping/release/mapping.txt` (written by the build) maps them back.
 
 ## Troubleshooting
 
