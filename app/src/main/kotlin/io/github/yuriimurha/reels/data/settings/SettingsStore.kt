@@ -8,13 +8,18 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
+import io.github.yuriimurha.reels.sync.pacing.Cooldowns
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import java.io.File
 
 data class CooldownState(val until: Long?, val lastRateLimitAt: Long?)
 
@@ -72,11 +77,31 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         private val SESSION_HANDLE = stringPreferencesKey("session_handle")
         private val SESSION_CHALLENGE_URL = stringPreferencesKey("session_challenge_url")
 
-        fun create(context: Context): SettingsStore = SettingsStore(
+        fun create(context: Context): SettingsStore = open(produceFile = { context.preferencesDataStoreFile("settings") })
+
+        /** [scope] and [now] are only overridden by tests. */
+        internal fun open(
+            scope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
+            now: () -> Long = System::currentTimeMillis,
+            produceFile: () -> File,
+        ): SettingsStore = SettingsStore(
             PreferenceDataStoreFactory.create(
-                corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
-                produceFile = { context.preferencesDataStoreFile("settings") },
+                corruptionHandler = ReplaceFileCorruptionHandler { corruptionFallback(now()) },
+                scope = scope,
+                produceFile = produceFile,
             ),
+        )
+
+        /**
+         * What replaces a settings file that cannot be read (ruling R54). Wiping it would silently end an active
+         * cooldown, even a 24 h one, so the replacement assumes the worst case: a rate limit just happened.
+         * `cooldown_until` is [Cooldowns.SHORT_MS] (spec 7.3's 1 h) from [now], and `last_rate_limit_at` is [now], so a
+         * rate limit within the next 24 h escalates straight to the 24 h tier. The session keys stay empty: no kind
+         * reads as LoggedOut, and validation sorts that out once the cooldown ends.
+         */
+        internal fun corruptionFallback(now: Long): Preferences = preferencesOf(
+            COOLDOWN_UNTIL to now + Cooldowns.SHORT_MS,
+            LAST_RATE_LIMIT_AT to now,
         )
     }
 }
