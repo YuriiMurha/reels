@@ -207,7 +207,9 @@ private fun RunProgress(run: SyncRunEntity, pacer: PacerStatus?) {
         Line("Thumbnails cached", run.thumbsCached.toString())
         Line("Failures", run.failures.toString())
         if (pacer != null) {
-            Line("Requests this run", "${run.requestsUsed} / ${pacer.perRunBudget}")
+            // requestsUsed is cumulative over every attempt of the run; the per-run budget restarts on each resume, and
+            // PacerStatus has no per-attempt count, so no "/ perRunBudget" here (it could read 420 / 300).
+            Line("Requests (all attempts)", run.requestsUsed.toString())
             Line("Requests in 24 h", "${pacer.requestsLast24h} / ${pacer.dailyBudget}")
         }
     }
