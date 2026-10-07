@@ -60,6 +60,8 @@ class SyncEngine(
      * only the exception class. Only cancellation propagates (after the run is left PAUSED, "Cancelled").
      */
     suspend fun run(runId: Long) {
+        // The session this run starts under. Every signal below carries it, so one that outlives a logout or a paste is ignored.
+        val epoch = signals.epoch()
         val stored = checkNotNull(syncDao.run(runId)) { "No sync run $runId" }
         val progress = Progress(
             stored.copy(status = SyncStatus.RUNNING, lastError = null, finishedAt = null, collectionsDone = 0),
@@ -68,7 +70,8 @@ class SyncEngine(
         progress.save()
         try {
             progress.phase("Checking session")
-            call(progress) { client.currentUser() }
+            val account = call(progress) { client.currentUser() }
+            notifySession { signals.sessionOk(account.username, epoch) }
             progress.phase("Listing collections")
             val collections = fetchCollections(progress)
             val scopes = listOf(ALL_SAVED_ID to "All Saved") +
@@ -82,10 +85,10 @@ class SyncEngine(
             throw e
         } catch (e: InstagramException.ChallengeRequired) {
             progress.finish(SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification")
-            notifySession { signals.challengeRequired(e.challengeUrl) }
+            notifySession { signals.challengeRequired(e.challengeUrl, epoch) }
         } catch (e: InstagramException.LoginRequired) {
             progress.finish(SyncStatus.STOPPED_LOGIN, "Session expired")
-            notifySession { signals.loginRequired() }
+            notifySession { signals.loginRequired(epoch) }
         } catch (e: InstagramException.RateLimited) {
             progress.finish(SyncStatus.STOPPED_RATE_LIMIT, "Instagram is limiting requests")
         } catch (e: PacerRefusal.CoolingDown) {
@@ -105,8 +108,8 @@ class SyncEngine(
     }
 
     /**
-     * Tells the session layer about a stop whose status is already written. A failing receiver must not
-     * change that status or escape; cancellation still propagates.
+     * Tells the session layer what the run learned: a successful session check, or a stop whose status is already written.
+     * A failing receiver must not change that status or end the run, and must not escape; cancellation still propagates.
      */
     private suspend fun notifySession(signal: suspend () -> Unit) {
         try {

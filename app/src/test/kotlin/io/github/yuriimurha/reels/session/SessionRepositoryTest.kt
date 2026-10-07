@@ -120,7 +120,7 @@ class SessionRepositoryTest {
         val repository = repository()
         repository.validate()
         cookies.clearAll()
-        repository.loginRequired()
+        repository.loginRequired(repository.epoch())
         assertEquals(SessionState.LoggedOut, repository.state.first())
     }
 
@@ -394,10 +394,117 @@ class SessionRepositoryTest {
         signedIn()
         val repository = repository()
         repository.validate()
-        repository.challengeRequired("https://www.instagram.com/challenge/z/")
+        repository.challengeRequired("https://www.instagram.com/challenge/z/", repository.epoch())
         assertEquals(SessionState.Challenge("https://www.instagram.com/challenge/z/", "tester"), repository.state.first())
-        repository.loginRequired()
+        repository.loginRequired(repository.epoch())
         assertEquals(SessionState.Expired("tester"), repository.state.first())
+    }
+
+    @Test
+    fun staleEpochSignalsAreIgnored() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        val old = repository.epoch()
+        repository.logout()
+        assertNotEquals(old, repository.epoch(), "a logout starts a new epoch")
+        // The owner is logged in again (a new session, in the jar): a run that began under the old one must not touch it.
+        signedIn("s2", "43")
+        repository.loginRequired(old)
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a stale loginRequired must not expire the new login")
+        repository.challengeRequired("https://www.instagram.com/challenge/z/", old)
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a stale challengeRequired must not replace the new login's state")
+    }
+
+    @Test
+    fun aPasteAndItsRollbackEachStartANewEpoch() = runTest {
+        signedIn()
+        val repository = repository()
+        val before = repository.epoch()
+        probe.next = { throw InstagramException.LoginRequired() }
+        repository.pasteSessionId("43%3Acd") // rejected and rolled back
+        assertTrue(repository.epoch() >= before + 2, "the paste and its rollback both replaced the session")
+        repository.loginRequired(before)
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a signal from before the paste is stale")
+    }
+
+    @Test
+    fun currentEpochSignalsAreApplied() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.validate()
+        repository.loginRequired(repository.epoch())
+        assertEquals(SessionState.Expired("tester"), repository.state.first())
+    }
+
+    @Test
+    fun sessionOkRestoresValidAfterAStaleExpiredBanner() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        // An earlier run (or the lab) left the banner at Expired, but this run's currentUser just succeeded.
+        repository.loginRequired(repository.epoch())
+        assertEquals(SessionState.Expired("tester"), repository.state.first())
+        cookies.events.clear()
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+        assertEquals(listOf("flush"), cookies.events, "Valid is stored, so the jar is flushed with it (R45); nothing else is written")
+    }
+
+    @Test
+    fun sessionOkStoresTheHandleWhenNothingIsStoredYet() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.sessionOk("tester", repository.epoch())
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+        assertEquals(1, cookies.flushes)
+    }
+
+    @Test
+    fun sessionOkWritesNothingWhenTheStateIsAlreadyValidForThatHandle() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        cookies.events.clear()
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(SessionState.Valid("tester"), repository.state.first())
+        assertEquals(emptyList(), cookies.events, "every successful sync would otherwise flush the jar and rewrite the settings")
+    }
+
+    @Test
+    fun sessionOkIgnoredAfterLogout() = runTest {
+        signedIn()
+        val repository = repository()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        val old = repository.epoch()
+        repository.logout()
+        // A new login is in the jar by the time the old run's answer arrives.
+        signedIn("s2", "43")
+
+        repository.sessionOk("tester", old)
+
+        assertEquals(SessionState.LoggedOut, repository.state.first(), "a run that began before the logout cannot log the owner back in")
+        assertEquals(emptyList(), cookies.events, "and it must not flush the new session's cookies either")
+    }
+
+    @Test
+    fun sessionOkIgnoredWithoutSessionCookies() = runTest {
+        signedIn()
+        val repository = repository()
+        repository.validate()
+        repository.loginRequired(repository.epoch())
+        // The jar lost its session without going through logout (the WebView cleared it, say): same epoch, no cookies.
+        cookies.clearAll()
+        cookies.events.clear()
+
+        repository.sessionOk("tester", repository.epoch())
+
+        assertEquals(SessionState.Expired("tester"), repository.state.first())
+        assertEquals(emptyList(), cookies.events)
     }
 
     @Test

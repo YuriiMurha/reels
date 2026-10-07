@@ -115,7 +115,7 @@ class AppContainer(context: Context) {
     }
 
     fun syncEngine(): SyncEngine {
-        // Exhaustive on purpose: a new backend forces a decision about session signals. Task 9 adds the session epochs.
+        // Exhaustive on purpose: a new backend forces a decision about session signals (the real one's carry the session epoch).
         val signals: SessionSignals = when (backend) {
             is Backend.Fake -> SessionSignals.None
             is Backend.Real -> session

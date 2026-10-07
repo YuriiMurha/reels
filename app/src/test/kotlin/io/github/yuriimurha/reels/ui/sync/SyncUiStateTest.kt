@@ -66,4 +66,48 @@ class SyncUiStateTest {
             syncUiState(run(SyncStatus.STOPPED_SHAPE, "Adapter needs repair: items[0].code"), pacer(), now).banner,
         )
     }
+
+    @Test
+    fun sessionNotReadyDisablesStartAndExplains() {
+        val ui = syncUiState(null, pacer(), now, sessionReady = false)
+        assertFalse(ui.canStart)
+        assertEquals("Log in to Instagram to sync", ui.banner)
+        assertTrue(ui.canDeleteLibrary, "managing the local library needs no session")
+    }
+
+    @Test
+    fun aSessionIsReadyByDefault() {
+        val ui = syncUiState(null, pacer(), now)
+        assertTrue(ui.canStart)
+        assertNull(ui.banner)
+        assertTrue(syncUiState(null, pacer(), now, sessionReady = true).canStart)
+    }
+
+    @Test
+    fun otherBannersWinOverTheLoginHint() {
+        assertEquals(
+            "Cooling down after a rate limit: 2 min left",
+            syncUiState(null, pacer(cooldownUntil = now + 90_000), now, sessionReady = false).banner,
+        )
+        assertEquals(
+            "Session expired. Log in again, then tap Resume.",
+            syncUiState(run(SyncStatus.STOPPED_LOGIN), pacer(), now, sessionReady = false).banner,
+        )
+        assertEquals("24-hour budget reached", syncUiState(run(SyncStatus.PAUSED, "24-hour budget reached"), pacer(), now, sessionReady = false).banner)
+    }
+
+    @Test
+    fun aPausedRunCanBeDiscardedButNotResumedWithoutASession() {
+        val ui = syncUiState(run(SyncStatus.PAUSED, "Cancelled"), pacer(), now, sessionReady = false)
+        assertTrue(ui.resumable)
+        assertFalse(ui.canStart, "Resume is a request to Instagram too")
+        assertTrue(ui.canDiscard)
+    }
+
+    @Test
+    fun aRunningSyncCanStillBeCancelledWhateverTheSessionSays() {
+        val ui = syncUiState(run(SyncStatus.RUNNING), pacer(), now, sessionReady = false)
+        assertTrue(ui.canCancel)
+        assertFalse(ui.canStart)
+    }
 }

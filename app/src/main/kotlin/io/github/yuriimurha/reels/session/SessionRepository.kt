@@ -44,8 +44,14 @@ class SessionRepository(
      */
     private val lock = Mutex()
 
-    /** Bumped, under [lock], whenever the jar's session is replaced or forgotten: logout, a paste and a paste's rollback. */
+    /**
+     * Bumped, under [lock], whenever the jar's session is replaced or forgotten: logout, a paste and a paste's rollback.
+     * Volatile so [epoch] can be read without the lock, at the start of a run, even while a paste holds it.
+     */
+    @Volatile
     private var sessionEpoch = 0
+
+    override fun epoch(): Int = sessionEpoch
 
     override fun currentSessionFingerprint(): String? = sessionId()?.let(::fingerprintOf)
 
@@ -119,14 +125,33 @@ class SessionRepository(
         }
     }
 
-    override suspend fun loginRequired() {
+    /**
+     * A session check made by a run succeeded. Restores `Valid` after a banner an earlier run (or the lab) left behind. The
+     * stored state is only touched when it would change, so a run that finishes under an already-valid session does no
+     * write. Cookies are flushed with it, as for any `Valid` result (R45). Ignored for a stale [epoch] and when the jar holds
+     * no session, so a run that began before a logout can never log the owner back in.
+     */
+    override suspend fun sessionOk(username: String, epoch: Int) {
         lock.withLock {
+            if (epoch != sessionEpoch || !hasSessionCookies()) return
+            if (state.first() == SessionState.Valid(username)) return
+            cookies.flush()
+            store(SessionState.Valid(username))
+        }
+    }
+
+    override suspend fun loginRequired(epoch: Int) {
+        lock.withLock {
+            if (epoch != sessionEpoch) return
             store(if (hasSessionCookies()) SessionState.Expired(state.first().handle) else SessionState.LoggedOut)
         }
     }
 
-    override suspend fun challengeRequired(challengeUrl: String?) {
-        lock.withLock { store(SessionState.Challenge(challengeUrl, state.first().handle)) }
+    override suspend fun challengeRequired(challengeUrl: String?, epoch: Int) {
+        lock.withLock {
+            if (epoch != sessionEpoch) return
+            store(SessionState.Challenge(challengeUrl, state.first().handle))
+        }
     }
 
     private suspend fun probeSession(handle: String?): SessionState = try {

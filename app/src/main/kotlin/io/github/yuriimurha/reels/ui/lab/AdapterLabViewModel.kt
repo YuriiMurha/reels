@@ -125,6 +125,8 @@ class AdapterLabViewModel(
 
     private suspend fun execute(call: LabCall, arg: String?) {
         if (sessionState.first() !is SessionState.Valid) return
+        // Read before the request, not after: a logout or paste while it is in flight must make this answer stale.
+        val epoch = signals.epoch()
         var answer: LabResult? = null
         var failure: Exception? = null
         try {
@@ -184,8 +186,8 @@ class AdapterLabViewModel(
         // only; it is never put in the state.
         try {
             when (problem) {
-                is InstagramException.ChallengeRequired -> signals.challengeRequired(problem.challengeUrl)
-                is InstagramException.LoginRequired -> signals.loginRequired()
+                is InstagramException.ChallengeRequired -> signals.challengeRequired(problem.challengeUrl, epoch)
+                is InstagramException.LoginRequired -> signals.loginRequired(epoch)
                 else -> Unit
             }
         } catch (e: CancellationException) {

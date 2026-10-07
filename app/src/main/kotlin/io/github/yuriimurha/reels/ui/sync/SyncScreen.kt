@@ -45,6 +45,7 @@ import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.di.Backend
 import io.github.yuriimurha.reels.di.ProcessRestart
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.session.SessionState
@@ -68,6 +69,7 @@ fun SyncScreen(
                 container.library,
                 container.backend.pacer,
                 container.session,
+                requiresSession = container.backend is Backend.Real,
                 mockSwitch = container.mockModeSwitch { ProcessRestart.restart(appContext) }.takeIf { BuildConfig.DEBUG },
             )
         }

@@ -88,6 +88,7 @@ class SyncScreenLoginTest {
             LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
             pacer,
             SessionRepository(cookies, probe, pacer, settings),
+            requiresSession = false,
         )
         compose.setContent {
             ReelsTheme {

@@ -149,7 +149,11 @@ class SyncEngineTest {
         assertEquals(SyncStatus.STOPPED_CHALLENGE, run.status)
         assertEquals(failAt, client.calls.size, "no request after a challenge")
         assertTrue(gone in pks(ALL_SAVED_ID), "an interrupted walk must not delete")
-        assertEquals(listOf("challenge:https://www.instagram.com/challenge/x/"), signals.events)
+        assertEquals(
+            listOf("ok:test_account@5", "ok:test_account@5", "challenge:https://www.instagram.com/challenge/x/@5"),
+            signals.events,
+            "one sessionOk per run (the first QUICK run and this FULL one), then the stop",
+        )
     }
 
     @Test
@@ -217,8 +221,87 @@ class SyncEngineTest {
         client.failures = FakeFailures { if (it == 1) InstagramException.LoginRequired() else null }
         val run = runSync(engine(client), SyncMode.QUICK)
         assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
-        assertEquals(listOf("login"), signals.events)
+        assertEquals(listOf("login@5"), signals.events, "the very first request failed: no session check succeeded, so no sessionOk")
         assertEquals(1, client.calls.size)
+    }
+
+    @Test
+    fun successfulCurrentUserSignalsSessionOk() = runTest {
+        val client = smallClient()
+        val run = runSync(engine(client), SyncMode.QUICK)
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(listOf("ok:test_account@5"), signals.events, "once per run, with the account's handle and the run's epoch")
+    }
+
+    @Test
+    fun sessionOkCarriesTheEpochTheRunStartedWith() = runTest {
+        val client = smallClient()
+        // The owner logs out while the session check is in flight: its "ok" is for a session that is gone.
+        client.failures = FakeFailures {
+            if (it == 1) signals.current = 6
+            null
+        }
+        runSync(engine(client), SyncMode.QUICK)
+        assertEquals("ok:test_account@5", signals.events.first(), "read at the start of the run, so the session layer can tell it is stale")
+    }
+
+    @Test
+    fun sessionOkIsSignalledBeforeTheRunsNextRequest() = runTest {
+        val client = smallClient()
+        val seen = mutableMapOf<Int, List<String>>()
+        client.failures = FakeFailures { call ->
+            seen[call] = signals.events.toList()
+            null
+        }
+        runSync(engine(client), SyncMode.QUICK)
+        assertEquals(emptyList(), seen[1], "nothing is signalled before currentUser answers")
+        assertEquals(listOf("ok:test_account@5"), seen[2], "the next request (the collection list) starts after the signal")
+    }
+
+    @Test
+    fun noSessionOkWhenTheSessionCheckFails() = runTest {
+        for (failure in listOf(InstagramException.RateLimited(), InstagramException.Transient(), InstagramException.ShapeChanged("user"))) {
+            signals.events.clear()
+            val client = smallClient()
+            client.failures = FakeFailures { failure } // every attempt fails, so a Transient is not rescued by its retry
+            runSync(engine(client), SyncMode.QUICK)
+            assertEquals(emptyList(), signals.events, "$failure")
+        }
+    }
+
+    @Test
+    fun stopSignalsCarryTheRunsEpoch() = runTest {
+        val client = smallClient()
+        // The owner logs out and logs in again while the run is in flight: the session layer's epoch moves on.
+        client.failures = FakeFailures {
+            if (it == 3) {
+                signals.current = 6
+                InstagramException.LoginRequired()
+            } else {
+                null
+            }
+        }
+        val run = runSync(engine(client), SyncMode.QUICK)
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals(listOf("ok:test_account@5", "login@5"), signals.events, "the run started under epoch 5, so every signal says 5")
+
+        signals.events.clear()
+        val failAt = client.calls.size + 3 // currentUser, collections, then the first page of the new run fails
+        client.failures = FakeFailures {
+            if (it == failAt) {
+                signals.current = 8
+                InstagramException.ChallengeRequired("https://www.instagram.com/challenge/x/")
+            } else {
+                null
+            }
+        }
+        val next = runSync(engine(client), SyncMode.QUICK)
+        assertEquals(SyncStatus.STOPPED_CHALLENGE, next.status)
+        assertEquals(
+            listOf("ok:test_account@6", "challenge:https://www.instagram.com/challenge/x/@6"),
+            signals.events,
+            "this run started under epoch 6 (what the first run's logout left behind)",
+        )
     }
 
     @Test
@@ -864,20 +947,33 @@ class SyncEngineTest {
     }
 
     private class ThrowingSignals : SessionSignals {
-        override suspend fun loginRequired(): Unit = error("signal sink is broken")
+        override fun epoch(): Int = 1
 
-        override suspend fun challengeRequired(challengeUrl: String?): Unit = error("signal sink is broken")
+        override suspend fun sessionOk(username: String, epoch: Int): Unit = error("signal sink is broken")
+
+        override suspend fun loginRequired(epoch: Int): Unit = error("signal sink is broken")
+
+        override suspend fun challengeRequired(challengeUrl: String?, epoch: Int): Unit = error("signal sink is broken")
     }
 
+    /** Records each signal with the epoch it carried ("login@5"). [current] is what the session layer's epoch is right now. */
     private class RecordingSignals : SessionSignals {
         val events = mutableListOf<String>()
 
-        override suspend fun loginRequired() {
-            events += "login"
+        var current = 5
+
+        override fun epoch(): Int = current
+
+        override suspend fun sessionOk(username: String, epoch: Int) {
+            events += "ok:$username@$epoch"
         }
 
-        override suspend fun challengeRequired(challengeUrl: String?) {
-            events += "challenge:$challengeUrl"
+        override suspend fun loginRequired(epoch: Int) {
+            events += "login@$epoch"
+        }
+
+        override suspend fun challengeRequired(challengeUrl: String?, epoch: Int) {
+            events += "challenge:$challengeUrl@$epoch"
         }
     }
 }

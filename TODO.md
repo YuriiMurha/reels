@@ -31,12 +31,12 @@
   - [x] Gate: seed `lastRequestEndedAt` from `RequestLog`
   - [x] Gate: `Backend.Real` reuses `AppContainer.instagramPacer`, with a guard test, and the Sync screen shows that Pacer
   - [x] Gate: a proportional reconcile guard (P7/R71: a FULL All Saved reconcile that would remove at least 20 items and more than half of the items that existed before the run is refused as `STOPPED_SHAPE`)
-  - [ ] Gate: engine signals carry the session epoch
-  - [ ] Gate: logout stops a running sync
-  - [ ] Gate: a "session OK" signal from a sync's `currentUser`
+  - [x] Gate: engine signals carry the session epoch
+  - [x] Gate: logout stops a running sync
+  - [x] Gate: a "session OK" signal from a sync's `currentUser`
   - [x] Gate: CDN `RateLimited`/timeout handling inside the thumbnail try (a 429 stops thumbnail fetches for the rest of the run; a download timeout is one failed thumbnail)
   - [x] Gate: 421 coalesced-connection re-send. API client: one host per client (P6, pinned in Task 3). CDN client (many hosts, so P6 doesn't cover it): `HttpClientFactory.createCdn` turns a 421 into an IOException, strips a 503 `Retry-After`, follows no redirects and does no connection retries, so every download is one request (pinned by MockWebServer tests)
-  - [ ] Gate: redact request lines if a challenge URL is ever requested through OkHttp
+  - [x] Gate: redact request lines if a challenge URL is ever requested through OkHttp (moot: redirects are never followed, the API client only requests `/api/v1/` paths on one host (P6), and challenge URLs only ever open in the WebView, never through OkHttp)
   - [ ] Check on the phone (R72): strategy B's per-collection FULL reconcile has no proportion guard (it removes memberships only; the next good Full sync rebuilds them, and a legitimately emptied collection must still mirror), so confirm that each collection feed ends correctly (`more_available` false on the last page, not a truncated feed)
 - [ ] M5 Video: on-demand playback, link refresh, `pk`-keyed cache
   - [ ] Gate: `mediaInfo` needs a not-found outcome

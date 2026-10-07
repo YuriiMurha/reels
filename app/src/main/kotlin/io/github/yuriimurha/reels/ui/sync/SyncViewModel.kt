@@ -57,6 +57,11 @@ class SyncViewModel(
     private val library: LibraryRepository,
     private val pacer: Pacer,
     private val session: SessionRepository,
+    /**
+     * True for the real backend: Sync and Resume are off until the stored session is Valid. False for the fake library
+     * (Mock mode), which never touches Instagram and so needs no login.
+     */
+    private val requiresSession: Boolean,
     /** The Developer section's Mock mode switch (debug builds); null offers none. */
     private val mockSwitch: MockModeSwitch? = null,
     private val now: () -> Long = System::currentTimeMillis,
@@ -85,8 +90,15 @@ class SyncViewModel(
 
     val pacerStatus: StateFlow<PacerStatus?> = tick.map { it?.status }.stateIn(viewModelScope, sharing, null)
 
-    val ui: StateFlow<SyncUiState> = combine(run, tick) { r, t -> syncUiState(r, t?.status, t?.at ?: now()) }
-        .stateIn(viewModelScope, sharing, syncUiState(null, null, now()))
+    /** The stored session state; null until it has been read (the screen offers no session button before that). */
+    val sessionState: StateFlow<SessionState?> = session.state.stateIn(viewModelScope, sharing, null)
+
+    /** Null (still loading) is not ready: a sync must not start on a guess. */
+    private fun sessionReady(state: SessionState?): Boolean = !requiresSession || state is SessionState.Valid
+
+    val ui: StateFlow<SyncUiState> = combine(run, tick, sessionState) { r, t, s ->
+        syncUiState(r, t?.status, t?.at ?: now(), sessionReady(s))
+    }.stateIn(viewModelScope, sharing, syncUiState(null, null, now(), sessionReady(null)))
 
     fun start(mode: SyncMode) {
         viewModelScope.launch { controller.start(mode) }
@@ -139,9 +151,6 @@ class SyncViewModel(
         mockChange = viewModelScope.launch(io) { switch.change(useFake) }
     }
 
-    /** The stored session state; null until it has been read (the screen offers no session button before that). */
-    val sessionState: StateFlow<SessionState?> = session.state.stateIn(viewModelScope, sharing, null)
-
     private val mutableSessionMessage = MutableStateFlow<String?>(null)
     val sessionMessage: StateFlow<String?> = mutableSessionMessage
 
@@ -165,8 +174,12 @@ class SyncViewModel(
         }
     }
 
+    /** Stops a running sync first, so it cannot keep working under a session that is being forgotten, then logs out. */
     fun logout() {
-        viewModelScope.launch { session.logout() }
+        viewModelScope.launch {
+            controller.cancel()
+            session.logout()
+        }
     }
 
     private var pasteJob: Job? = null

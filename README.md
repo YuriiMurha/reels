@@ -96,6 +96,8 @@ Then open **Reels** on the phone.
   thumbnails an earlier sync skipped, **Delete library** wipes the local copy (your login is kept). Progress, budgets and
   any cooldown show here. If Instagram's image servers rate-limit the app, the sync still ends Done but stops
   downloading thumbnails for the rest of that run, so some tiles stay blank until the next **Full sync**.
+  With Mock mode off (a release build always is), **Sync**, **Full sync** and **Resume** are disabled until the Sync screen says "Logged in as
+  @handle" (otherwise it shows "Log in to Instagram to sync"). **Log out** also cancels a sync that is running.
 
 ### Mock mode (debug builds)
 

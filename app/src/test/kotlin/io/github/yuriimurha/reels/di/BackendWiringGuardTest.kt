@@ -61,4 +61,17 @@ class BackendWiringGuardTest {
         assertTrue("container.backend.pacer" in arguments, "the Sync screen's pacer must be container.backend.pacer: $arguments")
         assertFalse("Pacer(" in arguments.replace("container.backend.pacer", ""), "the screen must not build a Pacer of its own: $arguments")
     }
+
+    /**
+     * Mock mode (the fake library) syncs without a session; the real backend must not start without a valid one. The
+     * ViewModel's behaviour is tested with the flag passed in; this pins that the screen derives it from the backend.
+     */
+    @Test
+    fun theSyncScreenRequiresASessionExactlyWhenTheBackendIsReal() {
+        val arguments = callArguments(main("ui/sync/SyncScreen.kt"), "SyncViewModel(").single()
+        assertTrue(
+            Regex("""requiresSession\s*=\s*container\.backend\s+is\s+Backend\.Real\b""").containsMatchIn(arguments),
+            "the Sync screen must pass requiresSession = container.backend is Backend.Real: $arguments",
+        )
+    }
 }

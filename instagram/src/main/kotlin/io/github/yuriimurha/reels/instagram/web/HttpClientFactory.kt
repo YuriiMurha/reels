@@ -95,7 +95,8 @@ object HttpClientFactory {
      * /accounts/login reaches ErrorClassifier. Pass [logger] only in debug builds; secrets are redacted (spec 4.4):
      * cookies, the CSRF token, Instagram's ig-set-* session headers and Location (challenge URLs carry a nonce).
      * OkHttp's silent re-sends (failed connection, 503 with Retry-After: 0) are off: every request must go through the
-     * Pacer.
+     * Pacer. [SessionGuard] is the first network interceptor, so a response that outlived its session (a logout or a paste
+     * while it was in flight) is stripped of its Set-Cookie headers just before the cookie bridge would store them.
      */
     fun create(cookies: CookieStore, userAgent: String, logger: ((String) -> Unit)? = null): OkHttpClient {
         val builder = OkHttpClient.Builder()
@@ -107,6 +108,7 @@ object HttpClientFactory {
             .readTimeout(30, TimeUnit.SECONDS)
             .addInterceptor(crashGuard)
             .addInterceptor(WebHeaders.interceptor(userAgent, cookies))
+            .addNetworkInterceptor(SessionGuard(cookies))
             .addNetworkInterceptor(noRetryAfterOn503)
         if (logger != null) {
             builder.addNetworkInterceptor(

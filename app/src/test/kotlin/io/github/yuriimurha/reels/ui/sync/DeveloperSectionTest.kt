@@ -152,6 +152,7 @@ class DeveloperSectionTest {
             LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
             pacer,
             SessionRepository(RecordingCookieStore(), probe, pacer, settings),
+            requiresSession = false,
             mockSwitch = MockModeSwitch(usesFake, choice, cancelSync = {}) { restarts += choice.useFake },
         )
         compose.setContent {

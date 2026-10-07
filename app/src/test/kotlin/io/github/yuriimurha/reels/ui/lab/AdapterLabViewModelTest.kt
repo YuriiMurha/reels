@@ -370,7 +370,7 @@ class AdapterLabViewModelTest {
         viewModel.tap(LabCall.CURRENT_USER)
         advanceUntilIdle()
 
-        assertEquals(listOf("challenge:$CHALLENGE_URL"), signals.events)
+        assertEquals(listOf("challenge:$CHALLENGE_URL@3"), signals.events)
         assertEquals("Who am I: Instagram requires verification", viewModel.ui.value.message)
         assertEquals("ChallengeRequired", viewModel.ui.value.shown?.classification)
         assertFalse(viewModel.ui.value.toString().contains("challenge/"), "the challenge URL must never reach the screen's state")
@@ -386,8 +386,21 @@ class AdapterLabViewModelTest {
         viewModel.tap(LabCall.COLLECTIONS)
         advanceUntilIdle()
 
-        assertEquals(listOf("login"), signals.events)
+        assertEquals(listOf("login@3"), signals.events)
         assertEquals("Collections: Instagram session is not logged in", viewModel.ui.value.message)
+    }
+
+    @Test
+    fun theSignalCarriesTheEpochReadBeforeTheCallNotTheOneAfterIt() = runTest {
+        val viewModel = viewModel()
+        runner.next = { call, _ ->
+            signals.current = 4 // the owner logs out, or pastes another session, while the request is in flight
+            labResult(call, httpCode = 403, classification = "LoginRequired", error = InstagramException.LoginRequired())
+        }
+        viewModel.tap(LabCall.COLLECTIONS)
+        advanceUntilIdle()
+
+        assertEquals(listOf("login@3"), signals.events, "a signal for a session that is gone must carry that session's epoch, so it is ignored")
     }
 
     @Test
@@ -397,7 +410,7 @@ class AdapterLabViewModelTest {
         viewModel.tap(LabCall.CURRENT_USER)
         advanceUntilIdle()
 
-        assertEquals(listOf("login"), signals.events)
+        assertEquals(listOf("login@3"), signals.events)
         assertEquals("Who am I: Instagram session is not logged in", viewModel.ui.value.message)
         assertNull(viewModel.ui.value.running)
     }
@@ -478,15 +491,24 @@ class AdapterLabViewModelTest {
         }
     }
 
+    /** Records each signal with the epoch it carried ("login@3"). [current] is what the session layer's epoch is right now. */
     private class FakeSignals : SessionSignals {
         val events = mutableListOf<String>()
 
-        override suspend fun loginRequired() {
-            events += "login"
+        var current = 3
+
+        override fun epoch(): Int = current
+
+        override suspend fun sessionOk(username: String, epoch: Int) {
+            events += "ok:$username@$epoch"
         }
 
-        override suspend fun challengeRequired(challengeUrl: String?) {
-            events += "challenge:$challengeUrl"
+        override suspend fun loginRequired(epoch: Int) {
+            events += "login@$epoch"
+        }
+
+        override suspend fun challengeRequired(challengeUrl: String?, epoch: Int) {
+            events += "challenge:$challengeUrl@$epoch"
         }
     }
 
