@@ -39,7 +39,7 @@ class Pacer(
     private val cdnLane = Semaphore(policy.cdnConcurrency)
     private var lastRequestEndedAt: Long? = null
 
-    /** True once [lastRequestEndedAt] was seeded from the persisted request log (see [sync] and [interactive]). */
+    /** True once [lastRequestEndedAt] was seeded from the persisted request log ([seedLastRequestEnd]). */
     private var seeded = false
     private var syncRequestsUntilBreak = sampleBreakInterval()
 
@@ -63,8 +63,7 @@ class Pacer(
             gate.lock()
             var holding = true
             try {
-                // A restarted process does not know when the last request ended; the persisted log does.
-                if (!seeded) { lastRequestEndedAt = lastRequestEndedAt ?: requestLog.latest(); seeded = true }
+                seedLastRequestEnd()
                 if (interactiveWaiting.get() > 0) {
                     gate.unlock()
                     holding = false
@@ -80,7 +79,7 @@ class Pacer(
                     planned = true
                 } else if (last != null && last != plannedFrom) {
                     // Another request (an interactive one) ran while this one waited. The gap after it is a fresh
-                    // draw, so it is never exactly minGapMs (a constant gap is a timing signature) and never shorter.
+                    // draw (almost never exactly the minimum: a constant gap is a timing signature), never shorter.
                     notBefore = maxOf(notBefore, last + policy.sampleGap(random))
                     plannedFrom = last
                 }
@@ -116,7 +115,7 @@ class Pacer(
             gate.lock()
             holding = true
             interactiveWaiting.decrementAndGet()
-            if (!seeded) { lastRequestEndedAt = lastRequestEndedAt ?: requestLog.latest(); seeded = true }
+            seedLastRequestEnd()
             waitSinceLastRequest(policy.interactiveMinGapMs)
             ensureAllowed()
             return execute(request)
@@ -153,6 +152,17 @@ class Pacer(
         if (requestLog.countSince(since) >= policy.dailyBudget) {
             throw PacerRefusal.DailyBudgetReached((requestLog.oldestSince(since) ?: t) + DAY_MS)
         }
+    }
+
+    /**
+     * Once per process, under the gate: a restarted process does not know when the last request ended, the persisted
+     * log does. The log holds request START times, so the gap is measured from the last request's start. A row dated
+     * in the future (clock set back, emulator snapshot restore) counts as "now": it must not stall the gate for days.
+     */
+    private suspend fun seedLastRequestEnd() {
+        if (seeded) return
+        lastRequestEndedAt = lastRequestEndedAt ?: requestLog.latest()?.let { minOf(it, now()) }
+        seeded = true
     }
 
     private suspend fun waitSinceLastRequest(gapMs: Long) {

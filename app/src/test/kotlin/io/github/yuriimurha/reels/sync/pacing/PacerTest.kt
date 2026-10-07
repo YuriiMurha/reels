@@ -401,6 +401,31 @@ class PacerTest {
         assertEquals(latest + PacingPolicy.Conservative.interactiveMinGapMs, startedAt)
     }
 
+    // A log row dated in the future (clock set back, emulator snapshot restore) must count as "now", not stall the gate.
+
+    @Test
+    fun aFutureDatedLogEntryDoesNotStallTheFirstSyncRequest() = runTest {
+        delay(100_000)
+        val now = testScheduler.currentTime
+        val pacer = pacer(log = InMemoryRequestLog(listOf(now + 3 * Pacer.DAY_MS)))
+        var startedAt = -1L
+        pacer.sync(pacer.newRun()) { startedAt = testScheduler.currentTime }
+        assertTrue(
+            startedAt in now + PacingPolicy.Conservative.minGapMs..now + PacingPolicy.Conservative.maxGapMs,
+            "started ${startedAt - now} ms after now, with the last logged request 3 days ahead",
+        )
+    }
+
+    @Test
+    fun aFutureDatedLogEntryDoesNotStallTheFirstInteractiveRequest() = runTest {
+        delay(100_000)
+        val now = testScheduler.currentTime
+        val pacer = pacer(log = InMemoryRequestLog(listOf(now + 3 * Pacer.DAY_MS)))
+        var startedAt = -1L
+        pacer.interactive { startedAt = testScheduler.currentTime }
+        assertEquals(now + PacingPolicy.Conservative.interactiveMinGapMs, startedAt)
+    }
+
     @Test
     fun twoCallersSharingARunBudgetNeverExceedIt() = runTest {
         val log = InMemoryRequestLog()
