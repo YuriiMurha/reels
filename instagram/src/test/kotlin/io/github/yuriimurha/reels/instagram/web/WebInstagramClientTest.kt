@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.SocketEffect
 import okhttp3.OkHttpClient
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -177,6 +178,44 @@ class WebInstagramClientTest {
     }
 
     @Test
+    fun anUnreadable400IsAShapeChangeNotANotFound() = runTest {
+        // Headers say 400 but the body is cut off: a challenge or rate limit could hide in it, so mediaInfo must not
+        // answer "not found" (null). The unreadable marker keeps it out of the http.400 / http.404 not-found rule.
+        server.enqueue(
+            MockResponse.Builder()
+                .code(400)
+                .body("x".repeat(4096))
+                .onResponseBody(SocketEffect.CloseSocket())
+                .build(),
+        )
+        val error = assertFailsWith<InstagramException.ShapeChanged> { client().mediaInfo("3100000000000000001") }
+        assertEquals("http.400.unreadable", error.fieldPath)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun anInvalidMediaPkNeverBuildsTheClient() = runTest {
+        var built = 0
+        val client = client { built++; HttpClientFactory.create(cookies, "test-agent") }
+        assertFailsWith<InstagramException.ShapeChanged> { client.mediaInfo("1/2") }
+        assertFailsWith<InstagramException.ShapeChanged> { client.mediaInfo("") }
+        assertEquals(0, built)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun currentUserAndAListCallShareOneHttpClient() = runTest {
+        var built = 0
+        val client = client { built++; HttpClientFactory.create(cookies, "test-agent") }
+        serve("""{"user":{"pk":42,"username":"user_1"},"status":"ok"}""")
+        serveFixture("collections_list.json")
+        client.currentUser()
+        client.collections(null)
+        assertEquals(1, built)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
     fun noRequestUntilFirstCall() = runTest {
         var built = 0
         val client = client { built++; HttpClientFactory.create(cookies, "test-agent") }
@@ -205,7 +244,7 @@ class WebInstagramClientTest {
     }
 
     @Test
-    fun aNetworkFailureIsTransientAndNotRetried() = runTest {
+    fun aConnectFailureIsTransient() = runTest {
         val dead = MockWebServer().apply { start() }
         val url = dead.url("/")
         dead.close()

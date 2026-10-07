@@ -37,10 +37,14 @@ class WebInstagramClient(
     }
 
     /** Null when Instagram no longer has the item (P8). A challenge, login or rate limit still throws. */
-    override suspend fun mediaInfo(mediaPk: String): RemoteMedia? = try {
-        WebParsers.mediaInfo(http.getJsonObject(WebEndpoints.mediaInfo(base, mediaPk)))
-    } catch (e: InstagramException.ShapeChanged) {
-        if (e.fieldPath == "http.400" || e.fieldPath == "http.404") null else throw e
+    override suspend fun mediaInfo(mediaPk: String): RemoteMedia? {
+        // Built first: an invalid pk throws before the lazy client exists.
+        val url = WebEndpoints.mediaInfo(base, mediaPk)
+        return try {
+            WebParsers.mediaInfo(http.getJsonObject(url))
+        } catch (e: InstagramException.ShapeChanged) {
+            if (e.fieldPath == "http.400" || e.fieldPath == "http.404") null else throw e
+        }
     }
 
     companion object {

@@ -58,7 +58,18 @@ class WebJsonTest {
     @Test
     fun anUnknownClientErrorNeedsRepairEvenWhenItsBodyCannotBeRead() = runTest {
         server.enqueue(cutOff(404))
-        assertEquals("http.404", assertFailsWith<InstagramException.ShapeChanged> { fetch() }.fieldPath)
+        server.enqueue(cutOff(400))
+        // Marked unreadable, so a caller that treats http.400 and http.404 as "not found" can't mistake it for one.
+        assertEquals("http.404.unreadable", assertFailsWith<InstagramException.ShapeChanged> { fetch() }.fieldPath)
+        assertEquals("http.400.unreadable", assertFailsWith<InstagramException.ShapeChanged> { fetch() }.fieldPath)
+    }
+
+    @Test
+    fun aForbiddenAndAnUnreadableChallengeKeepTheirOwnClassification() = runTest {
+        server.enqueue(cutOff(403))
+        server.enqueue(cutOff(301, location = "/accounts/login/"))
+        assertFailsWith<InstagramException.LoginRequired> { fetch() }
+        assertFailsWith<InstagramException.LoginRequired> { fetch() }
     }
 
     @Test
