@@ -108,6 +108,8 @@ dependencies {
     implementation(libs.coil.compose)
     // Installs the baseline profiles (the libraries' own and baseline-prof.txt) on a sideloaded build, which Play would otherwise do (P9).
     implementation(libs.androidx.profileinstaller)
+    // WebViewCompat.addWebMessageListener for the WebView transport (AndroidWebPage).
+    implementation(libs.androidx.webkit)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 
