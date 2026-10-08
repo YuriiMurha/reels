@@ -97,6 +97,8 @@ object HttpClientFactory {
      * OkHttp's silent re-sends (failed connection, 503 with Retry-After: 0) are off: every request must go through the
      * Pacer. [SessionGuard] is the first network interceptor, so a response that outlived its session (a logout or a paste
      * while it was in flight) is stripped of its Set-Cookie headers just before the cookie bridge would store them.
+     * A debug build ([logger] set) also logs one redacted line per non-2xx reply ([ErrorReplyLogger]); a release build
+     * adds neither logger.
      */
     fun create(cookies: CookieStore, userAgent: String, logger: ((String) -> Unit)? = null): OkHttpClient {
         val builder = OkHttpClient.Builder()
@@ -111,8 +113,11 @@ object HttpClientFactory {
             .addNetworkInterceptor(SessionGuard(cookies))
             .addNetworkInterceptor(noRetryAfterOn503)
         if (logger != null) {
+            val log = { message: String -> logger(redactIgSetHeaders(message)) }
+            // Before the header log, so its line (a redacted summary of an error reply) follows that response's headers.
+            builder.addNetworkInterceptor(ErrorReplyLogger(log))
             builder.addNetworkInterceptor(
-                HttpLoggingInterceptor { message -> logger(redactIgSetHeaders(message)) }.apply {
+                HttpLoggingInterceptor { message -> log(message) }.apply {
                     level = HttpLoggingInterceptor.Level.HEADERS
                     redactHeader("Cookie")
                     redactHeader("Set-Cookie")
