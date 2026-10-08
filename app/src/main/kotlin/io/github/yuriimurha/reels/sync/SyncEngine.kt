@@ -181,7 +181,10 @@ class SyncEngine(
         }
     }
 
-    /** [sessionUsable] said no: thrown inside the Pacer's gate before anything is sent or counted, mapped to a stop in [run]. */
+    /**
+     * [sessionUsable] said no, mapped to a stop in [run]. Thrown inside the Pacer's gate before a request (nothing sent or
+     * counted), or after a request returned (R107: that request was sent and counted; its answer is discarded unwritten).
+     */
     private class SessionNotUsable(val challenge: Boolean) : Exception()
 
     /**
