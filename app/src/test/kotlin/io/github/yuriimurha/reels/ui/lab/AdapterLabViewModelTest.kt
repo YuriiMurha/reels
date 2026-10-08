@@ -74,8 +74,13 @@ class AdapterLabViewModelTest {
     fun tearDown() = Dispatchers.resetMain()
 
     /** The clock is the test scheduler's, so the Pacer's 2 s interactive gap passes in virtual time. */
-    private fun TestScope.viewModel(dir: File = labDir, signals: SessionSignals = this@AdapterLabViewModelTest.signals): AdapterLabViewModel {
-        val pacer = Pacer(PacingPolicy.Conservative, log, cooldowns, now = { START + testScheduler.currentTime })
+    private fun TestScope.newPacer() = Pacer(PacingPolicy.Conservative, log, cooldowns, now = { START + testScheduler.currentTime })
+
+    private fun TestScope.viewModel(
+        dir: File = labDir,
+        signals: SessionSignals = this@AdapterLabViewModelTest.signals,
+        pacer: Pacer = newPacer(),
+    ): AdapterLabViewModel {
         val viewModel = AdapterLabViewModel(
             lab = runner,
             pacer = pacer,
@@ -398,6 +403,38 @@ class AdapterLabViewModelTest {
     }
 
     /**
+     * The in-gate check must ask about the epoch the tap STARTED under, not the epoch current when the gate finally opens. Here
+     * the epoch moves on (a logout, a paste, a login as another account) while an interactive request of the owner's holds the
+     * gate and the tap waits behind it. The fake answers like the session layer: only the epoch it still holds is usable. Asking
+     * with a fresh `signals.epoch()` from inside the gate would be told "usable" and send a request under the wrong session.
+     */
+    @Test
+    fun theInGateCheckAsksWithTheEpochTheTapStartedUnderNotTheOneCurrentWhenTheGateOpens() = runTest {
+        val pacer = newPacer()
+        val viewModel = viewModel(pacer = pacer)
+        val release = CompletableDeferred<Unit>()
+        launch { pacer.interactive { release.await() } } // a slow request of the owner's holds the gate
+        runCurrent()
+        assertEquals(1, log.countSince(0), "precondition: the holder is in flight")
+
+        viewModel.tap(LabCall.CURRENT_USER)
+        runCurrent()
+        assertEquals(LabCall.CURRENT_USER, viewModel.ui.value.running, "precondition: the tap passed its first check and is queued")
+        assertEquals(emptyList(), signals.asked, "precondition: the in-gate check has not run, the tap is still waiting for the gate")
+
+        signals.current = 4 // the session the tap started under (epoch 3) is replaced while it waits
+        release.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(listOf(3), signals.asked, "asked once, from inside the gate, with the epoch the tap started under")
+        assertEquals(emptyList(), runner.calls, "the old epoch is no longer usable, so the queued call never reached Instagram")
+        assertEquals(1, log.countSince(0), "and was not logged: only the holder's request was")
+        assertNull(viewModel.ui.value.running, "the buttons come back")
+        assertNull(viewModel.ui.value.message)
+        assertEquals(emptyList(), signals.events, "and nothing was signalled")
+    }
+
+    /**
      * M1: with the real session layer over a jar that cannot be read (no WebView provider), `epoch()` used to throw in the tap's
      * coroutine, outside every try: the debug screen crashed the app. Now the tap sends nothing and shows a failure.
      */
@@ -595,13 +632,14 @@ class AdapterLabViewModelTest {
 
         var current = 3
 
-        /** What the in-gate check answers, and the epochs it was asked with. */
+        /** What the in-gate check answers for the current epoch, and the epochs it was asked with. */
         var usable = RunSession.USABLE
         val asked = mutableListOf<Int>()
 
+        /** Like the session layer: work that started under any epoch but the current one is not usable. */
         override suspend fun runSession(epoch: Int): RunSession {
             asked += epoch
-            return usable
+            return if (epoch == current) usable else RunSession.NOT_USABLE
         }
 
         override fun epoch(): Int = current

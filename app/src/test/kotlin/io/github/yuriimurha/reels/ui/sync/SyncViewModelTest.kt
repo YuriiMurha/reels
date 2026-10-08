@@ -613,6 +613,39 @@ class SyncViewModelTest {
         assertNull(viewModel.sessionMessage.value)
     }
 
+    /**
+     * The line is cleared when a Delete library STARTS, not only when it ends: a second delete that is still under way must not sit
+     * under the old failure's wording. The second delete would end with no message anyway (it succeeds), so only looking while it
+     * is suspended, here inside the account-record step that follows the rows, tells clearing at the start from clearing at the end.
+     */
+    @Test
+    fun theStorageMessageIsClearedWhenTheNextDeleteLibraryStartsNotWhenItEnds() = runTest {
+        var failing = true
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val viewModel = viewModel(forgetAccount = {
+            if (failing) throw java.io.IOException(secretDetail)
+            reached.complete(Unit)
+            release.await()
+        })
+        viewModel.deleteLibrary()
+        assertEquals(ACCOUNT_RECORD_KEPT, storageMessageOf(viewModel), "precondition: a failed delete left its message up")
+
+        failing = false
+        val scope = viewModel.viewModelScope.coroutineContext[Job]!!
+        val before = scope.children.toSet()
+        viewModel.deleteLibrary()
+        val second = scope.children.single { it !in before } // the screen's other flows live in this scope too
+        withContext(Dispatchers.Default) { withTimeout(5_000) { reached.await() } }
+
+        assertTrue(second.isActive, "precondition: the second delete is still under way")
+        assertNull(viewModel.storageMessage.value, "the second delete is suspended mid-way: the old message is already gone")
+
+        release.complete(Unit)
+        withContext(Dispatchers.Default) { withTimeout(5_000) { second.join() } }
+        assertNull(viewModel.storageMessage.value, "and the delete that then completes leaves none")
+    }
+
     /** Any other failure of the delete (here the database is closed under it) is shown too, in words that carry no detail. */
     @Test
     fun aFailureOfTheDeleteItselfIsShownAndNeverCrashes() = runTest {

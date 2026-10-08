@@ -75,7 +75,7 @@ class RealVideoSourceResolverTest {
     private val videoCache by lazy { VideoCache(File(tmp.root, "video"), databaseProvider) }
     private val cooldowns = InMemoryCooldownStore()
     private val client = StubClient()
-    private val signals = RecordingSignals(epoch = 7)
+    private val signals = RecordingSignals(current = 7)
 
     /** What the container's readiness check reads: the stored session. Only a valid one may be asked on. */
     private var sessionState: SessionState = SessionState.Valid("tester")
@@ -265,14 +265,16 @@ class RealVideoSourceResolverTest {
      * R79: the interactive lane can wait seconds for the gate (a request in flight holds it, then the 2 s gap), and the session
      * can turn bad meanwhile (a challenge). The resolver checked before it queued, so the Pacer re-checks from inside the gate:
      * nothing may go out. Runs [media]'s resolve while another interactive request holds the gate, turns the session to
-     * [afterwards] once the resolve is queued behind it, and only then lets the gate go. (A latch, not a delay: while the test
-     * waits for a real I/O thread the virtual clock runs on by itself, so a delay could end before the resolve has queued.)
+     * [afterwards] once the resolve is queued behind it, and only then lets the gate go. [epochAfterwards] moves the session
+     * layer's epoch on at the same moment, as a logout or a paste would. (A latch, not a delay: while the test waits for a real
+     * I/O thread the virtual clock runs on by itself, so a delay could end before the resolve has queued.)
      */
     private suspend fun TestScope.resolveWhileTheGateIsBusy(
         media: MediaEntity,
         afterwards: SessionState,
         forceRefresh: Boolean = false,
         signalsAfterwards: RunSession = RunSession.USABLE,
+        epochAfterwards: Int? = null,
     ): VideoSource? {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
@@ -292,6 +294,7 @@ class RealVideoSourceResolverTest {
         withContext(Dispatchers.Default) { withTimeout(5_000) { asked.await() } }
         sessionState = afterwards
         signals.usable = signalsAfterwards
+        epochAfterwards?.let { signals.current = it }
         release.complete(Unit)
         advanceUntilIdle() // the holder finishes, then the queued resolve takes the gate and waits out the 2 s gap
         // What follows touches Room again (a real I/O thread), so the end is awaited in real time.
@@ -324,6 +327,25 @@ class RealVideoSourceResolverTest {
         assertEquals(VideoSource.Unavailable("Instagram session needs attention (Sync screen)"), source)
         assertEquals(OLD_URL, row().videoUrl, "nothing was stored")
         assertEquals(listOf(7), signals.asked, "it was asked, from inside the gate, with the epoch the resolve started under")
+    }
+
+    /**
+     * The in-gate check must ask about the epoch the resolve STARTED under, not the epoch current when the gate opens. The stored
+     * state is still Valid and the fake would call a fresh `signals.epoch()` usable, but a logout or a paste moved the epoch on
+     * while the request waited behind another one, so the old epoch is not usable and mediaInfo must not go out.
+     */
+    @Test
+    fun theInGateCheckAsksWithTheEpochTheResolveStartedUnderNotTheOneCurrentWhenTheGateOpens() = runTest {
+        val media = stored(expiresAt = START - 1)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        val source = resolveWhileTheGateIsBusy(media, afterwards = SessionState.Valid("tester"), epochAfterwards = 8)
+
+        assertEquals(listOf(7), signals.asked, "asked once, from inside the gate, with the epoch the resolve started under")
+        assertEquals(emptyList(), client.calls, "the old epoch is no longer usable: mediaInfo must not be called under the new session")
+        assertEquals(VideoSource.Unavailable("Instagram session needs attention (Sync screen)"), source)
+        assertEquals(OLD_URL, row().videoUrl, "nothing was stored")
+        assertEquals(emptyList(), signals.events, "and nothing is signalled to the session layer: the resolver itself declined")
     }
 
     /**
@@ -563,21 +585,22 @@ class RealVideoSourceResolverTest {
         }
     }
 
-    private class RecordingSignals(private val epoch: Int) : SessionSignals {
+    private class RecordingSignals(var current: Int) : SessionSignals {
         val events = mutableListOf<String>()
         val challengeUrls = mutableListOf<String?>()
         var failWith: Exception? = null
 
-        /** What the in-gate check answers, and the epochs it was asked with. */
+        /** What the in-gate check answers for the current epoch, and the epochs it was asked with. */
         var usable = RunSession.USABLE
         val asked = mutableListOf<Int>()
 
+        /** Like the session layer: work that started under any epoch but the current one is not usable. */
         override suspend fun runSession(epoch: Int): RunSession {
             asked += epoch
-            return usable
+            return if (epoch == current) usable else RunSession.NOT_USABLE
         }
 
-        override fun epoch(): Int = epoch
+        override fun epoch(): Int = current
 
         override suspend fun sessionOk(username: String, epoch: Int) {
             events += "ok:$epoch"
