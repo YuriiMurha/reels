@@ -40,7 +40,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
 | Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`, `*.p12`, `*.pfx`; compared in lower case), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
 | Database | `app/.../data/db/` | Room v1: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `sync_run`, `sync_cursor`, `api_request`. Schema exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. |
-| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT` and `SyncViewModel` says so on the screen) and clears thumbnails and the cached videos, through an injected `clearVideoCache` whose failure is ignored: the rows are already gone), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
+| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT`, or `CACHED_FILES_KEPT` when a thumbnail or the video cache could not be emptied (`ThumbnailStore.deleteAll()` throws once it has tried them all), or both, and `SyncViewModel` says so under the Delete library button) and clears thumbnails and the cached videos, through an injected `clearVideoCache`; neither failure fails the delete, the rows are already gone, and both are reported), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
 | Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
 | Video | `app/.../data/media/`, `ui/viewer/` | On-demand playback with a `pk`-keyed cache (spec 8). [Details](#video). |
 | Pacer | `app/.../sync/pacing/` | The single gate for Instagram API calls. [Details](#pacer). |
@@ -643,19 +643,16 @@ Mock mode switch.
   under `NonCancellable` (the screen going away cannot drop a logout) and a failure to cancel the run is swallowed, so
   logging out always forgets the session.
 - **Storage failures never crash.** An exception that escapes `viewModelScope.launch` ends the app, so the two calls that
-  write settings after they have already changed something catch non-cancellation exceptions and say so through the
-  screen's one message line (`sessionMessage`, shown under the session status; never any exception text). Logout clears the
-  cookies first and writes the stored state second: if that write fails the cookies are gone anyway and the screen says
-  "Couldn't finish logging out; try again" (a second Log out finishes it). Delete library answers "Library deleted, but the
-  account record couldn't be cleared; try Delete library again" when only the account record is left (the rows,
-  thumbnails and cached videos are gone, and the next run would still be checked against the old account), or "Couldn't
-  delete the library; try again" for any other failure. The message is cleared when the next Check now, Log out or Delete
-  library starts.
-
-## Login
-
-`app/.../ui/login/`, `ui/sync/SessionSection.kt`. Instagram's own login page in a WebView.
-
+  write settings after they have already changed something catch non-cancellation exceptions and say so, never with any
+  exception text. Logout clears the cookies first and writes the stored state second: if that write fails the cookies are
+  gone anyway and the session section's message line (`sessionMessage`, under the session status) says "Couldn't finish
+  logging out; try again" (a second Log out finishes it). Delete library has its own line in the Storage section
+  (`storageMessage`, directly under its button), and says exactly what was left once the rows are gone: "Library deleted, but
+  the account record couldn't be cleared; try Delete library again" (also when cached files failed too: a second delete
+  redoes both, and the next run would still be checked against the old account), "Library deleted; some cached files
+  couldn't be removed" (only thumbnails or cached videos are left: the library IS deleted), or "Couldn't delete the library;
+  try again" (the delete itself failed). `logout` clears the session line when it starts, and Delete library clears the
+  storage line when it starts.
 - **Allowed pages.** It only loads https pages on the domains in `WebEndpoints.LOGIN_DOMAINS` (`instagram.com`,
   `facebook.com`, `meta.com`, and their subdomains, dot boundary; `:app` only parses the `Uri` and asks
   `WebEndpoints.isLoginPage`); every other navigation is dropped, never handed to another app, and a start URL that isn't one

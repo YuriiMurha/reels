@@ -112,6 +112,7 @@ class SyncViewModelTest {
         requiresSession: Boolean = false,
         realPacer: Pacer? = null,
         forgetAccount: suspend () -> Unit = {},
+        clearVideoCache: () -> Unit = {},
     ): SyncViewModel {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, now = clock)
@@ -120,7 +121,7 @@ class SyncViewModelTest {
         session = SessionRepository(cookies, probe, pacer, settings)
         return SyncViewModel(
             SyncController(db, scheduler, now = clock),
-            LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs")), forgetAccount = forgetAccount),
+            LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs")), clearVideoCache = clearVideoCache, forgetAccount = forgetAccount),
             pacer,
             session,
             requiresSession = requiresSession,
@@ -551,25 +552,64 @@ class SyncViewModelTest {
         assertFalse(session.hasSessionCookies())
     }
 
+    /** The Storage section's own message line: the Delete library button is down there, not under the session status. */
+    private suspend fun storageMessageOf(viewModel: SyncViewModel): String? = withContext(Dispatchers.Default) {
+        withTimeoutOrNull(3_000) {
+            while (viewModel.storageMessage.value == null) delay(10)
+            viewModel.storageMessage.value
+        }
+    }
+
     @Test
     fun aStorageFailureDuringDeleteLibraryKeepingTheAccountRecordSaysSoAndNothingElseIsLeft() = runTest {
         val viewModel = viewModel(forgetAccount = { throw java.io.IOException(secretDetail) })
         db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = START))
 
         viewModel.deleteLibrary() // before the fix the failure escapes viewModelScope.launch: a crash
-        val message = messageOf(viewModel)
+        val message = storageMessageOf(viewModel)
 
         assertEquals("Library deleted, but the account record couldn't be cleared; try Delete library again", message)
         assertFalse(secretDetail in message!!)
         assertNull(db.syncDao().latestRun(), "the rows are gone")
+        assertNull(viewModel.sessionMessage.value, "and nothing is said under the session status")
+    }
+
+    /** Only cached files are left: the library IS deleted, so it must not say it couldn't be. */
+    @Test
+    fun cachedFilesThatCouldNotBeRemovedAreNotSaidToBeAFailedDelete() = runTest {
+        val viewModel = viewModel(clearVideoCache = { throw java.io.IOException(secretDetail) })
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = START))
+
+        viewModel.deleteLibrary()
+        val message = storageMessageOf(viewModel)
+
+        assertEquals("Library deleted; some cached files couldn't be removed", message)
+        assertFalse(secretDetail in message!!)
+        assertNull(db.syncDao().latestRun(), "the rows are gone")
+    }
+
+    /** Both failed: the account record is the one to act on (a second Delete library redoes both). */
+    @Test
+    fun anAccountRecordAndCachedFilesThatBothFailSayTheAccountRecord() = runTest {
+        val viewModel = viewModel(forgetAccount = { throw java.io.IOException(secretDetail) }, clearVideoCache = { throw java.io.IOException(secretDetail) })
+
+        viewModel.deleteLibrary()
+
+        assertEquals("Library deleted, but the account record couldn't be cleared; try Delete library again", storageMessageOf(viewModel))
     }
 
     @Test
-    fun deleteLibraryThatCompletesLeavesNoMessage() = runTest {
-        val viewModel = viewModel()
+    fun deleteLibraryThatCompletesLeavesNoMessageAndClearsAnOldOne() = runTest {
+        var failing = true
+        val viewModel = viewModel(forgetAccount = { if (failing) throw java.io.IOException(secretDetail) })
         viewModel.deleteLibrary()
-        runCurrent()
-        awaitLibraryEmpty()
+        assertNotNull(storageMessageOf(viewModel), "precondition: a message is up")
+
+        failing = false
+        viewModel.deleteLibrary()
+        withContext(Dispatchers.Default) { withTimeout(5_000) { while (viewModel.storageMessage.value != null) delay(10) } }
+
+        assertNull(viewModel.storageMessage.value)
         assertNull(viewModel.sessionMessage.value)
     }
 
@@ -580,9 +620,24 @@ class SyncViewModelTest {
         db.close()
 
         viewModel.deleteLibrary()
-        val message = messageOf(viewModel)
+        val message = storageMessageOf(viewModel)
 
         assertEquals("Couldn't delete the library; try again", message)
+        assertNull(viewModel.sessionMessage.value)
+    }
+
+    /** Logout's failure stays under the session status, and does not touch the storage line. */
+    @Test
+    fun aLogoutFailureIsNotShownInTheStorageSection() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        storageFailure = java.io.IOException(secretDetail)
+
+        viewModel.logout()
+
+        assertEquals("Couldn't finish logging out; try again", messageOf(viewModel))
+        assertNull(viewModel.storageMessage.value)
     }
 
     /** The screen's message, waited for in real time (the work hops to I/O threads); null if none came within 3 s. */
@@ -591,10 +646,6 @@ class SyncViewModelTest {
             while (viewModel.sessionMessage.value == null) delay(10)
             viewModel.sessionMessage.value
         }
-    }
-
-    private suspend fun awaitLibraryEmpty() {
-        withContext(Dispatchers.Default) { withTimeout(5_000) { while (db.syncDao().latestRun() != null) delay(10) } }
     }
 
     @Test

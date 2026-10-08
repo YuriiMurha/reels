@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
-import io.github.yuriimurha.reels.data.library.LibraryDeletion
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.di.MockModeSwitch
 import io.github.yuriimurha.reels.session.SessionRepository
@@ -46,6 +45,7 @@ internal const val PASTE_REJECTED = "Instagram rejected that session; your curre
 internal const val PASTE_FAILED = "Couldn't check that session"
 internal const val LOGOUT_FAILED = "Couldn't finish logging out; try again"
 internal const val ACCOUNT_RECORD_KEPT = "Library deleted, but the account record couldn't be cleared; try Delete library again"
+internal const val CACHED_FILES_KEPT = "Library deleted; some cached files couldn't be removed"
 internal const val DELETE_LIBRARY_FAILED = "Couldn't delete the library; try again"
 
 /**
@@ -136,20 +136,32 @@ class SyncViewModel(
         viewModelScope.launch { controller.discardResumable() }
     }
 
+    private val mutableStorageMessage = MutableStateFlow<String?>(null)
+
+    /** The Storage section's own message line: what Delete library could not finish. Cleared when the next Delete library starts. */
+    val storageMessage: StateFlow<String?> = mutableStorageMessage
+
     /**
-     * A storage failure is said on the screen ([sessionMessage]), never thrown: an exception that escapes this scope ends the
-     * app. The wording carries no exception text. A delete that got as far as the account record leaves the library empty.
+     * A storage failure is said on the screen ([storageMessage], under the Delete library button), never thrown: an exception
+     * that escapes this scope ends the app. The wording carries no exception text and says exactly what was left: a failed
+     * delete ("Couldn't delete the library"), only the account record (the one to act on if both were left), or only cached
+     * files (the library IS deleted).
      */
     fun deleteLibrary() {
         if (run.value?.status == SyncStatus.RUNNING) return
         viewModelScope.launch {
-            mutableSessionMessage.value = null
+            mutableStorageMessage.value = null
             try {
-                if (library.deleteLibrary() == LibraryDeletion.ACCOUNT_RECORD_KEPT) mutableSessionMessage.value = ACCOUNT_RECORD_KEPT
+                val result = library.deleteLibrary()
+                mutableStorageMessage.value = when {
+                    result.accountRecordKept -> ACCOUNT_RECORD_KEPT
+                    result.cachedFilesKept -> CACHED_FILES_KEPT
+                    else -> null
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                mutableSessionMessage.value = DELETE_LIBRARY_FAILED
+                mutableStorageMessage.value = DELETE_LIBRARY_FAILED
             }
         }
     }

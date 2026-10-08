@@ -287,10 +287,13 @@ sync**) refills from scratch. Use it when:
   sync under the other account stops with "This library belongs to another Instagram account";
 - the library looks wrong and you would rather start clean.
 
-It costs a full, paced re-sync. If the Sync screen then says "Library deleted, but the account record couldn't be
-cleared; try Delete library again", the items are gone but the phone still remembers the old account: tap **Delete
-library** once more. (Log out has a similar one, "Couldn't finish logging out; try again": the login is already gone from
-the phone, and a second **Log out** finishes the job.)
+It costs a full, paced re-sync. If a line under the **Delete library** button then says "Library deleted, but the
+account record couldn't be cleared; try Delete library again", the items are gone but the phone still remembers the old
+account: tap **Delete library** once more. "Library deleted; some cached files couldn't be removed" means only some
+thumbnails or cached videos are left (they take space, nothing more; **Delete library** again tries them again), and
+"Couldn't delete the library; try again" means nothing was deleted. (Log out has a similar one, under the session status:
+"Couldn't finish logging out; try again". The login is already gone from the phone, and a second **Log out** finishes the
+job.)
 
 ## 6. Watching videos
 

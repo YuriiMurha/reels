@@ -89,6 +89,7 @@ fun SyncScreen(
     val pasteError by viewModel.pasteError.collectAsStateWithLifecycle()
     val mockSwitchEnabled by viewModel.mockSwitchEnabled.collectAsStateWithLifecycle()
     val realPacerNote by viewModel.realPacerNote.collectAsStateWithLifecycle()
+    val storageMessage by viewModel.storageMessage.collectAsStateWithLifecycle()
     var pasting by remember { mutableStateOf(false) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -123,6 +124,7 @@ fun SyncScreen(
             onDiscard = viewModel::discard,
             onDeleteLibrary = { confirmDelete = true },
             modifier = Modifier.padding(padding),
+            storageMessage = storageMessage,
             sessionSection = {
                 SessionSection(
                     state = sessionState,
@@ -192,6 +194,8 @@ fun SyncContent(
     onDiscard: () -> Unit,
     onDeleteLibrary: () -> Unit,
     modifier: Modifier = Modifier,
+    /** What Delete library could not finish, shown under its button. */
+    storageMessage: String? = null,
     sessionSection: @Composable () -> Unit = {},
     developerSection: @Composable () -> Unit = {},
 ) {
@@ -227,6 +231,7 @@ fun SyncContent(
         }
         Section("Storage") {
             OutlinedButton(onClick = onDeleteLibrary, enabled = ui.canDeleteLibrary) { Text("Delete library") }
+            storageMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }
         developerSection()
     }
