@@ -8,8 +8,10 @@ import io.github.yuriimurha.reels.instagram.web.classifyReply
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -41,25 +43,44 @@ class WebViewTransportTest {
         private val loadGate: CompletableDeferred<Unit>? = null,
         /** Like the real page: destroying it fails a load in progress. */
         private val destroyFailsTheLoad: Boolean = true,
+        /** When set, [evaluate] throws it (after recording the script). */
+        var evaluateError: Exception? = null,
     ) : WebPage {
         val loaded = mutableListOf<String>()
         val evaluated = mutableListOf<String>()
         var destroyed = false
+
+        /** What [currentUrl] says. Null before the load finishes, like a WebView with nothing shown. */
+        var url: String? = null
         private var listener: ((String) -> Unit)? = null
+        private var goneListener: (() -> Unit)? = null
+
+        init {
+            // The page itself finishes loading even when nobody waits for it any more (a cancelled caller).
+            loadGate?.invokeOnCompletion { cause -> if (cause == null) url = landing }
+        }
 
         override suspend fun load(url: String): String {
             loaded += url
             loadGate?.await()
             loadError?.let { throw it }
+            this.url = landing
             return landing
         }
 
+        override fun currentUrl(): String? = url
+
         override fun evaluate(script: String) {
             evaluated += script
+            evaluateError?.let { throw it }
         }
 
         override fun onMessage(listener: (String) -> Unit) {
             this.listener = listener
+        }
+
+        override fun onGone(listener: () -> Unit) {
+            goneListener = listener
         }
 
         override fun destroy() {
@@ -68,6 +89,12 @@ class WebViewTransportTest {
         }
 
         fun post(json: String) = checkNotNull(listener) { "the transport never set a listener" }(json)
+
+        /** The renderer dies: the page has no URL any more and says so. */
+        fun die() {
+            url = null
+            goneListener?.invoke()
+        }
 
         /** The calls this page was asked to make (everything evaluated except the injected script). */
         val fetches: List<String> get() = evaluated.filter { it.startsWith("window.__igFetch") }
@@ -125,7 +152,7 @@ class WebViewTransportTest {
         runCurrent()
         val page = pages.created.single()
         assertEquals(listOf(home), page.loaded)
-        // The script goes in once, then exactly one fetch for this call.
+        // The script goes in, then exactly one fetch for this call.
         assertEquals(listOf(SCRIPT, fetchOf(1, "\"api/v1/collections/list/\"")), page.evaluated)
 
         page.post(reply(1, body = """{"status":"ok"}"""))
@@ -135,13 +162,14 @@ class WebViewTransportTest {
         assertEquals("""{"status":"ok"}""", result.body)
         assertFalse(result.redirected)
 
-        // A second call reuses the page: no second load, no second script, one more fetch.
+        // A second call reuses the page: no second load, one more fetch. The script goes in again before it (it is a no-op
+        // when the page still has it, and the only way back when a navigation wiped it).
         val second = call(transport, "api/v1/feed/saved/posts/")
         runCurrent()
         assertEquals(1, pages.created.size)
         assertEquals(listOf(home), page.loaded)
         assertEquals(
-            listOf(SCRIPT, fetchOf(1, "\"api/v1/collections/list/\""), fetchOf(2, "\"api/v1/feed/saved/posts/\"")),
+            listOf(SCRIPT, fetchOf(1, "\"api/v1/collections/list/\""), SCRIPT, fetchOf(2, "\"api/v1/feed/saved/posts/\"")),
             page.evaluated,
         )
         page.post(reply(2))
@@ -483,11 +511,375 @@ class WebViewTransportTest {
     fun aPathThatCouldLeaveTheOriginIsRefusedBeforeAnyPageIsCreated() = runTest {
         val pages = Pages()
         val transport = transport(pages)
-        // The script prefixes "/", so these would become protocol-relative URLs to another host.
-        for (path in listOf("", "/api/v1/x/", "//example.invalid/x", "\\example.invalid\\x")) {
+        // The script prefixes "/", so a slash or backslash first would make a URL to another host; a tab or a newline in front
+        // of one is dropped by URL parsing and does the same; and nothing but letters and digits starts a path of ours.
+        val refused = listOf(
+            "", "/api/v1/x/", "//example.invalid/x", "\\example.invalid\\x", "\t/example.invalid/x", "\n/x", "\r\n//example.invalid/x",
+            " api/v1/x/", ".x", "api/v1/x/\n/y", "api/v1/x\t", "api/v1/x\r",
+        )
+        for (path in refused) {
             assertFailsWith<IllegalArgumentException>(path) { transport.get(path) }
         }
         assertEquals(0, pages.attempts)
+    }
+
+    @Test
+    fun aHomePageAnsweredWithRateLimitingIsRateLimitedAndMakesNoCall() = runTest {
+        val pages = Pages(FakeWebPage(loadError = PageHttpError(429)))
+        val transport = transport(pages)
+
+        assertIs<InstagramException.RateLimited>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        val refused = pages.created.single()
+        // The 429 page finished loading as far as the browser is concerned: nothing may be fetched from it.
+        assertEquals(emptyList(), refused.evaluated)
+        assertTrue(refused.destroyed)
+
+        // Nothing is remembered: the next call starts over with a new page.
+        val next = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        pages.created.last().post(reply(1))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun aHomePageAnsweredWithAnotherHttpErrorIsTransientAndMakesNoCall() = runTest {
+        for (status in listOf(503, 500, 403, 404)) {
+            val pages = Pages(FakeWebPage(loadError = PageHttpError(status)))
+            val transport = transport(pages)
+
+            val error = assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull(), "$status")
+            assertTrue(error.causes().any { it is PageHttpError && it.code == status }, "the Transient keeps the status")
+            val refused = pages.created.single()
+            assertEquals(emptyList(), refused.evaluated, "$status")
+            assertTrue(refused.destroyed, "$status")
+        }
+    }
+
+    @Test
+    fun aPageThatMovesToLoginOrAChallengeBetweenCallsMakesNoFurtherCall() = runTest {
+        for ((moved, expected) in listOf(
+            "https://www.instagram.com/accounts/login/?next=%2F" to InstagramException.LoginRequired::class,
+            "https://www.instagram.com/challenge/action/AXabc/" to InstagramException.ChallengeRequired::class,
+            "https://www.instagram.com/accounts/suspended/" to InstagramException.ChallengeRequired::class,
+        )) {
+            val pages = Pages()
+            val transport = transport(pages)
+            val first = call(transport, "api/v1/collections/list/")
+            runCurrent()
+            val page = pages.created.single()
+            page.post(reply(1))
+            first.await().getOrThrow()
+            val sent = page.evaluated.toList()
+
+            // The site moved itself (a pushState, a client-side redirect): the page's landing is checked before every call.
+            page.url = moved
+            val failure = call(transport, "api/v1/feed/saved/posts/").await().exceptionOrNull()
+            assertEquals(expected, failure!!::class, moved)
+            // Checked before anything is injected: not the script, not a fetch.
+            assertEquals(sent, page.evaluated, moved)
+            assertTrue(page.destroyed, moved)
+
+            // Remembered until reset, with no new page.
+            assertEquals(expected, call(transport, "api/v1/feed/saved/posts/").await().exceptionOrNull()!!::class, moved)
+            assertEquals(1, pages.attempts, moved)
+            transport.reset()
+            val after = call(transport, "api/v1/collections/list/")
+            runCurrent()
+            assertEquals(2, pages.created.size, moved)
+            pages.created.last().post(reply(2))
+            assertEquals(200, after.await().getOrThrow().code)
+        }
+    }
+
+    @Test
+    fun aPageThatMovesToAnotherSiteIsDroppedAndTransient() = runTest {
+        for (moved in listOf(
+            "https://www.facebook.com/login/",
+            "https://www.meta.com/",
+            "https://www.instagram.com.evil.example/",
+            "https://www.instagram.com:8443/",
+            "http://www.instagram.com/",
+            "not a url at all ::",
+        )) {
+            val pages = Pages()
+            val transport = transport(pages)
+            val first = call(transport, "api/v1/collections/list/")
+            runCurrent()
+            val page = pages.created.single()
+            page.post(reply(1))
+            first.await().getOrThrow()
+            val sent = page.evaluated.toList()
+
+            page.url = moved
+            assertIs<InstagramException.Transient>(call(transport, "api/v1/feed/saved/posts/").await().exceptionOrNull(), moved)
+            assertEquals(sent, page.evaluated, moved)
+            assertTrue(page.destroyed, moved)
+
+            // Not a verdict on the account: the next call starts over.
+            val next = call(transport, "api/v1/feed/saved/posts/")
+            runCurrent()
+            assertEquals(2, pages.created.size, moved)
+            pages.created.last().post(reply(2))
+            assertEquals(200, next.await().getOrThrow().code)
+        }
+    }
+
+    @Test
+    fun theDefaultPortAndAnotherPathOnTheSameSiteAreStillTheInstagramPage() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val first = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val page = pages.created.single()
+        page.post(reply(1))
+        first.await().getOrThrow()
+
+        for ((n, moved) in listOf("https://www.instagram.com:443/explore/", "https://WWW.Instagram.com/accounts/onetap/?next=%2F").withIndex()) {
+            page.url = moved
+            val next = call(transport, "api/v1/feed/saved/posts/")
+            runCurrent()
+            page.post(reply(2L + n))
+            assertEquals(200, next.await().getOrThrow().code, moved)
+        }
+        assertEquals(1, pages.created.size)
+        assertFalse(page.destroyed)
+    }
+
+    @Test
+    fun aPageWithoutAUrlIsDroppedAndTransient() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val first = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val page = pages.created.single()
+        page.post(reply(1))
+        first.await().getOrThrow()
+        val sent = page.evaluated.toList()
+
+        // A WebView whose renderer is gone has no URL.
+        page.url = null
+        assertIs<InstagramException.Transient>(call(transport, "api/v1/feed/saved/posts/").await().exceptionOrNull())
+        assertEquals(sent, page.evaluated)
+        assertTrue(page.destroyed)
+
+        val next = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        pages.created.last().post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun theScriptIsInjectedBeforeEveryFetch() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        for (id in 1L..3L) {
+            val pending = call(transport, "api/v1/collections/list/")
+            runCurrent()
+            pages.created.single().post(reply(id))
+            pending.await().getOrThrow()
+        }
+        // A navigation can wipe window.__igFetch at any time; the script's own guard makes a second injection a no-op.
+        val evaluated = pages.created.single().evaluated
+        assertEquals(6, evaluated.size)
+        assertEquals(listOf(SCRIPT, SCRIPT, SCRIPT), evaluated.filterIndexed { i, _ -> i % 2 == 0 })
+        assertEquals(listOf(1L, 2L, 3L), evaluated.filterIndexed { i, _ -> i % 2 == 1 }.map { it.substringAfter("__igFetch(").substringBefore(',').toLong() })
+    }
+
+    @Test
+    fun aCallCancelledWhileTheHomePageLoadsLeavesNoUncheckedPageToReuse() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val pages = Pages(FakeWebPage(landing = "https://www.instagram.com/accounts/login/", loadGate = gate, destroyFailsTheLoad = false))
+        val transport = transport(pages)
+        val abandoned = launch { transport.get("api/v1/collections/list/") }
+        runCurrent()
+        val first = pages.created.single()
+        assertEquals(listOf(home), first.loaded)
+
+        abandoned.cancel()
+        runCurrent()
+        // The page was never checked, so nobody may use it, whatever it goes on to finish loading (here: the login page).
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(first.destroyed)
+        assertEquals(emptyList(), first.evaluated)
+
+        val next = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        assertEquals(emptyList(), first.evaluated)
+        pages.created.last().post(reply(1))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun aSecondCallWhileTheFirstOneLoadsThePageIsRefusedAndTouchesNothing() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val pages = Pages(FakeWebPage(loadGate = gate))
+        val transport = transport(pages)
+        val first = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val page = pages.created.single()
+
+        val second = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        assertIs<InstagramException.Transient>(second.await().exceptionOrNull())
+        // The half-loaded page is not the second call's to use: nothing evaluated, not destroyed, no second page.
+        assertEquals(emptyList(), page.evaluated)
+        assertFalse(page.destroyed)
+        assertEquals(1, pages.attempts)
+
+        gate.complete(Unit)
+        runCurrent()
+        // The first call goes on, and it still has id 1.
+        assertEquals(listOf(SCRIPT, fetchOf(1, "\"api/v1/collections/list/\"")), page.evaluated)
+        page.post(reply(1))
+        assertEquals(200, first.await().getOrThrow().code)
+    }
+
+    @Test
+    fun aRendererThatDiesFailsTheCallInFlightAtOnce() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val pending = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val page = pages.created.single()
+
+        page.die()
+        runCurrent()
+        // Not after the 30 s call timeout.
+        assertIs<InstagramException.Transient>(pending.await().exceptionOrNull())
+        assertEquals(0, currentTime)
+        assertTrue(page.destroyed)
+
+        val next = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        pages.created.last().post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun aRendererThatDiesBetweenCallsIsReplacedByTheNextCall() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val first = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val page = pages.created.single()
+        page.post(reply(1))
+        first.await().getOrThrow()
+
+        page.die()
+        assertTrue(page.destroyed)
+        val next = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        pages.created.last().post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun aRendererThatDiesWhileThePageLoadsFailsTheCallAtOnce() = runTest {
+        // As the real page does, destroying it (or its renderer dying) fails the load in progress.
+        val pages = Pages(FakeWebPage(loadGate = CompletableDeferred()))
+        val transport = transport(pages)
+        val pending = call(transport, "api/v1/collections/list/")
+        runCurrent()
+
+        pages.created.single().die()
+        runCurrent()
+        assertIs<InstagramException.Transient>(pending.await().exceptionOrNull())
+        assertEquals(0, currentTime)
+        assertTrue(pages.created.single().destroyed)
+        assertEquals(emptyList(), pages.created.single().evaluated)
+    }
+
+    @Test
+    fun aDroppedPageThatDiesLaterDoesNotDisturbTheCurrentOne() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val stuck = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val old = pages.created.single()
+        advanceTimeBy(30_000)
+        runCurrent()
+        assertIs<InstagramException.Transient>(stuck.await().exceptionOrNull())
+
+        val pending = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        old.die()
+        runCurrent()
+        assertTrue(pending.isActive)
+        pages.created.last().post(reply(2))
+        assertEquals(200, pending.await().getOrThrow().code)
+        assertFalse(pages.created.last().destroyed)
+    }
+
+    @Test
+    fun aPageThatThrowsWhenEvaluatingFailsTransientAndIsDropped() = runTest {
+        val broken = FakeWebPage(evaluateError = IllegalStateException("evaluateJavascript failed"))
+        val pages = Pages(broken)
+        val transport = transport(pages)
+
+        val error = assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertTrue(error.causes().any { it is IllegalStateException }, "the Transient keeps what went wrong")
+        assertTrue(broken.destroyed)
+
+        val next = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        pages.created.last().post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun atMostThreePagesAreCreatedUntilReset() = runTest {
+        val pages = Pages(
+            FakeWebPage(loadError = IOException("first")),
+            FakeWebPage(loadError = IOException("second")),
+            FakeWebPage(loadError = IOException("third")),
+        )
+        val lines = mutableListOf<String>()
+        val transport = transport(pages, log = lines::add)
+        repeat(3) { assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull()) }
+        assertEquals(3, pages.attempts)
+
+        // The site is loaded at most three times per session: a fourth call creates nothing, however often it is made.
+        repeat(2) { assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull()) }
+        assertEquals(3, pages.attempts)
+        assertEquals("GET api/v1/collections/list/ -> page limit (0 ms)", lines.last())
+
+        // reset() (a login, a logout) starts a new session.
+        transport.reset()
+        val after = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        assertEquals(4, pages.attempts)
+        pages.created.last().post(reply(1))
+        assertEquals(200, after.await().getOrThrow().code)
+    }
+
+    @Test
+    fun thePageLimitCountsCreationsThatThrowToo() = runTest {
+        val pages = Pages(createErrors = List(3) { IllegalStateException("no WebView provider") })
+        val transport = transport(pages)
+        repeat(4) { assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull()) }
+        assertEquals(3, pages.attempts)
+    }
+
+    @Test
+    fun anEnclosingTimeoutIsNotSwallowedIntoTransient() = runTest {
+        // The caller's own deadline wins: it is a cancellation of the caller, not an Instagram failure.
+        val replyless = Pages()
+        val transport = transport(replyless)
+        assertFailsWith<TimeoutCancellationException> { withTimeout(10_000) { transport.get("api/v1/collections/list/") } }
+        assertEquals(10_000, currentTime)
+
+        val slow = Pages(FakeWebPage(loadGate = CompletableDeferred()))
+        val loading = transport(slow)
+        assertFailsWith<TimeoutCancellationException> { withTimeout(10_000) { loading.get("api/v1/collections/list/") } }
+        assertEquals(20_000, currentTime)
+        assertTrue(slow.created.single().destroyed)
     }
 
     @Test
