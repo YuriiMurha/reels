@@ -13,8 +13,9 @@ local servers. What is still unconfirmed needs the owner's phone (the README's c
 
 - **The WebView transport.** The first two API requests the app made on the owner's phone, sent by OkHttp before this
   change, were answered HTTP 429. Every API call now runs inside a hidden instagram.com page ([Transport](#transport)),
-  which has never met Instagram. First on the phone: the hidden page loads and Who am I answers 200 (README section 5,
-  "After an update that changes how the app talks to Instagram").
+  which has never met Instagram. First on the phone: the hidden page loads and one request answers 200, Who am I if
+  Logged in, otherwise the login check (R102) (README section 5, "After an update that changes how the app talks to
+  Instagram").
 - **M2:** the WebView login itself.
 - **M3:** the endpoints, headers and JSON shapes. They are candidates from instaloader and instagrapi, pinned by
   synthetic fixtures, until the Adapter lab shows the real responses. The login check's endpoint
@@ -417,7 +418,9 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   instagram.com sends. They are bounded by the page's life: 3 page loads per user action at most (counted again after an
   idle close), and the page closes at most 5 minutes after the last call (before the idle close, the background traffic
   would have run for as long as the process). The cost of the idle close is one more home-page load per active period (a
-  run, a check or a lab session that begins after 5 idle minutes). One more thing the Pacer does not see: Chromium may
+  run, a check or a lab session that begins after 5 idle minutes). A login-screen check runs with two instagram.com pages
+  live, the visible login WebView and the hidden page, and since the stored state is not Valid then, R92 resets the hidden
+  page first, so that check always comes with a fresh home-page load. One more thing the Pacer does not see: Chromium may
   re-send a GET on a dropped connection, the same way it would for the website itself (spec 4, accepted). The app makes one
   call and the Pacer counts one request, so a re-send is a request the app neither sees nor counts.
 - **X-Requested-With (R100).** The WebViews keep sending their automatic `X-Requested-With: io.github.yuriimurha.reels`:

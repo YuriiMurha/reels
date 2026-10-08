@@ -124,8 +124,8 @@ if unused.
   (debug test build): one `get` sends exactly one request with the expected headers; a redirect is reported, not
   followed; timeout and destroy-on-logout behave.
 - Emulator smoke suite (Mock mode) still passes; the fake backend never creates the WebView.
-- Phone (owner), after the current cooldown: Adapter lab → **Who am I** first (one request), then the other lab calls,
-  then log in and Sync.
+- Phone (owner), after the current cooldown: one request first, **Who am I** in the Adapter lab if Logged in, otherwise
+  the login check (amended by R102, see 7); then the other lab calls, then Sync.
 
 ## 6. Out of scope
 
@@ -140,6 +140,9 @@ the controller's rulings; `ARCHITECTURE.md` describes the result):
   asked for, a lab tap), however they end; the count starts again at construction, at `reset()` and at each such action
   (`allowNewAttempts()`). Past the cap every call is `Transient` with no page. This bounds how often the site is loaded
   (3.2 said once, 4 said at most once per app run).
+- **R102, the first request on the phone.** The lab is greyed out unless the session is Valid, and after the 429 the stored
+  state is likely not Valid. So the first request is Who am I if Sync says "Logged in as", otherwise the login check (Log
+  in, or Log in again, or Resolve on Instagram then Check again): the same single `web_form_data` request either way.
 - **R92.** A session check that starts on a stored state that is not Valid resets the transport inside the Pacer's gate,
   right before its request, so it goes out on a fresh page rather than the one that said "login" or "challenge". Never
   while the state is Valid, never before the Pacer has agreed.
@@ -163,5 +166,20 @@ the controller's rulings; `ARCHITECTURE.md` describes the result):
 - **Also, in 3.2.** The page's location is checked before every call (a client-side redirect or `pushState` can move it),
   and a login or challenge landing is remembered until `reset()`. A home page answered with an HTTP error fails the load:
   429 is `RateLimited` (the cooldown arms with no API request made), any other status `Transient`.
+- **R104 and R104a, a caller cancelled while the page loads.** It no longer drops the page: the load goes on under
+  `NonCancellable`, bounded by the same 30 s from its start and still ended at once by `reset()`, `closePage()` or a dead
+  renderer, and its outcome is applied as for any caller (a good page is kept). The caller always ends with its own
+  cancellation; a 429 home page found for it is remembered once, so the next call fails `RateLimited` with no page and the
+  Pacer arms the cooldown. Why: swipes in the viewer during a cold load used up the page cap. Cost: a cancelled caller (and
+  the Pacer's gate) waits for the rest of the load, at most 30 s.
+- **R105, a cancelled call aborts its fetch.** `ig_fetch.js` keeps an `AbortController` per call id and exposes
+  `window.__igAbort(id)`; a call cancelled while it waits for its reply aborts its own fetch, as OkHttp cancelled a call.
+  No two of the app's API requests are ever open at once.
+- **R106, the page closes when the session needs the owner.** `closePage()` is the idle close made immediate (it keeps the
+  transport's verdicts). It runs right after an Expired or a Challenge is stored and when the login screen opens to fix
+  one (RELOGIN, CHALLENGE). Cost: one more home-page load on the next call.
+- **R107.** A sync run asks the session gate again when a request returns, before it writes the answer (a read).
+- **R108, parked.** Resolving the load on `DOMContentLoaded` rather than `load` needs a document-start script; it is a
+  `TODO.md` "Later" item.
 - **3.5.** Nothing was deleted: `SessionGuard`, the cookie bridge and the OkHttp API client are used only by the JVM
   tests, which build their MockWebServer client with them, so removing them is a separate clean-up.

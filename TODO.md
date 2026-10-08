@@ -11,7 +11,7 @@
 - [x] Build M3–M6 in code, tested without any agent contacting Instagram (everything that talks to Instagram has only met fakes and a local test server)
 - [x] On-device UI smoke suite on the emulator in Mock mode (`./gradlew connectedDebugAndroidTest`; skips on a real phone; README "Automated smoke tests")
 - [x] Move the API calls into a hidden instagram.com WebView page after the OkHttp client's first two requests got HTTP 429: [`docs/superpowers/specs/2026-10-08-webview-transport-design.md`](docs/superpowers/specs/2026-10-08-webview-transport-design.md), [`docs/superpowers/plans/2026-10-08-webview-transport.md`](docs/superpowers/plans/2026-10-08-webview-transport.md); tested with fakes, local servers and the emulator only
-- [ ] Owner: the on-phone checks below, in this order: the box "After an update that changes how the app talks to Instagram" in README section 5 (wait out any cooldown, one Who am I, paste the `InstagramHttp` lines), then the rest of section 5 (Mock mode off, log in, the Adapter lab of section 7 once, then the first Sync), then the checklist in section 8
+- [ ] Owner: the on-phone checks below, in this order: Mock mode off (README section 5 step 2), then the box "After an update that changes how the app talks to Instagram" in README section 5 (wait out any cooldown; one request: Who am I if Logged in, otherwise the login check (R102); paste the `InstagramHttp` lines), then the rest of section 5 (the Adapter lab of section 7 once, then the first Sync), then the checklist in section 8
 
 ## Owner actions
 
@@ -20,7 +20,7 @@ All of these need your phone. [`README.md`](README.md) says how.
 - [x] Install Android Studio (bundles the JDK, Android SDK and emulator)
 - [x] Decide the integration flow: PRs on GitHub (PR #1)
 - [ ] Decide repo visibility (currently public on GitHub)
-- [ ] First, after the WebView transport update: the hidden page loads and Who am I answers 200 (README section 5, "After an update that changes how the app talks to Instagram"). Paste the `InstagramHttp` lines into a Claude session before anything else
+- [ ] First, after the WebView transport update: the hidden page loads and one request answers 200: Who am I if Logged in, otherwise the login check (R102) (README section 5, "After an update that changes how the app talks to Instagram"). Paste the `InstagramHttp` lines into a Claude session before anything else
 - [ ] Run the M2 checklist: log in on the phone (README section 8, "M2: session")
   - [x] In `chrome://inspect`, see whether the WebView sends `X-Requested-With: io.github.yuriimurha.reels`: answered on the emulator. It is sent on every request the WebView makes itself (page, images, frames) and cannot be turned off on this WebView (R100: `androidx.webkit` 1.17.1's allow-list setter is a deprecated no-op and unsupported on WebView 145). The API `fetch` carries only the script's own `XMLHttpRequest`. A known marker, accepted
   - [ ] Note whether `sessionid` changes during a checkpoint flow
@@ -38,7 +38,7 @@ All of these need your phone. [`README.md`](README.md) says how.
 - [x] M1 Mock app: home, grid, viewer, search on the fake library; fake sync through the real worker and Pacer
 - [ ] M2 Session (code done, on-phone check pending): WebView login, cookie bridge, `currentUser()`, paste fallback, session states
   - [x] Code: every API call runs as a same-origin `fetch()` in a hidden instagram.com page (`WebViewTransport`, `AndroidWebPage`, `ig_fetch.js`); the login check is `api/v1/accounts/edit/web_form_data/` (`form_data.username`, the pk from the `ds_user_id` cookie); the page is destroyed before the session changes and closed after 5 idle minutes; the OkHttp API client, `SessionGuard` and the cookie bridge are off the API path (`ARCHITECTURE.md`, Transport)
-  - [ ] On the phone: the hidden page loads and Who am I answers 200, one request (README section 5, "After an update that changes how the app talks to Instagram")
+  - [ ] On the phone: the hidden page loads and one request answers 200: Who am I if Logged in, otherwise the login check (R102) (README section 5, "After an update that changes how the app talks to Instagram")
 - [ ] M3 Adapter spike (code done, on-phone check pending): seven questions answered, scrubbed fixtures, real parsers
   - [x] Code: the Adapter lab, with a pure-JVM core (`instagram/.../lab/`: one paced request per candidate endpoint, a redacted shape, a scrubbed copy) and a debug-only screen (Sync → Developer → Adapter lab)
   - [x] Code: the real parsers, endpoint builders and `WebInstagramClient`, pinned by synthetic fixtures until the spike confirms the shapes
@@ -73,7 +73,8 @@ All of these need your phone. [`README.md`](README.md) says how.
 
 ## Later (no phone needed)
 
-- [ ] Remove the OkHttp API client from `:instagram`: `OkHttpTransport`, `HttpClientFactory.create`, `CookieStoreJar`, `SessionGuard`, `ErrorReplyLogger` and `WebHeaders.interceptor` are used only by JVM tests now (production has `WebViewTransport` and the CDN's `createCdn`). It is not a clean deletion yet: port the MockWebServer suites that build their client with them (`WebInstagramClientTest`, `WebSessionProbeTest`, `AdapterLabTest`, `WebJsonTest`, `OkHttpTransportTest`) to a fake `InstagramTransport`, then delete the client with its own tests
+- [ ] Resolve the hidden page's load on `DOMContentLoaded` instead of the window's `load` (R108), so a cold-cache slow link does not run into the 30 s load bound. It needs a script injected at document start; R104 already keeps a slow load from costing pages
+- [ ] Remove the OkHttp API client from `:instagram` (R101): `OkHttpTransport`, `HttpClientFactory.create`, `CookieStoreJar`, `SessionGuard`, `ErrorReplyLogger` and `WebHeaders.interceptor` are used only by JVM tests now (production has `WebViewTransport` and the CDN's `createCdn`). It is not a clean deletion yet: port the MockWebServer suites that build their client with them (`WebInstagramClientTest`, `WebSessionProbeTest`, `AdapterLabTest`, `WebJsonTest`, `OkHttpTransportTest`) to a fake `InstagramTransport`, then delete the client with its own tests
 
 ## Known limits (not blocking)
 

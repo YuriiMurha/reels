@@ -199,7 +199,8 @@ Thumbnails and videos are not sent that way.
 
 Do this once, on the phone, with the throwaway account. You need the Mac set up (section 1), the phone connected
 (section 2) and the account's login (and its 2FA device). If you are installing an update that changed how the app talks
-to Instagram, do [the box after step 6](#after-an-update-that-changes-how-the-app-talks-to-instagram) before steps 4 and 5.
+to Instagram, do [the box after step 6](#after-an-update-that-changes-how-the-app-talks-to-instagram) right after step 2,
+instead of step 3 (the box covers the login), and only then steps 4 and 5.
 
 1. **Install the debug build** on the phone (skip if section 3 already did; the exports from step 1.4 must be done in
    this terminal):
@@ -252,7 +253,11 @@ installed (step 1 above), the phone connected by USB and the exports of step 1.4
      result. The screen should show `200` and `ok`.
    - **Anything else** ("Not logged in", "Session expired", "Instagram wants verification"): the lab is greyed out, because
      it works only for a valid session. Tap **Log in** (or **Log in again**; for a verification, **Resolve on Instagram**,
-     then **Check again**). The check after the login is the one request, so skip Who am I and go straight to step 4.
+     then **Check again**). Opening Log in checks the session already on the phone at once. If the screen closes by itself
+     showing "Logged in as", that was the request. If it shows a message, stop and paste the log before logging in.
+     Otherwise the check after you log in is the one request. Either way skip Who am I and go straight to step 4. A
+     login-screen check runs with two instagram.com pages live, the login screen's and the hidden one, and the hidden page
+     is loaded afresh for it (the stored state is not "Logged in"), so its home-page load comes with that one request.
 
    Tap no other button that sends a request. Either way the first request after the app starts also loads instagram.com
    once in the hidden page, and the site's own requests come with that load, as they do in any browser; they are not
@@ -464,10 +469,13 @@ adb -d logcat -s InstagramHttp
 (Ctrl-C stops it.) Debug builds log one line per request to Instagram's API: `GET <path> -> <code> (<ms> ms)`, for example
 `GET api/v1/accounts/edit/web_form_data/ -> 200 (412 ms)`. A run of three or more digits in the path shows as `<n>`. A reply
 that is not 2xx adds a second line, a redacted summary (`<-- 429 reply: ...`). Where there is no HTTP code the line says what
-happened instead (`timeout`, `login page`, `challenge page`, `load http 429`, ...). Two other lines can appear:
-`page closed (idle)` (the hidden page was closed after 5 minutes without a request) and `transport reset failed: <Class>`
-(a logout, a paste or Delete library could not close the page; the class name only). No cookie, token or header is logged:
-the app never sees them. One `GET` line is one request the app made: the browser may re-send a GET after a dropped
+happened instead (`timeout`, `login page`, `challenge page`, `load http 429`, `load http 429 (remembered)` for a 429 home
+page that a cancelled request ran into, `cancelled`, ...). Other lines can appear: `page closed (idle)` (the hidden page was
+closed after 5 minutes without a request), `page closed (owner needed)` (closed at once because the session expired or
+needs verification, or the login screen opened to fix that), and `transport reset failed: <Class>` or `transport close
+failed: <Class>` (the page could not be closed; the class name only). No cookie, token or header is logged: the app never
+sees them. One `GET` line is one call: at most one API request; a line without an HTTP status sent none (it ended before
+the request, or the page's request failed). The browser may re-send a GET after a dropped
 connection, as it would for the website itself, and the app does not see that. The hidden page's own load of instagram.com,
 thumbnails and videos are not in this log. A release build logs nothing.
 
@@ -477,7 +485,7 @@ thumbnails and videos are not in this log. A release build logs nothing.
   the screen closes and Sync shows "Logged in as @handle"; logcat shows exactly **one**
   `GET api/v1/accounts/edit/web_form_data/ -> 200` (then the time in ms). **Report:** a pass, or the text of the message
   under the buttons and the login screen's bar (for a shape problem it reads "Unexpected Instagram response at"
-  followed by a path such as `user` or `http.404`; note the path), and the request lines.
+  followed by a path such as `form_data` or `http.404`; note the path), and the request lines.
 - [ ] **No request at start.** Swipe the app away and reopen it. **Look for:** it still says "Logged in as @handle",
   and logcat shows **no** new request. **Report:** a pass, or the request lines that appeared.
 - [ ] **Check now, twice quickly.** **Look for:** exactly one request. **Report:** how many `GET` lines logcat shows.

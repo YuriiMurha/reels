@@ -13,9 +13,11 @@ import kotlin.test.assertTrue
  * Source pins (in the style of [JavascriptInterfaceGuardTest]) for the one place a page can talk to the app: the
  * `addWebMessageListener` call in `AndroidWebPage.kt`. Robolectric has no WebView provider, and on the emulator the platform
  * stops a frame of another origin before the listener ever sees it, so what keeps the channel closed is read from the source:
- * the rule set is exactly the allowed origin (never `*`), and a message reaches the transport only from the MAIN frame, from
- * exactly that origin, as a STRING. Each of the three conditions is the only thing that stops one kind of sender, so dropping
- * any of them, or widening the rule, fails here (the mutants below are made from the real source).
+ * the rule set is exactly the allowed origin (never `*`), and a message reaches the transport only when the platform credits it
+ * to the MAIN frame, from exactly that origin, as a STRING. Each of the three conditions is the only thing that stops one kind
+ * of sender, so dropping any of them, or widening the rule, fails here (the mutants below are made from the real source). The
+ * main-frame condition stops a same-origin subframe's own bridge only: its `parent.igBridge` is credited to the main frame
+ * (R109, pinned on the emulator), so the trust boundary is the origin.
  */
 class AndroidWebPageGuardTest {
     private val path = "src/main/kotlin/io/github/yuriimurha/reels/transport/AndroidWebPage.kt"
