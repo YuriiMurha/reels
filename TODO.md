@@ -10,7 +10,8 @@
 - [x] Write the M3–M6 implementation plan: [`docs/superpowers/plans/2026-10-07-saved-reels-m3-m6.md`](docs/superpowers/plans/2026-10-07-saved-reels-m3-m6.md)
 - [x] Build M3–M6 in code, tested without any agent contacting Instagram (everything that talks to Instagram has only met fakes and a local test server)
 - [x] On-device UI smoke suite on the emulator in Mock mode (`./gradlew connectedDebugAndroidTest`; skips on a real phone; README "Automated smoke tests")
-- [ ] Owner: the on-phone checks below, in this order: README section 5 (Mock mode off, log in, the Adapter lab of section 7 once, then the first Sync), then the checklist in section 8
+- [x] Move the API calls into a hidden instagram.com WebView page after the OkHttp client's first two requests got HTTP 429: [`docs/superpowers/specs/2026-10-08-webview-transport-design.md`](docs/superpowers/specs/2026-10-08-webview-transport-design.md), [`docs/superpowers/plans/2026-10-08-webview-transport.md`](docs/superpowers/plans/2026-10-08-webview-transport.md); tested with fakes, local servers and the emulator only
+- [ ] Owner: the on-phone checks below, in this order: the box "After an update that changes how the app talks to Instagram" in README section 5 (wait out any cooldown, one Who am I, paste the `InstagramHttp` lines), then the rest of section 5 (Mock mode off, log in, the Adapter lab of section 7 once, then the first Sync), then the checklist in section 8
 
 ## Owner actions
 
@@ -19,11 +20,12 @@ All of these need your phone. [`README.md`](README.md) says how.
 - [x] Install Android Studio (bundles the JDK, Android SDK and emulator)
 - [x] Decide the integration flow: PRs on GitHub (PR #1)
 - [ ] Decide repo visibility (currently public on GitHub)
+- [ ] First, after the WebView transport update: the hidden page loads and Who am I answers 200 (README section 5, "After an update that changes how the app talks to Instagram"). Paste the `InstagramHttp` lines into a Claude session before anything else
 - [ ] Run the M2 checklist: log in on the phone (README section 8, "M2: session")
-  - [ ] In `chrome://inspect`, see whether the WebView sends `X-Requested-With: io.github.yuriimurha.reels`
+  - [x] In `chrome://inspect`, see whether the WebView sends `X-Requested-With: io.github.yuriimurha.reels`: answered on the emulator. It is sent on every request the WebView makes itself (page, images, frames) and cannot be turned off on this WebView (R100: `androidx.webkit` 1.17.1's allow-list setter is a deprecated no-op and unsupported on WebView 145). The API `fetch` carries only the script's own `XMLHttpRequest`. A known marker, accepted
   - [ ] Note whether `sessionid` changes during a checkpoint flow
   - [ ] Note whether Instagram re-issues `sessionid` on ordinary API responses (the app's own requests): if it does, Check now (or a login-screen check) while a sync runs ends the epoch and the run stops with STOPPED_LOGIN. Safe, but spurious
-- [ ] Confirm `X-IG-App-ID`: compare what the mobile site sends (in `chrome://inspect`) with the app's `WebHeaders.APP_ID`, `936619743392459`
+- [x] Confirm `X-IG-App-ID`: the mobile site sends `1217981644879628`, and `WebHeaders.APP_ID` is now that value (the old desktop-web `936619743392459` is gone); `X-ASBD-ID` `359341` is sent too
 - [ ] Run the Adapter lab once (README section 7) and hand back the seven spike answers (README section 8, "M3")
 - [ ] Flip `SAVED_COLLECTION_IDS_CONFIRMED` to `true` (in `instagram/src/main/kotlin/io/github/yuriimurha/reels/instagram/web/WebInstagramClient.kt`) only if spike Q2 says saved items carry `saved_collection_ids`
 - [ ] The first real Sync, then the first real Full sync (README section 5): a Full sync only after a normal Sync has succeeded
@@ -35,6 +37,8 @@ All of these need your phone. [`README.md`](README.md) says how.
 - [x] M0 Skeleton: both modules build, `./gradlew check` passes, the pre-commit guard blocks a planted secret
 - [x] M1 Mock app: home, grid, viewer, search on the fake library; fake sync through the real worker and Pacer
 - [ ] M2 Session (code done, on-phone check pending): WebView login, cookie bridge, `currentUser()`, paste fallback, session states
+  - [x] Code: every API call runs as a same-origin `fetch()` in a hidden instagram.com page (`WebViewTransport`, `AndroidWebPage`, `ig_fetch.js`); the login check is `api/v1/accounts/edit/web_form_data/` (`form_data.username`, the pk from the `ds_user_id` cookie); the page is destroyed before the session changes and closed after 5 idle minutes; the OkHttp API client, `SessionGuard` and the cookie bridge are off the API path (`ARCHITECTURE.md`, Transport)
+  - [ ] On the phone: the hidden page loads and Who am I answers 200, one request (README section 5, "After an update that changes how the app talks to Instagram")
 - [ ] M3 Adapter spike (code done, on-phone check pending): seven questions answered, scrubbed fixtures, real parsers
   - [x] Code: the Adapter lab, with a pure-JVM core (`instagram/.../lab/`: one paced request per candidate endpoint, a redacted shape, a scrubbed copy) and a debug-only screen (Sync → Developer → Adapter lab)
   - [x] Code: the real parsers, endpoint builders and `WebInstagramClient`, pinned by synthetic fixtures until the spike confirms the shapes
@@ -67,6 +71,10 @@ All of these need your phone. [`README.md`](README.md) says how.
   - [x] README: the finished guide, from setup through the first real sync and the on-phone checklist to the release build and troubleshooting
   - [ ] Check on the phone: create the key and `keystore.properties` (README section 9) and `installRelease`; log in, run a real Sync, and open a grid and a viewer on the release build (the emulator smoke covered sync, grid, viewer, Media3, mute and search under R8 on the fake backend, but nothing that talks to Instagram: the real client, the CDN fetcher and the WebView login; if one of those crashes, it is a missing keep rule: `adb -d logcat -t 300` and `mapping.txt`); judge scrolling there too (the M1 debug build had 37 % janky frames)
 
+## Later (no phone needed)
+
+- [ ] Remove the OkHttp API client from `:instagram`: `OkHttpTransport`, `HttpClientFactory.create`, `CookieStoreJar`, `SessionGuard`, `ErrorReplyLogger` and `WebHeaders.interceptor` are used only by JVM tests now (production has `WebViewTransport` and the CDN's `createCdn`). It is not a clean deletion yet: port the MockWebServer suites that build their client with them (`WebInstagramClientTest`, `WebSessionProbeTest`, `AdapterLabTest`, `WebJsonTest`, `OkHttpTransportTest`) to a fake `InstagramTransport`, then delete the client with its own tests
+
 ## Known limits (not blocking)
 
 From the reviews of M3–M6; none has been reproduced on a device.
@@ -74,3 +82,4 @@ From the reviews of M3–M6; none has been reproduced on a device.
 - After a Full sync is refused by the proportional guard (`STOPPED_SHAPE`), or paused, the items its earlier pages added stay in All Saved. Fixed in the final review: the guard's "before the run" now ends at the last finished (Done) run (R83), so after **Discard paused run** those items no longer count towards M; and a library remembers its Instagram account, so a run under another account stops right after its session check and writes nothing (R84), which also closes Discard, then Sync, then Full sync with another account's feed. Left by design: a same-account feed that a Sync (QUICK) run has finished with counts as library from then on.
 - A WebView login as another account is now seen by every run's gate as soon as the jar's `ds_user_id` differs (no check needed), but not atomically: the one request that is already past the gate when the cookies change can go out under the new account, and R84's account check only guards a run's first `currentUser`, so a page of the other account's feed could be written into this library. Only a sync running while the owner logs in as someone else can meet it.
 - A library synced before the account check existed (or after a settings-file corruption) has no stored account, so its next run adopts whichever account is logged in.
+- The hidden page's own traffic is not paced: its home-page load and the site's background requests while the page exists are what any visit to instagram.com sends, and the Pacer does not count them (only the one `fetch` per API call). They are bounded: at most 3 page loads per user action, and the page closes 5 minutes after the last call. Not yet seen on a phone.

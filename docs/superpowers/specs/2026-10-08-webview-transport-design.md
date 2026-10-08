@@ -130,3 +130,34 @@ if unused.
 ## 6. Out of scope
 
 GraphQL `doc_id` queries; moving the CDN downloads into the WebView; changing pacing numbers.
+
+## 7. Amendments during implementation
+
+The text above is the approved design and stays as written. What changed while it was built, and why (the numbers are
+the controller's rulings; `ARCHITECTURE.md` describes the result):
+
+- **Page cap (R89, R91).** At most 3 pages are created per user action (a sync run or Resume, a session check the owner
+  asked for, a lab tap), however they end; the count starts again at construction, at `reset()` and at each such action
+  (`allowNewAttempts()`). Past the cap every call is `Transient` with no page. This bounds how often the site is loaded
+  (3.2 said once, 4 said at most once per app run).
+- **R92.** A session check that starts on a stored state that is not Valid resets the transport inside the Pacer's gate,
+  right before its request, so it goes out on a fresh page rather than the one that said "login" or "challenge". Never
+  while the state is Valid, never before the Pacer has agreed.
+- **R93 and R97, the idle close.** The page closes after 5 minutes without a call (`IDLE_MS = 300_000`): it is a live
+  single-page app whose own background requests would otherwise run for as long as the process lives. "Once per app run"
+  in 3.2 and 4 therefore becomes "once per active period". An idle close gives the page cap back (a page dropped by a
+  failure still counts). The viewer's link refresh does not call `allowNewAttempts()`. No request rate or concurrency
+  changes; the site's background traffic stops at most 5 minutes after the last call, at the price of one more home-page
+  load per active period.
+- **R100.** The WebViews keep sending `X-Requested-With: <package>`. `androidx.webkit` 1.17.1's allow-list API is a
+  deprecated no-op and unsupported on WebView 145, and overriding the header on the main-frame `loadUrl` alone would make
+  the fingerprint inconsistent (the header goes on every request the WebView makes itself; the API `fetch` carries only the
+  script's own `XMLHttpRequest`). A known marker, accepted.
+- **Frames.** Found on the emulator: a frame of another origin gets no `window.igBridge` at all (the origin rule keeps it
+  undefined there), so "messages from any other origin are ignored" holds by construction. A frame of the same origin does
+  get it, and its messages are dropped because the listener accepts only the main frame.
+- **Also, in 3.2.** The page's location is checked before every call (a client-side redirect or `pushState` can move it),
+  and a login or challenge landing is remembered until `reset()`. A home page answered with an HTTP error fails the load:
+  429 is `RateLimited` (the cooldown arms with no API request made), any other status `Transient`.
+- **3.5.** Nothing was deleted: `SessionGuard`, the cookie bridge and the OkHttp API client are used only by the JVM
+  tests, which build their MockWebServer client with them, so removing them is a separate clean-up.
