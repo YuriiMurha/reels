@@ -1,5 +1,6 @@
 package io.github.yuriimurha.reels
 
+import io.github.yuriimurha.reels.testutil.KotlinSource
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -31,7 +32,15 @@ class CleartextGuardTest {
         return src.listFiles().orEmpty().filter { it.isDirectory }.map { it.name }.filterNot { it in setOf("test", "androidTest", "debug") }
     }
 
-    private fun permitsCleartext(xml: String) = Regex("""\b(?:usesCleartextTraffic|cleartextTrafficPermitted)\s*=\s*["']true["']""").containsMatchIn(xml)
+    /**
+     * True when [xml] gives attribute [name] any value but the literal `false`: `true`, and also a manifest placeholder
+     * (`${'$'}{allowCleartext}`) or a resource reference (`@bool/x`), which a build can turn into `true`.
+     */
+    private fun setToAnythingButFalse(xml: String, name: String) =
+        Regex("""\b$name\s*=\s*["']([^"']*)["']""").findAll(xml).any { it.groupValues[1] != "false" }
+
+    private fun permitsCleartext(xml: String) =
+        setToAnythingButFalse(xml, "usesCleartextTraffic") || setToAnythingButFalse(xml, "cleartextTrafficPermitted")
 
     private fun namesANetworkConfig(xml: String) = Regex("""\bnetworkSecurityConfig\s*=""").containsMatchIn(xml)
 
@@ -49,6 +58,21 @@ class CleartextGuardTest {
         }
     }
 
+    /** The KDoc's "never a self-signed HTTPS server with an SSL-error override": nothing that ships (or runs in debug) overrides it. */
+    @Test
+    fun noSourceSetOverridesSslErrors() {
+        val sets = releaseSourceSets() + "debug"
+        val files = sets.flatMap { File(src, it).walkTopDown().filter { f -> f.isFile && f.extension in setOf("kt", "java") }.toList() }
+        assertTrue(files.size > 50, "the scan found ${files.size} files")
+        assertEquals(emptyList(), files.filter { overridesSslErrors(it.readText()) }.map { it.path })
+        // The scan itself: a real override is seen, a mention in a comment is not.
+        assertTrue(overridesSslErrors("override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) { handler.proceed() }"))
+        assertTrue(overridesSslErrors("public void onReceivedSslError(WebView v, SslErrorHandler h, SslError e) { h.proceed(); }"))
+        assertFalse(overridesSslErrors("// never override onReceivedSslError\n/* onReceivedSslError */ val x = 1"))
+    }
+
+    private fun overridesSslErrors(text: String) = "onReceivedSslError" in KotlinSource.code(text)
+
     /**
      * The only cleartext a debug build may allow is to the machine itself: the hosts the tests' local servers answer on.
      * Today there is no debug config at all (and so nothing to check but the manifest); the scanner below proves the check bites.
@@ -65,6 +89,11 @@ class CleartextGuardTest {
             """<application android:usesCleartextTraffic = 'true'/>""",
             """<base-config cleartextTrafficPermitted="true" />""",
             """<domain-config cleartextTrafficPermitted="true"><domain>192.0.2.7</domain></domain-config>""",
+            // Anything but a literal false counts: a placeholder or a resource a build can turn into true.
+            """<application android:usesCleartextTraffic="${'$'}{allowCleartext}" />""",
+            """<application android:usesCleartextTraffic="@bool/cleartext" />""",
+            """<application android:usesCleartextTraffic="" />""",
+            """<base-config cleartextTrafficPermitted="${'$'}{x}" />""",
         )) assertTrue(permitsCleartext(text), text)
         for (text in listOf(
             """<application android:usesCleartextTraffic="false" />""",
@@ -81,6 +110,9 @@ class CleartextGuardTest {
         )
         assertEquals(listOf("everything"), cleartextTargets("""<base-config cleartextTrafficPermitted="true"/>"""))
         assertEquals(listOf("everything"), cleartextTargets("""<application android:usesCleartextTraffic="true"/>"""))
+        assertEquals(listOf("everything"), cleartextTargets("""<application android:usesCleartextTraffic="${'$'}{allowCleartext}"/>"""))
+        assertEquals(listOf("everything"), cleartextTargets("""<base-config cleartextTrafficPermitted="@bool/x"/>"""))
+        assertEquals(listOf("10.0.2.2"), cleartextTargets("""<domain-config cleartextTrafficPermitted="${'$'}{x}"><domain>10.0.2.2</domain></domain-config>"""))
         assertEquals(listOf("192.0.2.7"), cleartextTargets("""<domain-config cleartextTrafficPermitted="true"><domain>192.0.2.7</domain></domain-config>"""))
         assertEquals(emptyList(), cleartextTargets("""<domain-config cleartextTrafficPermitted="false"><domain>example.com</domain></domain-config>"""))
     }
@@ -88,10 +120,10 @@ class CleartextGuardTest {
     /** The hosts [xml] permits cleartext to; `everything` for a base-config or a manifest attribute, which name no host. */
     private fun cleartextTargets(xml: String): List<String> {
         val targets = mutableListOf<String>()
-        if (Regex("""<application\b[^>]*\busesCleartextTraffic\s*=\s*["']true["']""").containsMatchIn(xml)) targets += "everything"
-        if (Regex("""<base-config\b[^>]*\bcleartextTrafficPermitted\s*=\s*["']true["']""").containsMatchIn(xml)) targets += "everything"
+        for (tag in Regex("""<application\b[^>]*>""").findAll(xml)) if (setToAnythingButFalse(tag.value, "usesCleartextTraffic")) targets += "everything"
+        for (tag in Regex("""<base-config\b[^>]*>""").findAll(xml)) if (setToAnythingButFalse(tag.value, "cleartextTrafficPermitted")) targets += "everything"
         for (config in Regex("""<domain-config\b([^>]*)>(.*?)</domain-config>""", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
-            if (!Regex("""\bcleartextTrafficPermitted\s*=\s*["']true["']""").containsMatchIn(config.groupValues[1])) continue
+            if (!setToAnythingButFalse(config.groupValues[1], "cleartextTrafficPermitted")) continue
             targets += Regex("""<domain\b[^>]*>\s*([^<\s]+)\s*</domain>""").findAll(config.groupValues[2]).map { it.groupValues[1] }
         }
         return targets

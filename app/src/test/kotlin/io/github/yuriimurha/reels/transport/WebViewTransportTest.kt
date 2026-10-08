@@ -1152,11 +1152,13 @@ class WebViewTransportTest {
 
         dead.die()
         runCurrent()
-        // The page is dropped at once and its timer goes with it: a dead page is not held for the idle time.
+        // The page is dropped at once and its timer goes with it: a dead page is not held for the idle time. This `0 pending`
+        // assertion is the only one here that tests pageGone()'s cancel (without it the timer stays until the idle deadline).
         assertTrue(dead.destroyed)
         assertEquals(0, pendingIdleTimers())
 
-        // The next call starts over, and its own timer is the only one: the dead page's deadline cannot close the new page.
+        // What follows is a regression check that holds without the fix too (the timer's own `page === armed` test spares the new
+        // page): the next call starts over, and its own timer is the only one that can close the new page.
         advanceTimeBy(100_000)
         runCurrent()
         completedCall(transport, pages, 2)

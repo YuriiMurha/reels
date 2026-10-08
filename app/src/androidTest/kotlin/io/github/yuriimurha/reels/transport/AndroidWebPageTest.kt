@@ -140,9 +140,11 @@ class AndroidWebPageTest {
 
         assertEquals("the real reply won", REPLY_BODY, result.reply.body)
         assertEquals(200, result.reply.code)
-        // The frame did run its attempts (this is not a test of a frame that never loaded). How each one ended is the
-        // platform's business: only the page's own origin gets the bridge, and a cross-origin parent is not reachable.
+        // The frame did run its attempts (this is not a test of a frame that never loaded). Route 0 is its own `window.igBridge`:
+        // the listener's origin rule (exactly the page's origin, never "*") is what keeps it undefined in a frame of another origin,
+        // so this is the assertion that pins the rule. How the parent and top routes end is the platform's business (logged).
         Log.i(TAG, "forging frame from another origin reported: ${result.report}")
+        assertFalse("a frame of another origin got the bridge: ${result.report}", "0=sent" in result.report)
         assertEquals(1, site.requestsTo(API).size)
     }
 
@@ -190,8 +192,8 @@ class AndroidWebPageTest {
     /**
      * Makes one real call against [site], whose home page embeds a frame served by [frames] (the same server, or another
      * origin). The frame waits until the call's request has reached the server, then runs [routes] (JavaScript expressions
-     * naming a bridge object) to post a forged reply for that call (id 1) through each, and reports how each one ended. Only
-     * then does the server answer the call, a beat later, so a forgery that got through would win the race.
+     * naming a bridge object) to post forged replies for ids 0 to [FORGED_IDS] (the call's is 1) through each, and reports how
+     * each one ended. Only then does the server answer the call, a second later, so a forgery that got through would win.
      */
     private fun callWithAForgingFrame(site: Site, frames: Site, routes: List<String>): ForgedCall {
         val inFlight = CountDownLatch(1)
@@ -211,7 +213,7 @@ class AndroidWebPageTest {
         site.route(API) {
             inFlight.countDown()
             reported.await(GATE_SECONDS, TimeUnit.SECONDS)
-            json(REPLY_BODY).newBuilder().headersDelay(300, TimeUnit.MILLISECONDS).build()
+            json(REPLY_BODY).newBuilder().headersDelay(1_000, TimeUnit.MILLISECONDS).build()
         }
 
         val reply = runBlocking { transport(site).get(API.removePrefix("/")) }
@@ -222,16 +224,17 @@ class AndroidWebPageTest {
         return ForgedCall(reply, report.get())
     }
 
-    /** A frame page that posts a forged reply for call 1 through each of [routes], once the real call is in flight. */
+    /** A frame page that posts forged replies for ids 0..[FORGED_IDS] through each of [routes], once the real call is in flight. */
     private fun forgingFrame(routes: List<String>): String {
-        val posts = routes.joinToString(",") { "function () { $it.postMessage(forged); }" }
+        val posts = routes.joinToString(",") { "function (message) { $it.postMessage(message); }" }
         return """
             <html><body><script>
-            var forged = JSON.stringify({id: 1, code: 200, contentType: 'text/plain', body: 'forged', redirected: false});
+            function forged(id) { return JSON.stringify({id: id, code: 200, contentType: 'text/plain', body: 'forged', redirected: false}); }
             var posts = [$posts];
             fetch('/go').then(function () {
               var out = posts.map(function (post, i) {
-                try { post(); return i + '=sent'; } catch (e) { return i + '=' + e.name; }
+                // Every id the call could have (the first one is 1): a change of the transport's numbering cannot hide a forgery.
+                try { for (var id = 0; id <= $FORGED_IDS; id++) post(forged(id)); return i + '=sent'; } catch (e) { return i + '=' + e.name; }
               });
               return fetch('/report?' + out.join('&'));
             });
@@ -319,7 +322,10 @@ class AndroidWebPageTest {
 
         /** JSON escapes, a backslash and real non-ASCII (an accent, a symbol, an emoji): a body that survives the trip through JSON twice is intact. */
         const val REPLY_BODY =
-            "{\"form_data\":{\"username\":\"throwaway_01\",\"bio\":\"line one\\nline \\\"two\\\" \\\\ café ☃ 😀\"}}"
+            "{\"form_data\":{\"username\":\"user_1\",\"bio\":\"line one\\nline \\\"two\\\" \\\\ café ☃ 😀\"}}"
+
+        /** The forging frames post forged replies for every id from 0 to this one, so the call's own id is certainly among them. */
+        const val FORGED_IDS = 16
 
         /** How long a server-side gate waits for the other half of a test before it gives up (the test then fails on its own). */
         const val GATE_SECONDS = 20L
