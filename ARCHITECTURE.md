@@ -344,7 +344,7 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
 - **Session gate (R82, spec 6.4).** Every request of a run, the first `currentUser()` included, passes
   `sessionUsable(epoch)` (the epoch the run captured at its start) as the Pacer's sync-lane `precondition`, so it is asked
   inside the gate right before sending. `RunSession.USABLE` lets the request go. `CHALLENGE` (a stored Challenge) stops the
-  run as STOPPED_CHALLENGE, and `NOT_USABLE` (Expired, LoggedOut, or another epoch after a logout or a paste) as
+  run as STOPPED_CHALLENGE, and `NOT_USABLE` (Expired, LoggedOut, or another epoch after a logout, a paste or a new login) as
   STOPPED_LOGIN, with nothing more sent and no session signal (the session layer already knows, and
   `challengeRequired(null, ...)` would wipe the challenge URL it stored). This is what stops a run when the viewer, the
   lab or Check now meets a challenge or an expiry mid-run, a paste replaces the session mid-run, or WorkManager re-runs
@@ -480,7 +480,7 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   `sessionUsable = session::runSession` (R82: Challenge if the stored state is Challenge, Usable only for a Valid state
   under the run's own epoch). `runSession` never takes `SessionRepository`'s lock: a paste holds that lock while it waits
   for the Pacer's gate, and the gate's holder is the one asking, so the lock would deadlock both (pinned by a test that
-  runs exactly that interleaving). It reads the state before the epoch, because logout and paste bump the epoch first.
+  runs exactly that interleaving). It reads the state before the epoch, because logout, paste and `validate`'s new-session check bump the epoch first.
 - **The library's account.** `libraryAccount` is `StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake))`, one per
   library (R84); the engine checks it and `library` gets `forgetAccount = { libraryAccount.forget() }`, so Delete library
   forgets the account of the library it deleted (`BackendSelectionTest` runs both modes).
@@ -583,10 +583,24 @@ Mock mode switch.
   session); logout clears the cookies and the WebView's storage. Real traffic uses `AppContainer.instagramPacer`
   (Conservative, Room request log, DataStore cooldown).
 - **Epochs.** `SessionRepository` implements `SessionSignals` (`epoch()`, `sessionOk`, `loginRequired`,
-  `challengeRequired`). Its `@Volatile` `sessionEpoch` is bumped, under the lock, by a logout, a paste and a paste's
-  rollback; a run (or a lab call) reads the epoch before it starts and every signal carries it, and the repository ignores a
-  signal whose epoch is not current, so a request that was in flight across a logout can neither expire nor revive the login
-  that came after. `sessionOk` (sent after a run's successful `currentUser`) restores `Valid(handle)` over a stale Expired or
+  `challengeRequired`). Its `@Volatile` `sessionEpoch` is bumped, under the lock, by a logout, a paste, a paste's
+  rollback, and a `validate()` that finds a session other than the one the epoch was issued for (a new login in the
+  WebView, possibly as another account); a run (or a lab call) reads the epoch before it starts and every signal carries
+  it, and the repository ignores a signal whose epoch is not current, so a request that was in flight across a logout can
+  neither expire nor revive the login that came after, and a run paused in a break or backoff stops (STOPPED_LOGIN, nothing
+  more sent) when the owner logs in again meanwhile.
+  - The repository remembers the session fingerprint behind the current epoch (`issuedFor`, an `AtomicReference`). Every
+    bump records the fingerprint of what the jar holds once it is written. Nothing reads the jar at construction (that would
+    load the WebView), so epoch 0 is recorded by the first `epoch()` call (what a run holds) or, when nobody asked, by the
+    first `validate()`.
+  - `validate()` settles the epoch in both of its locked blocks and always BEFORE it stores anything: first, before the
+    request (which can wait seconds for the Pacer, while a sleeping run resumes and still sees the old session's stored
+    Valid), and again after it, so a login that lands while the request is out discards the answer, as a logout would.
+    The lock is still not held across the request. A check of the SAME session changes nothing, so Check now never stops a
+    running sync; a sessionid that Instagram itself rotates looks like a new login and stops a run, which is the safe
+    direction. `sessionOk`, `loginRequired` and `challengeRequired` don't look at the jar (they can only keep a run going
+    for the epoch it holds or end it); only `validate`, which the login screen calls for every new session it sees, starts an
+    epoch. It only removes requests. `sessionOk` (sent after a run's successful `currentUser`) restores `Valid(handle)` over a stale Expired or
   Challenge banner; it writes nothing when the state is already `Valid` for that handle, flushes the jar before storing
   `Valid` (as `validate` does), and is ignored when the jar holds no session cookies. `SessionGuard` (see
   [`:instagram`](#instagram)) keeps a stale response's Set-Cookie out of the jar, apart from the tiny window noted there.
