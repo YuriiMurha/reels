@@ -32,6 +32,7 @@ import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.ui.viewer.VIDEO_SURFACE_TAG
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -68,6 +69,10 @@ class SmokeTest {
     /** A second line of defence behind [SmokeGuard]: every test begins with the emulator assumption and the Mock mode check. */
     @Before
     fun guard() = requireSafeTarget()
+
+    /** Whatever the test did in the app, Mock mode built no WebView transport: nothing here ever loaded or asked Instagram. */
+    @After
+    fun noWebViewTransportWasBuilt() = requireNoTransport()
 
     // --- 1. Launch -------------------------------------------------------------------------------------------------------
 
