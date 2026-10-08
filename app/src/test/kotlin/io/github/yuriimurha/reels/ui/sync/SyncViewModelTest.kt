@@ -1,6 +1,8 @@
 package io.github.yuriimurha.reels.ui.sync
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.content.Context
 import androidx.lifecycle.viewModelScope
@@ -48,6 +50,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -59,6 +62,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -106,21 +110,42 @@ class SyncViewModelTest {
     private fun kotlinx.coroutines.test.TestScope.viewModel(
         mockSwitch: MockModeSwitch? = null,
         requiresSession: Boolean = false,
+        realPacer: Pacer? = null,
+        forgetAccount: suspend () -> Unit = {},
+        clearVideoCache: () -> Unit = {},
     ): SyncViewModel {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, now = clock)
-        val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
+        val file = PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") }
+        val settings = SettingsStore(FlakyDataStore(file) { storageFailure })
         session = SessionRepository(cookies, probe, pacer, settings)
         return SyncViewModel(
             SyncController(db, scheduler, now = clock),
-            LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
+            LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs")), clearVideoCache = clearVideoCache, forgetAccount = forgetAccount),
             pacer,
             session,
             requiresSession = requiresSession,
             mockSwitch = mockSwitch,
+            realPacer = realPacer,
             now = clock,
             io = StandardTestDispatcher(testScheduler),
         )
+    }
+
+    /** The process's real Pacer as Mock mode sees it: its own log and cooldown, on the same clock as the ViewModel. */
+    private fun kotlinx.coroutines.test.TestScope.realPacer(log: InMemoryRequestLog, cooldowns: InMemoryCooldownStore) =
+        Pacer(PacingPolicy.Conservative, log, cooldowns, now = { START + testScheduler.currentTime })
+
+    /** While set, every write to the settings file throws it, as a full disk would. Reads still work. */
+    private var storageFailure: Exception? = null
+
+    private class FlakyDataStore(private val inner: DataStore<Preferences>, private val failure: () -> Exception?) : DataStore<Preferences> {
+        override val data get() = inner.data
+
+        override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+            failure()?.let { throw it }
+            return inner.updateData(transform)
+        }
     }
 
     /** A jar that already holds a session, as after a WebView login. Forgets the seeding writes so tests see only their own. */
@@ -157,6 +182,84 @@ class SyncViewModelTest {
         runCurrent()
         assertNull(viewModel.ui.value.banner)
         assertTrue(viewModel.ui.value.canStart)
+    }
+
+    // ---- H2: Mock mode shows the REAL Pacer's state as one line ----
+
+    @Test
+    fun inMockModeTheRealPacersRequestCountIsShown() = runTest {
+        val real = realPacer(InMemoryRequestLog(List(7) { START - 60_000 }), InMemoryCooldownStore())
+        val viewModel = viewModel(realPacer = real)
+        backgroundScope.launch { viewModel.realPacerNote.collect {} }
+        runCurrent()
+        assertEquals("Instagram requests in 24 h: 7 / 600", viewModel.realPacerNote.value)
+    }
+
+    @Test
+    fun inMockModeARealCooldownIsShownAndCountsDown() = runTest {
+        // A rate limit an hour minus 90 s ago: the real 1 h cooldown ends 90 s from now.
+        val realCooldowns = InMemoryCooldownStore().apply { onRateLimited(START - 3_600_000 + 90_000) }
+        val viewModel = viewModel(realPacer = realPacer(InMemoryRequestLog(List(7) { START - 60_000 }), realCooldowns))
+        backgroundScope.launch { viewModel.realPacerNote.collect {} }
+        runCurrent()
+        assertEquals("Instagram requests paused: 2 min left (cooldown)", viewModel.realPacerNote.value)
+
+        advanceTimeBy(60_000)
+        runCurrent()
+        assertEquals("Instagram requests paused: 1 min left (cooldown)", viewModel.realPacerNote.value)
+
+        advanceTimeBy(31_000)
+        runCurrent()
+        assertEquals("Instagram requests in 24 h: 7 / 600", viewModel.realPacerNote.value, "the cooldown ended on its own")
+    }
+
+    /** Fake syncs never touch Instagram, so a real cooldown must neither block them nor become their banner. */
+    @Test
+    fun aRealCooldownDoesNotBlockTheFakeLibrarysSync() = runTest {
+        val realCooldowns = InMemoryCooldownStore().apply { onRateLimited(START) }
+        val viewModel = viewModel(realPacer = realPacer(InMemoryRequestLog(), realCooldowns))
+        backgroundScope.launch { viewModel.ui.collect {} }
+        backgroundScope.launch { viewModel.realPacerNote.collect {} }
+        runCurrent()
+        assertEquals("Instagram requests paused: 60 min left (cooldown)", viewModel.realPacerNote.value)
+        assertTrue(viewModel.ui.value.canStart)
+        assertNull(viewModel.ui.value.banner)
+    }
+
+    /** And the other way round: the line reads the real Pacer, not the one the ViewModel's own Sync controls use. */
+    @Test
+    fun theLineReadsTheRealPacerNotTheFakeOne() = runTest {
+        cooldowns.onRateLimited(START) // the ViewModel's own (fake) pacer is cooling down
+        val viewModel = viewModel(realPacer = realPacer(InMemoryRequestLog(List(2) { START - 1_000 }), InMemoryCooldownStore()))
+        backgroundScope.launch { viewModel.ui.collect {} }
+        backgroundScope.launch { viewModel.realPacerNote.collect {} }
+        runCurrent()
+        assertEquals("Instagram requests in 24 h: 2 / 600", viewModel.realPacerNote.value)
+        assertEquals("Cooling down after a rate limit: 60 min left", viewModel.ui.value.banner)
+    }
+
+    @Test
+    fun withTheRealBackendThereIsNoExtraLine() = runTest {
+        val viewModel = viewModel(requiresSession = true)
+        backgroundScope.launch { viewModel.realPacerNote.collect {} }
+        runCurrent()
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertNull(viewModel.realPacerNote.value)
+    }
+
+    /** `status()` only reads: showing the line sends nothing and records nothing, however long the screen stays open. */
+    @Test
+    fun showingTheLineMakesNoRequestAndRecordsNone() = runTest {
+        val log = InMemoryRequestLog(List(3) { START - 1_000 })
+        val viewModel = viewModel(realPacer = realPacer(log, InMemoryCooldownStore()))
+        backgroundScope.launch { viewModel.realPacerNote.collect {} }
+        runCurrent()
+        advanceTimeBy(30_000)
+        runCurrent()
+        assertEquals("Instagram requests in 24 h: 3 / 600", viewModel.realPacerNote.value)
+        assertEquals(3, log.countSince(-1), "nothing was recorded")
+        assertEquals(0, probe.calls, "and nothing was sent")
     }
 
     @Test
@@ -403,6 +506,146 @@ class SyncViewModelTest {
 
         assertFalse(session.hasSessionCookies())
         assertEquals(SyncStatus.PAUSED, db.syncDao().latestRun()!!.status, "the run was cancelled too")
+    }
+
+    // ---- H4: a storage failure during Logout or Delete library never crashes the app ----
+    //
+    // "Never crashes": an exception that escapes `viewModelScope.launch` reaches the uncaught-exception handler, which ends the
+    // process on a phone. Under `runTest` it is collected and fails the test (before the fix it shows as the Suppressed
+    // IOException of the failing assertion), so each test below passes only if nothing escapes.
+
+    /** The detail an exception carries (here a session value) must never reach the screen. */
+    private val secretDetail = "disk full while writing sessionid=" + "s1"
+
+    @Test
+    fun aStorageFailureDuringLogoutSaysSoAndLeavesNoSessionInTheJar() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        storageFailure = java.io.IOException(secretDetail)
+        cookies.events.clear()
+
+        viewModel.logout() // before the fix this throws inside viewModelScope.launch: the app's uncaught handler, i.e. a crash
+        val message = messageOf(viewModel)
+
+        assertEquals("Couldn't finish logging out; try again", message)
+        assertFalse(secretDetail in message!!)
+        assertFalse(session.hasSessionCookies(), "the cookies were cleared before the write failed, and stay cleared")
+        assertEquals(listOf("scheduler.cancel", "clear"), cookies.events)
+    }
+
+    @Test
+    fun logoutCanBeRetriedAfterAStorageFailureAndTheMessageGoes() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        storageFailure = java.io.IOException(secretDetail)
+        viewModel.logout()
+        assertNotNull(messageOf(viewModel), "no message was shown")
+        assertEquals(SessionState.Valid("tester"), session.state.first(), "the stored state could not be written")
+
+        storageFailure = null
+        viewModel.logout()
+        awaitLoggedOut()
+
+        assertNull(viewModel.sessionMessage.value, "the retry cleared the message")
+        assertFalse(session.hasSessionCookies())
+    }
+
+    /** The Storage section's own message line: the Delete library button is down there, not under the session status. */
+    private suspend fun storageMessageOf(viewModel: SyncViewModel): String? = withContext(Dispatchers.Default) {
+        withTimeoutOrNull(3_000) {
+            while (viewModel.storageMessage.value == null) delay(10)
+            viewModel.storageMessage.value
+        }
+    }
+
+    @Test
+    fun aStorageFailureDuringDeleteLibraryKeepingTheAccountRecordSaysSoAndNothingElseIsLeft() = runTest {
+        val viewModel = viewModel(forgetAccount = { throw java.io.IOException(secretDetail) })
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = START))
+
+        viewModel.deleteLibrary() // before the fix the failure escapes viewModelScope.launch: a crash
+        val message = storageMessageOf(viewModel)
+
+        assertEquals("Library deleted, but the account record couldn't be cleared; try Delete library again", message)
+        assertFalse(secretDetail in message!!)
+        assertNull(db.syncDao().latestRun(), "the rows are gone")
+        assertNull(viewModel.sessionMessage.value, "and nothing is said under the session status")
+    }
+
+    /** Only cached files are left: the library IS deleted, so it must not say it couldn't be. */
+    @Test
+    fun cachedFilesThatCouldNotBeRemovedAreNotSaidToBeAFailedDelete() = runTest {
+        val viewModel = viewModel(clearVideoCache = { throw java.io.IOException(secretDetail) })
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = START))
+
+        viewModel.deleteLibrary()
+        val message = storageMessageOf(viewModel)
+
+        assertEquals("Library deleted; some cached files couldn't be removed", message)
+        assertFalse(secretDetail in message!!)
+        assertNull(db.syncDao().latestRun(), "the rows are gone")
+    }
+
+    /** Both failed: the account record is the one to act on (a second Delete library redoes both). */
+    @Test
+    fun anAccountRecordAndCachedFilesThatBothFailSayTheAccountRecord() = runTest {
+        val viewModel = viewModel(forgetAccount = { throw java.io.IOException(secretDetail) }, clearVideoCache = { throw java.io.IOException(secretDetail) })
+
+        viewModel.deleteLibrary()
+
+        assertEquals("Library deleted, but the account record couldn't be cleared; try Delete library again", storageMessageOf(viewModel))
+    }
+
+    @Test
+    fun deleteLibraryThatCompletesLeavesNoMessageAndClearsAnOldOne() = runTest {
+        var failing = true
+        val viewModel = viewModel(forgetAccount = { if (failing) throw java.io.IOException(secretDetail) })
+        viewModel.deleteLibrary()
+        assertNotNull(storageMessageOf(viewModel), "precondition: a message is up")
+
+        failing = false
+        viewModel.deleteLibrary()
+        withContext(Dispatchers.Default) { withTimeout(5_000) { while (viewModel.storageMessage.value != null) delay(10) } }
+
+        assertNull(viewModel.storageMessage.value)
+        assertNull(viewModel.sessionMessage.value)
+    }
+
+    /** Any other failure of the delete (here the database is closed under it) is shown too, in words that carry no detail. */
+    @Test
+    fun aFailureOfTheDeleteItselfIsShownAndNeverCrashes() = runTest {
+        val viewModel = viewModel()
+        db.close()
+
+        viewModel.deleteLibrary()
+        val message = storageMessageOf(viewModel)
+
+        assertEquals("Couldn't delete the library; try again", message)
+        assertNull(viewModel.sessionMessage.value)
+    }
+
+    /** Logout's failure stays under the session status, and does not touch the storage line. */
+    @Test
+    fun aLogoutFailureIsNotShownInTheStorageSection() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        storageFailure = java.io.IOException(secretDetail)
+
+        viewModel.logout()
+
+        assertEquals("Couldn't finish logging out; try again", messageOf(viewModel))
+        assertNull(viewModel.storageMessage.value)
+    }
+
+    /** The screen's message, waited for in real time (the work hops to I/O threads); null if none came within 3 s. */
+    private suspend fun messageOf(viewModel: SyncViewModel): String? = withContext(Dispatchers.Default) {
+        withTimeoutOrNull(3_000) {
+            while (viewModel.sessionMessage.value == null) delay(10)
+            viewModel.sessionMessage.value
+        }
     }
 
     @Test

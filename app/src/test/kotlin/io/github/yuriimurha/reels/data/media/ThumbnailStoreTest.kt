@@ -43,6 +43,27 @@ class ThumbnailStoreTest {
         assertEquals(0, dir.listFiles()!!.size)
     }
 
+    /** H6/M6: a thumbnail that cannot be removed is an error the caller can report, not a silent leftover. */
+    @Test
+    fun deleteAllSaysSoWhenAFileCannotBeRemovedAndDoesNotNameIt() {
+        store.write("1", byteArrayOf(1))
+        store.write("2", byteArrayOf(2))
+        assertTrue(dir.setWritable(false), "precondition: a folder whose files cannot be removed")
+        try {
+            val failure = assertFailsWith<java.io.IOException> { store.deleteAll() }
+            assertFalse("1.jpg" in failure.message.orEmpty() || dir.path in failure.message.orEmpty(), "no file name or path in the message: ${failure.message}")
+        } finally {
+            dir.setWritable(true)
+        }
+        store.deleteAll() // and once the folder can be written again, it finishes the job
+        assertEquals(0, dir.listFiles()!!.size)
+    }
+
+    @Test
+    fun deleteAllOfAFolderThatDoesNotExistIsNothingToDo() {
+        File(dir, "gone").let { ThumbnailStore(it).deleteAll() }
+    }
+
     @Test
     fun rejectsKeysThatCouldEscapeTheFolder() {
         assertFailsWith<IllegalArgumentException> { store.write("../evil", byteArrayOf(1)) }

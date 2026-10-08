@@ -142,9 +142,69 @@ class ShapeDumpTest {
         }
     }
 
+    private fun shownOnScreen(text: String): Boolean =
+        ShapeDump.of(JsonObject(mapOf("message" to JsonPrimitive(text)))) == "message string = \"$text\""
+
+    /** H6: an id written with sentence punctuation between its digits is still an id. The check strips the whole set first. */
+    @Test
+    fun aDigitRunSplitByColonsOrParenthesesIsHiddenOnScreenToo() {
+        for (text in listOf("id 31:00:00:00:00", "(31)(00)(00)", "31:00:00:00", "pk 31;00;00;00", "id 31!00!00!00", "id 31?00?00?00", "id 31'00'00'00")) {
+            assertFalse(LabRules.isVisibleString(text), text)
+            assertEquals("message string(len ${text.length}, text)", ShapeDump.of(JsonObject(mapOf("message" to JsonPrimitive(text)))), text)
+        }
+    }
+
+    /**
+     * Every mark of the set hides this id. Only `,` `:` `;` `!` `?` `'` `(` `)` `-` and the space are decided by the digit rule
+     * alone: a `.` or `_` inside a word, and a `"` or `/` anywhere, are refused earlier (a handle or host rule, the sentence
+     * alphabet), so for those this test would pass without them in the digit rule. The dot has its own test below.
+     */
+    @Test
+    fun everyMarkOfTheSentenceSetCountsAsASeparatorBetweenDigits() {
+        for (mark in " .,:;!?'\"()-_/") {
+            val text = "id 31${mark}00${mark}00"
+            assertFalse(LabRules.isVisibleString(text), "'$text' must be hidden: a '$mark' between digits separates them, it does not break the run")
+        }
+    }
+
+    /** A dot that ENDS each group ("31. 00. 00") is not a dot inside a word, so only the digit rule can hide it: `.` must be in its set. */
+    @Test
+    fun aDotThatEndsEachGroupOfDigitsIsASeparatorToo() {
+        for (text in listOf("id 31. 00. 00", "pk 31.. 00.. 00", "Code 12. 34. 56.")) {
+            assertFalse(LabRules.isVisibleString(text), text)
+            assertEquals("message string(len ${text.length}, text)", ShapeDump.of(JsonObject(mapOf("message" to JsonPrimitive(text)))), text)
+        }
+        assertTrue(LabRules.isVisibleString("Wait 2. Then 30."), "small numbers separated by dots still show")
+    }
+
+    @Test
+    fun sentencesWithSmallNumbersStillShow() {
+        for (text in listOf("Wait 2 minutes, 30 seconds", "Try again in 5 minutes.", "You can retry in 10 minutes or 2 hours!", "Please wait 20 (twenty) minutes")) {
+            assertTrue(LabRules.isVisibleString(text), text)
+            assertTrue(shownOnScreen(text), text)
+        }
+    }
+
+    @Test
+    fun anEnumLikeValueMayHaveAnyCase() {
+        // KDoc: "one word of letters or underscores, any case" (the old text said bare lowercase). Keys are lowercase only.
+        for (text in listOf("clips", "JohnDoe", "ALL_MEDIA_AUTO_COLLECTION", "Jane_Doe")) assertTrue(LabRules.isVisibleString(text), text)
+        assertFalse(LabRules.isSafeName("JohnDoe"), "a KEY must be lowercase")
+    }
+
+    /** The one-word rule belongs to the visible-value keys as a whole, `message` and `feedback_title` among them. */
+    @Test
+    fun aOneWordValueInAnyCaseIsShownUnderEveryVisibleStringKey() {
+        for (key in LabRules.VISIBLE_VALUE_KEYS) {
+            for (word in listOf("johndoe", "JohnDoe", "Jane_Doe")) {
+                assertEquals("$key string = \"$word\"", ShapeDump.of(JsonObject(mapOf(key to JsonPrimitive(word)))), "$key: $word")
+            }
+        }
+    }
+
     @Test
     fun anEnumLikeValueUnderAVisibleKeyIsShownEvenWhenItLooksLikeAHandle() {
-        // Documented limit: a bare lowercase word under an enum-like key cannot be told from an enum value.
+        // Documented limit: one word of letters or underscores under a visible-value key cannot be told from an enum value.
         val shape = dump("""{"status":"johndoe","error_type":"jane_doe"}""")
         assertEquals("status string = \"johndoe\"\nerror_type string = \"jane_doe\"", shape)
     }

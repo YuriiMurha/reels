@@ -131,17 +131,51 @@ class LibraryRepositoryTest {
         assertEquals(emptyList(), repository.collectionCards().first())
     }
 
-    /** The library is already gone when the cache is cleared: a cache that cannot be emptied must not make Delete library fail. */
+    /**
+     * The library is already gone when the cache is cleared: a cache that cannot be emptied must not make Delete library fail
+     * (it is not "couldn't delete the library"), but it is reported, so the owner can tell some cached files are still there.
+     */
     @Test
-    fun aVideoCacheThatCannotBeClearedDoesNotFailDeleteLibrary() = runTest {
+    fun aVideoCacheThatCannotBeClearedDoesNotFailDeleteLibraryButIsReported() = runTest {
         givenLibrary()
         val path = thumbs.write("m1", byteArrayOf(1))
         val repository = LibraryRepository(db, thumbs, clearVideoCache = { throw java.io.IOException("disk error") })
 
-        repository.deleteLibrary()
+        assertEquals(LibraryDeletion.CACHED_FILES_KEPT, repository.deleteLibrary())
 
         assertEquals(emptyList(), repository.collectionCards().first(), "the rows are gone")
         assertFalse(File(path).exists(), "and the thumbnails")
+    }
+
+    /** Thumbnails that cannot be removed are reported the same way, and the video cache is still cleared. */
+    @Test
+    fun thumbnailsThatCannotBeRemovedAreReportedAndTheVideoCacheIsStillCleared() = runTest {
+        givenLibrary()
+        thumbs.write("m1", byteArrayOf(1))
+        var cleared = 0
+        val repository = LibraryRepository(db, thumbs, clearVideoCache = { cleared++ })
+        val dir = File(thumbs.write("m2", byteArrayOf(2))).parentFile!!
+        assertTrue(dir.setWritable(false), "precondition: a folder whose files cannot be removed")
+        try {
+            assertEquals(LibraryDeletion.CACHED_FILES_KEPT, repository.deleteLibrary())
+        } finally {
+            dir.setWritable(true)
+        }
+
+        assertEquals(emptyList(), repository.collectionCards().first(), "the rows are gone")
+        assertEquals(1, cleared, "the video cache was cleared all the same")
+    }
+
+    @Test
+    fun anAccountRecordAndCachedFilesThatBothFailAreBothReported() = runTest {
+        givenLibrary()
+        val repository = LibraryRepository(
+            db, thumbs,
+            clearVideoCache = { throw java.io.IOException("disk error") },
+            forgetAccount = { throw java.io.IOException("disk full") },
+        )
+
+        assertEquals(LibraryDeletion.ACCOUNT_RECORD_AND_CACHED_FILES_KEPT, repository.deleteLibrary())
     }
 
     /** R84: Delete library also forgets which Instagram account the library belonged to, once its rows are gone. */
@@ -155,6 +189,45 @@ class LibraryRepositoryTest {
         repository.deleteLibrary()
 
         assertEquals(listOf(0), cardsWhenForgotten, "forgotten exactly once, after the library itself was deleted")
+    }
+
+    /**
+     * H4: forgetting the account is a settings write that can fail after the rows are gone. Delete library must not throw
+     * (it would crash the app from the ViewModel's scope), must still remove everything else, and must say what was left undone.
+     */
+    @Test
+    fun anAccountRecordThatCannotBeClearedIsReportedNotThrownAndTheRestStillGoes() = runTest {
+        givenLibrary()
+        val path = thumbs.write("m1", byteArrayOf(1))
+        var cleared = 0
+        val repository = LibraryRepository(
+            db, thumbs,
+            clearVideoCache = { cleared++ },
+            forgetAccount = { throw java.io.IOException("disk full") },
+        )
+
+        assertEquals(LibraryDeletion.ACCOUNT_RECORD_KEPT, repository.deleteLibrary())
+
+        assertEquals(emptyList(), repository.collectionCards().first(), "the rows are gone")
+        assertFalse(File(path).exists(), "the thumbnails are gone too: the failure came after the rows, and must not leave orphans")
+        assertEquals(1, cleared, "and the cached videos")
+    }
+
+    @Test
+    fun aCompleteDeleteSaysSo() = runTest {
+        givenLibrary()
+        assertEquals(LibraryDeletion.COMPLETE, repository.deleteLibrary())
+    }
+
+    @Test
+    fun aCancelledAccountClearStillPropagatesTheCancellation() = runTest {
+        givenLibrary()
+        val repository = LibraryRepository(
+            db, thumbs,
+            forgetAccount = { throw kotlin.coroutines.cancellation.CancellationException("cancelled") },
+        )
+
+        kotlin.test.assertFailsWith<kotlin.coroutines.cancellation.CancellationException> { repository.deleteLibrary() }
     }
 
     @Test

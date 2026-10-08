@@ -101,17 +101,20 @@ internal object LabRules {
 
     private val ENUM_LIKE = Regex("[A-Za-z_]{1,40}")
     private val SENTENCE = Regex("[A-Za-z0-9 .,:;!?'()\\-_]{0,200}")
-    private val DIGIT_SEPARATORS = Regex("[,\\- ]")
+
+    /** Every mark of sentence punctuation (and the space): an id written as `31:00:00` or `(31)(00)` is still an id. */
+    private val DIGIT_SEPARATORS = Regex("[ .,:;!?'\"()\\-_/]")
     private val DIGIT_RUN = Regex("[0-9]{3,}")
     private val WORD_SEPARATORS = Regex("[ ,;:!?'()\\-]+")
 
     /**
      * Whether a string under a visible-value key may be shown or kept: an enum-like value (1 to 40 letters and
-     * underscores, `clips`, `challenge_required`), or a plain sentence. A plain sentence is at most 200 ASCII
-     * characters; no word has a `.`, `_` or `@` inside it (a handle, a host, an address); no run of 3 or more digits
-     * even when written with `,`, `-` or spaces between them (an id); no two capitalised words in a row (a name); and
-     * no word of the fixture guard list. Instagram's `message` is free text, so it gets this check. A single bare
-     * lowercase word (`johndoe`) passes, as enum-like: it can't be told from an enum value.
+     * underscores, `clips`, `challenge_required`, `ClipsMedia`), or a plain sentence. A plain sentence is at most 200
+     * ASCII characters; no word has a `.`, `_` or `@` inside it (a handle, a host, an address); no run of 3 or more digits
+     * even when written with sentence punctuation or spaces between them (`3,100`, `31:00:00`, `(31)(00)(00)`: an id);
+     * no two capitalised words in a row (a name); and no word of the fixture guard list. Instagram's `message` is free
+     * text, so it gets this check. One word of letters or underscores, in any case (`johndoe`, `JohnDoe`), passes as
+     * enum-like: it can't be told from an enum value.
      */
     fun isVisibleString(text: String): Boolean {
         if (hasForbiddenWord(text)) return false

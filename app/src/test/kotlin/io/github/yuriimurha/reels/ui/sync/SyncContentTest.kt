@@ -1,10 +1,13 @@
 package io.github.yuriimurha.reels.ui.sync
 
+import androidx.compose.material3.Text
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
@@ -14,6 +17,7 @@ import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlin.test.assertTrue
 
 @RunWith(AndroidJUnit4::class)
 class SyncContentTest {
@@ -75,5 +79,44 @@ class SyncContentTest {
         compose.onAllNodesWithText("420 / 300").assertCountEquals(0)
         compose.onNodeWithText("Requests in 24 h").assertExists()
         compose.onNodeWithText("450 / 600").assertExists()
+    }
+
+    // ---- M6: the Storage section's own message line ----
+
+    private fun showWithStorageMessage(message: String?) = compose.setContent {
+        ReelsTheme {
+            SyncContent(
+                run = null,
+                ui = syncUiState(null, null, 0),
+                pacer = null,
+                lastSyncAt = null,
+                lastFullSyncAt = null,
+                onSync = {}, onFullSync = {}, onCancel = {}, onDiscard = {}, onDeleteLibrary = {},
+                storageMessage = message,
+                sessionSection = { Text("SESSION-SECTION") },
+                developerSection = { Text("DEVELOPER-SECTION") },
+            )
+        }
+    }
+
+    private fun top(text: String) = compose.onNodeWithText(text).fetchSemanticsNode().layoutInfo.coordinates.positionInRoot().y
+
+    @Test
+    fun aStorageMessageShowsRightUnderDeleteLibraryNotInTheSessionSection() {
+        val message = "Library deleted; some cached files couldn't be removed"
+        showWithStorageMessage(message)
+        compose.onNodeWithText(message).performScrollTo().assertIsDisplayed()
+        assertTrue(top("Storage") < top("Delete library"), "the Storage section holds the button")
+        assertTrue(top("Delete library") < top(message), "the message is under the button")
+        assertTrue(top("SESSION-SECTION") < top("Storage"), "and the session section is somewhere else, above")
+        assertTrue(top(message) < top("DEVELOPER-SECTION"), "while the Developer section comes after")
+    }
+
+    @Test
+    fun withoutAStorageMessageTheSectionIsJustTheButton() {
+        showWithStorageMessage(null)
+        compose.onNodeWithText("Delete library").assertIsDisplayed()
+        compose.onAllNodesWithText("Library deleted", substring = true).assertCountEquals(0)
+        compose.onAllNodesWithText("Couldn't delete", substring = true).assertCountEquals(0)
     }
 }

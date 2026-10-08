@@ -8,6 +8,7 @@ import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.session.userMessage
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacerRefusal
@@ -60,7 +61,10 @@ class RealVideoSourceResolver(
             val fresh = try {
                 // The request may wait seconds for the gate and the 2 s gap, and a challenge can arrive meanwhile: the Pacer asks
                 // again from inside the gate, right before it would send and log anything (R79).
-                pacer.interactive(precondition = { if (!isSessionReady()) throw SessionNotReady() }) { client.mediaInfo(current.pk) }
+                // Not ready is also "no longer the session this resolve started under" (a logout, a paste, another account's login).
+                pacer.interactive(
+                    precondition = { if (!isSessionReady() || signals.runSession(epoch) != RunSession.USABLE) throw SessionNotReady() },
+                ) { client.mediaInfo(current.pk) }
             } catch (e: SessionNotReady) {
                 return current.cachedPlay() ?: NEEDS_ATTENTION
             }

@@ -1,12 +1,15 @@
 package io.github.yuriimurha.reels.ui.sync
 
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -17,6 +20,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 @RunWith(AndroidJUnit4::class)
 class SessionSectionTest {
@@ -28,7 +32,7 @@ class SessionSectionTest {
     private var loggedIn = 0
     private var reloggedIn = 0
 
-    private fun show(state: SessionState?) = compose.setContent {
+    private fun show(state: SessionState?, pacerNote: String? = null) = compose.setContent {
         ReelsTheme {
             SessionSection(
                 state = state,
@@ -39,6 +43,7 @@ class SessionSectionTest {
                 onLogout = { loggedOut++ },
                 onCheck = {},
                 onPaste = {},
+                pacerNote = pacerNote,
             )
         }
     }
@@ -97,6 +102,33 @@ class SessionSectionTest {
         compose.onNodeWithText("Instagram session").assertIsDisplayed()
         compose.onNodeWithText("Checking session\u2026").assertIsDisplayed()
         assertButtons()
+    }
+
+    private fun top(text: String) = compose.onNodeWithText(text).fetchSemanticsNode().boundsInRoot.top
+
+    /** H2: Mock mode's extra line sits directly under the status text, above the buttons, and changes none of them. */
+    @Test
+    fun thePacerNoteIsOneLineUnderTheSessionStatus() {
+        show(SessionState.Valid("tester"), pacerNote = "Instagram requests in 24 h: 7 / 600")
+        compose.onNodeWithText("Instagram requests in 24 h: 7 / 600").assertIsDisplayed()
+        assertTrue(top("Logged in as @tester") < top("Instagram requests in 24 h: 7 / 600"), "under the status")
+        assertTrue(top("Instagram requests in 24 h: 7 / 600") < top("Check now"), "above the buttons")
+        assertButtons("Check now", "Log out")
+    }
+
+    @Test
+    fun thePacerNoteShowsWhileLoggedOutAndWhileTheStateIsLoadingToo() {
+        show(null, pacerNote = "Instagram requests paused: 2 min left (cooldown)")
+        compose.onNodeWithText("Checking session\u2026").assertIsDisplayed()
+        compose.onNodeWithText("Instagram requests paused: 2 min left (cooldown)").assertIsDisplayed()
+        assertButtons()
+    }
+
+    @Test
+    fun withoutAPacerNoteNothingIsAdded() {
+        show(SessionState.LoggedOut)
+        compose.onAllNodesWithText("Instagram requests", substring = true).assertCountEquals(0)
+        assertButtons("Log in", "Paste sessionid")
     }
 
     @Test

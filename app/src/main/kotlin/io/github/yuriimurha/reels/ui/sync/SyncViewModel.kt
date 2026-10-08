@@ -18,11 +18,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -41,6 +43,10 @@ sealed interface PasteOutcome {
 internal const val NOT_A_SESSIONID = "That doesn't look like a sessionid"
 internal const val PASTE_REJECTED = "Instagram rejected that session; your current login is unchanged"
 internal const val PASTE_FAILED = "Couldn't check that session"
+internal const val LOGOUT_FAILED = "Couldn't finish logging out; try again"
+internal const val ACCOUNT_RECORD_KEPT = "Library deleted, but the account record couldn't be cleared; try Delete library again"
+internal const val CACHED_FILES_KEPT = "Library deleted; some cached files couldn't be removed"
+internal const val DELETE_LIBRARY_FAILED = "Couldn't delete the library; try again"
 
 /**
  * Maps [SessionRepository.pasteSessionId]'s answer. Only Valid means the paste was committed: Expired and Challenge
@@ -66,6 +72,13 @@ class SyncViewModel(
     private val requiresSession: Boolean,
     /** The Developer section's Mock mode switch (debug builds); null offers none. */
     private val mockSwitch: MockModeSwitch? = null,
+    /**
+     * Mock mode only: the process's real Pacer (`instagramPacer`). [pacer] is then the fake library's, but Check now, the Adapter
+     * lab and the video resolver still send real requests through this one, so its cooldown and 24 h count are shown too
+     * ([realPacerNote]). Read with `status()` only: no request, nothing recorded. Null for the real backend, whose [pacer] is
+     * already that one.
+     */
+    private val realPacer: Pacer? = null,
     private val now: () -> Long = System::currentTimeMillis,
     /** Where the Mock mode switch works: it waits for WorkManager and writes a file. */
     private val io: CoroutineDispatcher = Dispatchers.IO,
@@ -79,18 +92,23 @@ class SyncViewModel(
     /** The Pacer's status and the moment it was read. */
     private data class Tick(val status: PacerStatus, val at: Long)
 
-    /**
-     * Budgets and cooldown, refreshed every second while the screen is visible. Local reads only. The time travels
-     * with the status because during a cooldown the status itself never changes, and a StateFlow drops repeats.
-     */
-    private val tick: StateFlow<Tick?> = flow {
+    /** Local reads only, every second. The time travels with the status because a StateFlow drops repeats. */
+    private fun ticks(of: Pacer): Flow<Tick> = flow {
         while (true) {
-            emit(Tick(pacer.status(), now()))
+            emit(Tick(of.status(), now()))
             delay(1_000)
         }
-    }.stateIn(viewModelScope, sharing, null)
+    }
+
+    /** Budgets and cooldown, refreshed every second while the screen is visible. */
+    private val tick: StateFlow<Tick?> = ticks(pacer).stateIn(viewModelScope, sharing, null)
 
     val pacerStatus: StateFlow<PacerStatus?> = tick.map { it?.status }.stateIn(viewModelScope, sharing, null)
+
+    /** Mock mode: one line about the real Pacer (see [realPacerLine]), refreshed like [tick]. Always null with the real backend. */
+    val realPacerNote: StateFlow<String?> =
+        (realPacer?.let { real -> ticks(real).map { realPacerLine(it.status, it.at) } } ?: flowOf(null))
+            .stateIn(viewModelScope, sharing, null)
 
     /** The stored session state; null until it has been read (the screen offers no session button before that). */
     val sessionState: StateFlow<SessionState?> = session.state.stateIn(viewModelScope, sharing, null)
@@ -118,9 +136,34 @@ class SyncViewModel(
         viewModelScope.launch { controller.discardResumable() }
     }
 
+    private val mutableStorageMessage = MutableStateFlow<String?>(null)
+
+    /** The Storage section's own message line: what Delete library could not finish. Cleared when the next Delete library starts. */
+    val storageMessage: StateFlow<String?> = mutableStorageMessage
+
+    /**
+     * A storage failure is said on the screen ([storageMessage], under the Delete library button), never thrown: an exception
+     * that escapes this scope ends the app. The wording carries no exception text and says exactly what was left: a failed
+     * delete ("Couldn't delete the library"), only the account record (the one to act on if both were left), or only cached
+     * files (the library IS deleted).
+     */
     fun deleteLibrary() {
         if (run.value?.status == SyncStatus.RUNNING) return
-        viewModelScope.launch { library.deleteLibrary() }
+        viewModelScope.launch {
+            mutableStorageMessage.value = null
+            try {
+                val result = library.deleteLibrary()
+                mutableStorageMessage.value = when {
+                    result.accountRecordKept -> ACCOUNT_RECORD_KEPT
+                    result.cachedFilesKept -> CACHED_FILES_KEPT
+                    else -> null
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mutableStorageMessage.value = DELETE_LIBRARY_FAILED
+            }
+        }
     }
 
     /** The mode this process runs in (true: the fake library), or null when there is no switch. */
@@ -185,9 +228,14 @@ class SyncViewModel(
      * asked to forget the session, so that always happens: the whole thing is shielded from the screen going away (the
      * scope being cancelled), and a failure to cancel the run (WorkManager, the database) is not allowed to stop it. The
      * run then keeps whatever state it had; its signals are ignored anyway, because the logout changes the epoch.
+     *
+     * The logout clears the cookies before it writes the stored state. If that write fails the cookies are gone all the same,
+     * and the failure is said on the screen ([sessionMessage], no exception text) instead of escaping this scope, where it
+     * would end the app. Tapping Log out again finishes the job.
      */
     fun logout() {
         viewModelScope.launch {
+            mutableSessionMessage.value = null
             withContext(NonCancellable) {
                 try {
                     controller.cancel()
@@ -195,7 +243,13 @@ class SyncViewModel(
                     // Nothing to show. This scope cannot be cancelled, so even a CancellationException here is some inner
                     // failure, not ours, and must not skip the logout either.
                 }
-                session.logout()
+                try {
+                    session.logout()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    mutableSessionMessage.value = LOGOUT_FAILED
+                }
             }
         }
     }

@@ -13,6 +13,8 @@ local.properties
 keystore.properties
 *.keystore
 *.jks
+*.p12
+*.pfx
 
 # --- Gradle / Android / Kotlin ---
 .gradle/

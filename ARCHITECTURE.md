@@ -38,9 +38,9 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | `:instagram` | `instagram/` | Pure Kotlin/JVM: the adapter contract, the real web client, parsers, error classification, the fake client. [Details](#instagram). |
 | Adapter lab (core) | `instagram/.../lab/` | One request per call; a redacted shape and a scrubbed copy of the answer (spec 6.3). [Details](#adapter-lab-core). |
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
-| Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
+| Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`, `*.p12`, `*.pfx`; compared in lower case), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
 | Database | `app/.../data/db/` | Room v1: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `sync_run`, `sync_cursor`, `api_request`. Schema exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. |
-| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone, and a failure propagates) and clears thumbnails and the cached videos, through an injected `clearVideoCache` whose failure is ignored: the rows are already gone), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
+| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT`, or `CACHED_FILES_KEPT` when a thumbnail or the video cache could not be emptied (`ThumbnailStore.deleteAll()` throws once it has tried them all), or both, and `SyncViewModel` says so under the Delete library button) and clears thumbnails and the cached videos, through an injected `clearVideoCache`; neither failure fails the delete, the rows are already gone, and both are reported), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
 | Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
 | Video | `app/.../data/media/`, `ui/viewer/` | On-demand playback with a `pk`-keyed cache (spec 8). [Details](#video). |
 | Pacer | `app/.../sync/pacing/` | The single gate for Instagram API calls. [Details](#pacer). |
@@ -51,7 +51,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks` (an `ACTION_VIEW` intent, so whichever app handles the link). Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
-| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session. Log out cancels a running sync before it forgets the session. Debug builds add the Developer section ([Lab screen](#lab-screen)). |
+| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session, and its session section adds one line for the real Pacer's cooldown or 24 h count (see Session). Log out cancels a running sync before it forgets the session. Debug builds add the Developer section ([Lab screen](#lab-screen)). |
 | Lab screen | `app/.../ui/lab/`, `ui/sync/DeveloperSection.kt` | The debug-only front end of the Adapter lab, and the Mock mode switch. [Details](#lab-screen). |
 | Session | `app/.../session/` | The session lives only in the WebView's cookie store. [Details](#session). |
 | Login | `app/.../ui/login/`, `ui/sync/SessionSection.kt` | Instagram's own login page in a WebView. [Details](#login). |
@@ -125,7 +125,12 @@ Pure Kotlin/JVM.
   with the jar's `sessionid` when the answer is back. If they differ (a logout, a paste or another login during the
   flight) it returns the response with every `Set-Cookie` header removed, just before OkHttp's cookie bridge would store
   them. This narrows the race, it does not close it: a change between the guard's read and the bridge's store, a few
-  instructions later, is not seen. The CDN client has no jar and needs none.
+  instructions later, is not seen. The CDN client has no jar and needs none. Both reads, "sent" (the request's header) and
+  "now" (the jar through `CookieStore.cookieValue`), go through ONE parser, `internal fun cookieValueIn(header, name)` in
+  `CookieStore.kt`, so the comparison can't drift: pairs split at `;` and trimmed, a pair matches only with the exact
+  case-sensitive prefix `name=`, the value is everything after the first `=`, an empty value is null, and the first matching
+  pair decides. `CookieValueInTest` pins those cases and, as source pins, that neither call site parses a header itself.
+  (`CookieStoreJar.loadForRequest` enumerates every cookie for OkHttp and keeps its own, more forgiving split.)
 - **The CDN client** (`HttpClientFactory.createCdn`) is cookieless (no jar at all, only the WebView user agent reduced to
   printable ASCII, so the header can't throw; 15 s connect, 30 s read) and every download is ONE request on the wire.
   `retryOnConnectionFailure(false)` alone does not give that in OkHttp 5.5: it neither stops the follow-up after a 503 with
@@ -212,7 +217,8 @@ endpoint to learn the real response shapes (spec 6.3).
   key of `VISIBLE_VALUE_KEYS` (`media_type`, `product_type`, `collection_type`, `status`, `more_available`, `num_results`,
   sizes, `carousel_media_count`, `error_type`, `message`, `feedback_title` and a few flags), where a number of at most 6 characters and a string that
   is enum-like (up to 40 letters and `_`) or a plain sentence (up to 200 ASCII characters, no word with a `.`, `_` or `@`
-  inside, no run of 3 or more digits even when separated by `,`, `-` or spaces, no two capitalised words in a row) are
+  inside, no run of 3 or more digits even when separated by any sentence punctuation or spaces (`3,100`, `31:00:00`,
+  `(31)(00)(00)`), no two capitalised words in a row) are
   shown. A URL shows `url(host=instagram|cdn|other, params=[sorted names], oe=hex|absent|malformed)`, never the host or a
   value; a key that is data shows only its length and class.
 - **`Scrubber`** writes the synthetic copy that can become a fixture in this public repo, with the same visible-value rule:
@@ -228,9 +234,10 @@ endpoint to learn the real response shapes (spec 6.3).
     never overwrites a real one in the same object.
   - It keeps its mappings keyed by a salted SHA-256 digest, never by the raw value, so it holds no raw id, handle, caption
     or URL. Output with a word of the fixture guard's list is withheld.
-- **The redaction is heuristic, not a proof:** a bare lowercase handle used as a key, as a URL parameter name or as an
-  enum-like value (`johndoe`, `jane_doe`) can't be told from schema and is kept, and a one-word or lowercase sentence under
-  `message` passes. Read a scrubbed file before committing it.
+- **The redaction is heuristic, not a proof:** a lowercase handle used as a key or as a URL parameter name, or a one-word
+  value of letters and underscores in any case (`johndoe`, `JohnDoe`, `jane_doe`) under ANY visible-value key (`message` and
+  `feedback_title` included, not only the enum-like ones such as `status`), can't be told from schema and is kept; so does
+  a lowercase sentence under `message`. Read a scrubbed file before committing it.
 
 ## Pacer
 
@@ -338,14 +345,16 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
   - None of this adds a request, a rate or a concurrency: the gates only stop work.
 - **Eviction.** The removed pks of a reconcile are handed to a `MediaEviction` (default none), so their cached videos go
   with their thumbnails (a failing eviction is ignored: the reconcile is already committed).
-- **Session signals.** `run` reads `signals.epoch()` first thing, tells the session layer `sessionOk(username, epoch)` once
+- **Session signals.** `run` reads `signals.epoch()` first thing inside its try (a session layer that cannot answer ends the
+  run PAUSED "Unexpected error", never RUNNING), tells the session layer `sessionOk(username, epoch)` once
   `currentUser()` has succeeded, and passes the same epoch with `loginRequired` and `challengeRequired`; a failing receiver
   changes nothing about the run.
 - **Session gate (R82, spec 6.4).** Every request of a run, the first `currentUser()` included, passes
   `sessionUsable(epoch)` (the epoch the run captured at its start) as the Pacer's sync-lane `precondition`, so it is asked
   inside the gate right before sending. `RunSession.USABLE` lets the request go. `CHALLENGE` (a stored Challenge) stops the
-  run as STOPPED_CHALLENGE, and `NOT_USABLE` (Expired, LoggedOut, or another epoch after a logout or a paste) as
-  STOPPED_LOGIN, with nothing more sent and no session signal (the session layer already knows, and
+  run as STOPPED_CHALLENGE, and `NOT_USABLE` (Expired, LoggedOut, or another epoch after a logout, a paste or a new login) as
+  STOPPED_LOGIN (this includes the jar's account no longer being the one the epoch was issued for), with nothing more sent and
+  no session signal (the session layer already knows, and
   `challengeRequired(null, ...)` would wipe the challenge URL it stored). This is what stops a run when the viewer, the
   lab or Check now meets a challenge or an expiry mid-run, a paste replaces the session mid-run, or WorkManager re-runs
   work by itself after a process death under a session that is no longer valid (it then sends zero requests). The
@@ -465,7 +474,8 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   `Real` (`WebInstagramClient`, `HttpMediaFetcher`, and the process's ONE Conservative `instagramPacer`). `Real` takes the
   pacer as a constructor argument and `BackendSelectionTest` pins `backend.pacer === instagramPacer`, so real traffic can
   never get a second pacer; the Sync screen shows `backend.pacer`, which for `Real` is that one (in Mock mode it is the
-  fake's, so a real cooldown armed by a session check or a lab call isn't shown there).
+  fake's, so it also passes `instagramPacer` to `SyncViewModel(realPacer = ...)` and the Session section shows the real
+  Pacer's state as one extra line under the status: see Session, below).
 - **Mock mode.** `BackendChoice` (SharedPreferences file `backend`, key `use_fake`) decides which: release builds never use
   the fake library, debug builds default to it, and `AppContainer.usesFake` reads it ONCE per process, so the library, the
   thumbnails and the backend can't disagree within a run.
@@ -478,9 +488,10 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
 - **Engine signals and gate.** `syncEngine()` is an exhaustive `when (backend)`: `Fake` gets `SessionSignals.None` and a
   gate that is always `USABLE`; `Real` gets the `SessionRepository`, whose signals carry the session epoch, and
   `sessionUsable = session::runSession` (R82: Challenge if the stored state is Challenge, Usable only for a Valid state
-  under the run's own epoch). `runSession` never takes `SessionRepository`'s lock: a paste holds that lock while it waits
+  under the run's own epoch, with the jar still holding that epoch's account; the lab and the video resolver ask the same
+  `runSession` from inside their own gates). `runSession` never takes `SessionRepository`'s lock: a paste holds that lock while it waits
   for the Pacer's gate, and the gate's holder is the one asking, so the lock would deadlock both (pinned by a test that
-  runs exactly that interleaving). It reads the state before the epoch, because logout and paste bump the epoch first.
+  runs exactly that interleaving). It reads the state before the epoch, because logout, paste and `validate`'s new-session check bump the epoch first.
 - **The library's account.** `libraryAccount` is `StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake))`, one per
   library (R84); the engine checks it and `library` gets `forgetAccount = { libraryAccount.forget() }`, so Delete library
   forgets the account of the library it deleted (`BackendSelectionTest` runs both modes).
@@ -495,7 +506,8 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   an `IOException` that names only the code (CDN links are signed, so a URL is never in a message). It reads the body on
   OkHttp's own thread, so cancelling the coroutine cancels the call.
 - **Source pins.** `BackendWiringGuardTest` keeps `Backend.Real`'s fetcher on `cdnHttp`, never on `instagramHttp` (whose jar
-  holds the session), and the Sync screen on `container.backend.pacer`, and keeps the Mock switch's `cancelSync` on
+  holds the session), and the Sync screen on `container.backend.pacer` (plus `realPacer = if (container.backend is Backend.Fake)
+  container.instagramPacer else null`), and keeps the Mock switch's `cancelSync` on
   `cancelAndAwait()` (the test WorkManager cannot tell it from `cancel()`). `ContainerSyncWiringTest` runs the real
   container on WorkManager's test build with a worker that waits: a queued run carries `kindOf(usesFake)` (`"fake"` in Mock
   mode, `"real"` otherwise, so a wrong boolean fails it), and the Mock switch's `cancelSync` leaves the queued work
@@ -583,22 +595,64 @@ Mock mode switch.
   session); logout clears the cookies and the WebView's storage. Real traffic uses `AppContainer.instagramPacer`
   (Conservative, Room request log, DataStore cooldown).
 - **Epochs.** `SessionRepository` implements `SessionSignals` (`epoch()`, `sessionOk`, `loginRequired`,
-  `challengeRequired`). Its `@Volatile` `sessionEpoch` is bumped, under the lock, by a logout, a paste and a paste's
-  rollback; a run (or a lab call) reads the epoch before it starts and every signal carries it, and the repository ignores a
-  signal whose epoch is not current, so a request that was in flight across a logout can neither expire nor revive the login
-  that came after. `sessionOk` (sent after a run's successful `currentUser`) restores `Valid(handle)` over a stale Expired or
-  Challenge banner; it writes nothing when the state is already `Valid` for that handle, flushes the jar before storing
-  `Valid` (as `validate` does), and is ignored when the jar holds no session cookies. `SessionGuard` (see
-  [`:instagram`](#instagram)) keeps a stale response's Set-Cookie out of the jar, apart from the tiny window noted there.
+  `challengeRequired`, `runSession`). Its `@Volatile` `sessionEpoch` is bumped, under the lock, by a logout, a paste, a paste's
+  rollback, and a `validate()` that finds a session other than the one the epoch was issued for (a new login in the
+  WebView, possibly as another account). A run (or a lab call, or a video resolve) reads the epoch before it starts and every
+  signal carries it; the repository ignores a signal whose epoch is not current, so a request that was in flight across a
+  logout can neither expire nor revive the login that came after. `epoch()` never throws: `CookieManager` fails without a
+  WebView provider (while it is being updated), so no caller has to guard it; the engine reads it inside its try anyway,
+  so any other failure there still ends the run PAUSED.
+  - The repository remembers what the current epoch was issued for (`issuedFor`, an `AtomicReference` of the sessionid's
+    fingerprint and the jar's `ds_user_id`). Every bump records the jar's session once it is written. Nothing reads the jar
+    at construction (that would load the WebView), so epoch 0 is recorded by the first `epoch()` call (what a run holds), or
+    by the first `validate()` or `runSession()` when nobody asked; if the jar cannot be read then, nothing is recorded and
+    the next call tries again.
+  - `validate()` settles the epoch in both of its locked blocks and always BEFORE it stores anything: first, before the
+    request (which can wait seconds for the Pacer, while a sleeping run resumes and still sees the old session's stored
+    Valid), and again after it, so a login that lands while the request is out discards the answer, as a logout would.
+    The lock is still not held across the request. A check of the SAME session changes nothing, so Check now never stops a
+    running sync; a sessionid that Instagram itself re-issues looks like a new login to `validate()` and stops a run, which is
+    the safe direction (an on-phone check in `TODO.md` asks whether Instagram does that at all). `sessionOk`, `loginRequired`
+    and `challengeRequired` don't look at the jar (they can only keep a run going for the epoch it holds or end it).
+  - **The account check in the gate.** The epoch only ends in `validate()`, which the login screen calls while it is
+    visible, once a second at most, when it sees a new sessionid (never for the CSRF purpose, after a Challenge only on Retry,
+    and not at all if the owner has left it). So `runSession(epoch)`, the gate every sync request, lab call and video
+    resolve passes, also compares the jar's `ds_user_id` with the one recorded for the epoch and says `NOT_USABLE` when it
+    differs (or is gone): a WebView login as another account stops work before any check has seen it, and a re-issued
+    sessionid of the same account (same `ds_user_id`) does not. `runSession` is a pure read and still never takes the lock.
+    Remaining window: one request can be past that check when the cookies change, and go out under the new account (the
+    cookies are read a moment after the gate). R84's account check only guards a run's first `currentUser`.
+  - `sessionOk` (sent after a run's successful `currentUser`) restores `Valid(handle)` over a stale Expired or Challenge
+    banner; it writes nothing when the state is already `Valid` for that handle, flushes the jar before storing `Valid` (as
+    `validate` does), and is ignored when the jar holds no session cookies. `SessionGuard` (see [`:instagram`](#instagram))
+    keeps a stale response's Set-Cookie out of the jar, apart from the tiny window noted there.
 - **Gating.** `SyncViewModel(requiresSession = container.backend is Backend.Real)`; `sessionReady = !requiresSession ||
   state is Valid` (a state still loading counts as not ready, but says nothing: no banner until the state is known), and
   `syncUiState(..., sessionReady, sessionLoading)` turns Sync, Full sync and Resume off and, when no other banner applies,
   says "Log in to Instagram to sync". `SyncViewModel.start` itself returns unless `ui.value.canStart`, so nothing that
   reaches it can begin a sync the screen did not offer. Mock mode (the fake backend) needs no session.
+- **The real Pacer in Mock mode.** With the fake backend the screen's own pacer (counters, cooldown banner, Sync's enabled
+  state) is the fake library's, but Check now, the Adapter lab and the video resolver use `instagramPacer`, so
+  `SyncViewModel(realPacer = ...)` (the container's `instagramPacer` in Mock mode, null with the real backend) ticks every
+  second like the main one and feeds `realPacerNote`; `SessionSection(pacerNote = ...)` shows it as one small line directly
+  under the status: "Instagram requests paused: N min left (cooldown)" while the real cooldown runs, else "Instagram requests
+  in 24 h: X / 600" (`realPacerLine`, minutes rounded up like the banner). `status()` only reads the log and the cooldown:
+  it makes no request, records nothing, and never gates the fake library's Sync. With the real backend nothing is added, the
+  existing lines already show that Pacer. It adds no request, rate or concurrency.
 - **Logout.** Log out first cancels a running sync (`controller.cancel()`), then forgets the session; the whole sequence runs
   under `NonCancellable` (the screen going away cannot drop a logout) and a failure to cancel the run is swallowed, so
   logging out always forgets the session.
-
+- **Storage failures never crash.** An exception that escapes `viewModelScope.launch` ends the app, so the two calls that
+  write settings after they have already changed something catch non-cancellation exceptions and say so, never with any
+  exception text. Logout clears the cookies first and writes the stored state second: if that write fails the cookies are
+  gone anyway and the session section's message line (`sessionMessage`, under the session status) says "Couldn't finish
+  logging out; try again" (a second Log out finishes it). Delete library has its own line in the Storage section
+  (`storageMessage`, directly under its button), and says exactly what was left once the rows are gone: "Library deleted, but
+  the account record couldn't be cleared; try Delete library again" (also when cached files failed too: a second delete
+  redoes both, and the next run would still be checked against the old account), "Library deleted; some cached files
+  couldn't be removed" (only thumbnails or cached videos are left: the library IS deleted), or "Couldn't delete the library;
+  try again" (the delete itself failed). `logout` clears the session line when it starts, and Delete library clears the
+  storage line when it starts.
 ## Login
 
 `app/.../ui/login/`, `ui/sync/SessionSection.kt`. Instagram's own login page in a WebView.

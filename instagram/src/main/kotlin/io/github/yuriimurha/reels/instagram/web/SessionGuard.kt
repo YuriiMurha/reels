@@ -10,7 +10,8 @@ import okhttp3.Response
  * arrives for a session that is gone, and OkHttp's cookie bridge (which runs after the network interceptors) would store
  * every `Set-Cookie` in it: the old sessionid, back in the jar the logout just emptied.
  *
- * "Before" is the `sessionid` the request actually carries, read from its `Cookie` header, not from the jar: OkHttp loads
+ * "Before" is the `sessionid` the request actually carries, read from its `Cookie` header (with [cookieValueIn], the same
+ * parser the jar's [cookieValue] uses for "after", so the two can't read a header differently), not from the jar: OkHttp loads
  * that header (Bridge) before it connects (DNS, TCP, TLS), and network interceptors run after the connection is up, so a
  * logout during the handshake has already emptied the jar while the request still holds the old session. "After" is the
  * jar's `sessionid` when the answer is back. If the two differ, the session changed during the flight, and the response
@@ -26,18 +27,11 @@ import okhttp3.Response
 internal class SessionGuard(private val cookies: CookieStore) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val sent = request.header("Cookie")?.let(::sessionIdOf)
+        val sent = request.header("Cookie")?.let { cookieValueIn(it, SESSION_COOKIE) }
         val response = chain.proceed(request)
         val now = cookies.cookieValue(request.url.toString(), SESSION_COOKIE)
         return if (sent == now) response else response.newBuilder().removeHeader("Set-Cookie").build()
     }
-
-    private fun sessionIdOf(cookieHeader: String): String? =
-        cookieHeader.split(';')
-            .map { it.trim() }
-            .firstOrNull { it.startsWith("$SESSION_COOKIE=") }
-            ?.substringAfter('=')
-            ?.takeIf { it.isNotEmpty() }
 
     private companion object {
         const val SESSION_COOKIE = "sessionid"

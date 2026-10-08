@@ -8,6 +8,7 @@ import io.github.yuriimurha.reels.instagram.lab.LabCall
 import io.github.yuriimurha.reels.instagram.lab.LabResult
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.session.userMessage
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import kotlinx.coroutines.CoroutineDispatcher
@@ -133,7 +134,13 @@ class AdapterLabViewModel(
         try {
             // The tap may wait seconds for the gate and the 2 s gap, and a challenge or an expiry can be stored meanwhile: the
             // Pacer asks again from inside the gate, right before it would send and log anything (R85, as R79 for the viewer).
-            pacer.interactive(precondition = { if (sessionState.first() !is SessionState.Valid) throw SessionNotValid() }) {
+            // The stored state alone is not enough: a logout, a paste or a login as another account since this tap started leaves
+            // it Valid, and the session layer says whether this tap's session is still the one in the jar.
+            pacer.interactive(
+                precondition = {
+                    if (sessionState.first() !is SessionState.Valid || signals.runSession(epoch) != RunSession.USABLE) throw SessionNotValid()
+                },
+            ) {
                 val result = lab.run(call, arg)
                 // Keep the answer first: the Pacer arms the cooldown only when the block THROWS RateLimited, and the
                 // screen must still get the shape of that 429.

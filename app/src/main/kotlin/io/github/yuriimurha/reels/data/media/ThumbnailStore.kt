@@ -1,6 +1,7 @@
 package io.github.yuriimurha.reels.data.media
 
 import java.io.File
+import java.io.IOException
 
 /** Thumbnails in app-private `filesDir/thumbs/{pk}.jpg`, which the OS never evicts (spec 5.4). */
 class ThumbnailStore(private val dir: File) {
@@ -17,8 +18,13 @@ class ThumbnailStore(private val dir: File) {
         fileFor(pk).delete()
     }
 
+    /**
+     * Removes every thumbnail it can. A file that cannot be removed is an [IOException] once all the others have been tried, so
+     * the caller can say so; the message has a count, never a name or a path. A folder that does not exist has nothing to remove.
+     */
     fun deleteAll() {
-        dir.listFiles()?.forEach { it.delete() }
+        val left = dir.listFiles()?.count { !it.delete() } ?: 0
+        if (left > 0) throw IOException("$left thumbnails could not be removed")
     }
 
     private fun fileFor(pk: String): File {

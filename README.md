@@ -135,9 +135,11 @@ and never contacts Instagram. A release build has no such switch and always uses
 - **Nothing is lost by switching back and forth.** The fake library and the real one are kept separately (fake:
   `reels.db`, real: `library.db`; their thumbnails and cached videos too). Shared between them are only the Instagram
   login and the request log behind the 600-per-24-hour budget, with its cooldown: session checks and lab calls count
-  against it even in Mock mode. In Mock mode the Sync screen shows the fake library's counters and cooldown, so a real
-  cooldown armed by a session check or a lab call is not shown there until you switch Mock mode off (the app still
-  refuses the requests).
+  against it even in Mock mode. In Mock mode the Sync screen's own counters and cooldown are the fake library's, so under
+  the session status it adds one line for the real ones: **Instagram requests in 24 h: X / 600**, or, while a real cooldown
+  (from a session check or a lab call) is running, **Instagram requests paused: N min left (cooldown)**. It is only read
+  from the app's own request log and never sends anything. With Mock mode off the line is not there: the existing
+  counters already are the real ones.
 
 ### Automated smoke tests (emulator only)
 
@@ -258,7 +260,9 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
   in as @handle" tap **Resume**.
 - **"Session expired. Log in again, then tap Resume."** Instagram no longer accepts the login, or a sessionid was pasted
   while the run was going (the run stops before its next request rather than carry on under another session). Tap
-  **Log in again** (finish any 2FA), then **Resume**. If Sync already says "Logged in as @handle", just tap **Resume**.
+  **Log in again** (finish any 2FA), then **Resume**. If Sync already says "Logged in as @handle" but Resume stops again
+  at once with this banner, the phone's login changed (for example you logged in as another account and left the login
+  screen right away): tap **Check now** first, then **Resume**.
 - **"Adapter needs repair: …"** Instagram's answer was not what the app expects; the text after the colon says where.
   Nothing was deleted. Don't keep tapping Resume (each tap sends the same request again). Run the Adapter lab once,
   and paste the banner and the lab's result in a Claude session. The common texts after the colon are explained in
@@ -285,7 +289,13 @@ sync**) refills from scratch. Use it when:
   sync under the other account stops with "This library belongs to another Instagram account";
 - the library looks wrong and you would rather start clean.
 
-It costs a full, paced re-sync.
+It costs a full, paced re-sync. If a line under the **Delete library** button then says "Library deleted, but the
+account record couldn't be cleared; try Delete library again", the items are gone but the phone still remembers the old
+account: tap **Delete library** once more. "Library deleted; some cached files couldn't be removed" means only some
+thumbnails or cached videos are left (they take space, nothing more; **Delete library** again tries them again), and
+"Couldn't delete the library; try again" means nothing was deleted. (Log out has a similar one, under the session status:
+"Couldn't finish logging out; try again". The login is already gone from the phone, and a second **Log out** finishes the
+job.)
 
 ## 6. Watching videos
 
@@ -370,8 +380,8 @@ adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/media_info.json 
 If an exported file contains an error such as `No such file or directory`, that button has no scrubbed copy (never
 tapped, or its latest answer was not JSON).
 
-**Read each scrubbed file before you hand it over or commit it: redaction is heuristic.** A bare lowercase handle used
-as a key, or as a one-word value, can't be told from schema and is kept. The pre-commit guard only catches session
+**Read each scrubbed file before you hand it over or commit it: redaction is heuristic.** A lowercase handle used
+as a key, or a one-word value (letters and underscores, any case), can't be told from schema and is kept. The pre-commit guard only catches session
 material, not personal data.
 
 **Hand it back.** Once you have read them, give the five files and the on-screen results (long-press the shape text to select and copy it, or
