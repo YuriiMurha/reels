@@ -179,7 +179,7 @@ internal fun allowedUrlOrNull(url: String?): String? = url?.takeIf { it.isNotBla
 @SuppressLint("MissingOnRenderProcessGone")
 internal class InstagramOnlyClient(
     /** Told, on the main thread, that [WebView]'s renderer is gone; the view can no longer be used and must be destroyed. */
-    private val onRendererGone: (WebView) -> Unit = {},
+    private val onRendererGone: (WebView) -> Unit,
 ) : WebViewClient() {
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
         !isAllowedPage(request.url)

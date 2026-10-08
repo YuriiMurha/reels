@@ -57,6 +57,11 @@ class LibraryRepository(
      * swallowed (cancellation excepted): a page that will not die must not stop the delete.
      */
     private val beforeSessionChange: suspend () -> Unit = {},
+    /**
+     * Debug builds only (the app passes `null` otherwise): one line when [beforeSessionChange] failed, naming the exception's
+     * class and nothing else (never its message).
+     */
+    private val debugLog: ((String) -> Unit)? = null,
 ) {
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
@@ -112,7 +117,8 @@ class LibraryRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // Intentionally ignored: see beforeSessionChange.
+            // Swallowed on purpose (see beforeSessionChange), but a debug build is told: the class only, never the message.
+            debugLog?.invoke("transport reset failed: ${e.javaClass.simpleName}")
         }
         db.deleteLibrary()
         var accountRecordKept = false

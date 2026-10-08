@@ -96,8 +96,9 @@ class InstagramTransportWiringTest {
         assertFalse(container.instagramTransportCreated, "a Mock mode run built the transport")
     }
 
+    /** Building the real graph, and everything that only changes or asks about the session, makes no transport; a request would. */
     @Test
-    fun theRealModeBuildsTheTransportOnlyWhenARequestNeedsIt() = runBlocking {
+    fun theRealModeBuildsNoTransportUntilARequest() = runBlocking {
         val container = container(useFake = false)
         assertTrue(container.backend is Backend.Real)
         container.adapterLab
@@ -109,9 +110,13 @@ class InstagramTransportWiringTest {
         assertFalse(container.instagramTransportCreated, "a hook, or a check with no session, built the transport")
     }
 
-    /** Once something did build the transport (not its page: that is made by the first call), the hooks do reach it, and finish. */
+    /**
+     * Once something did build the transport (not its page: that is made by the first call), the hooks run against it and finish
+     * (no hang, no failure). That they reach it is not observable here: its state is private, and a call would load the site,
+     * which no test may do. `BackendWiringGuardTest` pins what each hook calls.
+     */
     @Test
-    fun theHooksReachATransportThatExists() = runBlocking {
+    fun theHooksFinishOnATransportThatExists() = runBlocking {
         val container = container(useFake = false)
         container.instagramTransport
         assertTrue(container.instagramTransportCreated)

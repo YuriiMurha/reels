@@ -2,6 +2,7 @@ package io.github.yuriimurha.reels.di
 
 import io.github.yuriimurha.reels.testutil.KotlinSource.callArguments
 import io.github.yuriimurha.reels.testutil.KotlinSource.code
+import io.github.yuriimurha.reels.testutil.KotlinSource.skeleton
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -74,6 +75,87 @@ class BackendWiringGuardTest {
         }
     }
 
+    /**
+     * Every class, object (named, companion or anonymous) and interface of [sources] that lists `InstagramTransport` among its
+     * supertypes, as `path: <keyword> <name>`. The header runs from the keyword to the `{` that opens the body (or the end of the
+     * declaration's line when it has none); what is inside the primary constructor's parentheses is a parameter, not a supertype.
+     */
+    private fun declaredTransports(sources: Map<String, String>): List<String> {
+        val found = mutableListOf<String>()
+        for ((path, text) in sources) {
+            val shape = skeleton(text)
+            for (keyword in Regex("""(?<![:\w])(?:class|object|interface)\b""").findAll(shape)) {
+                var depth = 0
+                var end = keyword.range.last + 1
+                while (end < shape.length) {
+                    val c = shape[end]
+                    if (c == '(') depth++
+                    if (c == ')') depth--
+                    if (depth == 0 && c == '{') break
+                    // A header goes on over a line that ends in `:` or `,`, and stops at any other end of line.
+                    if (depth == 0 && c == '\n' && shape.substring(keyword.range.first, end).trimEnd().lastOrNull() !in listOf(':', ',')) break
+                    end++
+                }
+                val header = StringBuilder()
+                var open = 0
+                for (c in shape.substring(keyword.range.first, end)) {
+                    if (c == '(') open++
+                    if (open == 0) header.append(c) else header.append(' ')
+                    if (c == ')') open--
+                }
+                if (Regex(""":[^{]*\bInstagramTransport\b""").containsMatchIn(header)) {
+                    found += "$path: " + (Regex("""^(?:class|object|interface)(?:\s+\w+)?""").find(header)?.value ?: header.toString().trim())
+                }
+            }
+        }
+        return found
+    }
+
+    /**
+     * The one thing that sends Instagram's API requests is the WebView transport. A second implementation (an OkHttp one, a
+     * wrapper that retries or fans out) would be a path around the Pacer's one fetch per call and the page's own TLS and headers.
+     */
+    @Test
+    fun theOnlyImplementationOfTheTransportIsTheWebViewTransport() {
+        val sources = allMain()
+        assertEquals(listOf("transport/WebViewTransport.kt: class WebViewTransport"), declaredTransports(sources))
+        // The scanner itself: each form of declaration it must see (the real tree has just the one above).
+        val forms = mapOf(
+            "named class" to "class Sneaky(val x: Int = 0) : InstagramTransport {",
+            "named object" to "private object Sneaky : InstagramTransport {",
+            "anonymous object" to "val t = object : InstagramTransport {",
+            "second supertype" to "class Sneaky : Base(), InstagramTransport {",
+            "interface extending it" to "interface Sneaky : InstagramTransport {",
+            "delegation" to "class Sneaky(private val inner: InstagramTransport) : InstagramTransport by inner",
+            "supertype on the next line" to "class Sneaky :\n    InstagramTransport {",
+        )
+        for ((what, text) in forms) assertEquals(1, declaredTransports(mapOf("a.kt" to text)).size, "the scan must see $what: $text")
+        // What only mentions the type is not a declaration of one.
+        for (text in listOf(
+            "class Holder(private val transport: InstagramTransport) {", "fun make(): InstagramTransport {", "val t: InstagramTransport = x",
+            "class A(val f: () -> InstagramTransport)", "val k = WebViewTransport::class",
+        )) {
+            assertEquals(emptyList(), declaredTransports(mapOf("a.kt" to text)), text)
+        }
+    }
+
+    /**
+     * The real client, the session probe and the Adapter lab are the three users of the transport, and they are built in one place,
+     * so each gets `{ instagramTransport }` there and nowhere else is a second client, probe or lab (with another transport, or
+     * none of the container's hooks) created.
+     */
+    @Test
+    fun theClientTheProbeAndTheLabAreConstructedOnlyByTheContainer() {
+        val sources = allMain()
+        assertTrue(sources.size > 50, "the scan found ${sources.size} files")
+        for (name in listOf("WebInstagramClient", "WebSessionProbe", "AdapterLab")) {
+            val construction = Regex("""(?<!class )(?<!\w)$name\s*\(|::\s*$name\b""")
+            val users = sources.mapValues { (_, text) -> text.lines().filterNot { it.trimStart().startsWith("import ") }.joinToString("\n") }
+                .filterValues { construction.containsMatchIn(it) }.keys
+            assertEquals(setOf("di/AppContainer.kt"), users, "$name is constructed only by the container")
+        }
+    }
+
     /** The WebView behind the transport is made in one place, so Mock mode and the guards above can reason about when it exists. */
     @Test
     fun androidWebPageIsConstructedOnlyByTheContainer() {
@@ -103,6 +185,21 @@ class BackendWiringGuardTest {
             assertTrue("instagramTransportLazy.isInitialized()" in body, "$guarded must only act on a transport that exists: $body")
         }
         assertTrue(Regex("""instagramTransportLazy:\s*Lazy<WebViewTransport>\s*=\s*lazy\s*\{""").containsMatchIn(container), "the transport stays a Lazy that can be asked")
+    }
+
+    /** A reset that fails is logged by the two repositories that swallow it, in debug builds only: the one sink is `null` in a release build. */
+    @Test
+    fun theResetFailureLogGoesThroughTheDebugOnlySink() {
+        val container = main("di/AppContainer.kt")
+        val definition = container.lines().single { Regex("""val debugLog\b""").containsMatchIn(it) }
+        assertTrue(
+            Regex("""=\s*if\s*\(\s*BuildConfig\.DEBUG\s*\)\s*\{[^}]*Log\.d\(\s*"InstagramHttp"[^}]*}\s*else\s+null\b""").containsMatchIn(definition),
+            "the sink: $definition",
+        )
+        for (call in listOf("SessionRepository(", "LibraryRepository(")) {
+            val arguments = callArguments(container, call).single()
+            assertTrue(Regex("""debugLog\s*=\s*debugLog\b""").containsMatchIn(arguments), "$call needs the debug-only sink: $arguments")
+        }
     }
 
     /**

@@ -240,6 +240,34 @@ class LibraryRepositoryTest {
         assertEquals(emptyList(), repository.collectionCards().first())
     }
 
+    /** The failure is swallowed, but a debug build is told its class (never its message, which could hold anything). */
+    @Test
+    fun aPageThatCannotBeDestroyedIsLoggedByClassNameOnly() = runTest {
+        givenLibrary()
+        val lines = mutableListOf<String>()
+        val repository = LibraryRepository(
+            db, thumbs,
+            beforeSessionChange = { throw IllegalStateException("the WebView is gone: secret-detail") },
+            debugLog = lines::add,
+        )
+
+        assertEquals(LibraryDeletion.COMPLETE, repository.deleteLibrary())
+
+        assertEquals(emptyList(), repository.collectionCards().first(), "the library is gone")
+        assertEquals(listOf("transport reset failed: IllegalStateException"), lines)
+    }
+
+    @Test
+    fun aResetThatWorksLogsNothing() = runTest {
+        givenLibrary()
+        val lines = mutableListOf<String>()
+        val repository = LibraryRepository(db, thumbs, beforeSessionChange = {}, debugLog = lines::add)
+
+        assertEquals(LibraryDeletion.COMPLETE, repository.deleteLibrary())
+
+        assertEquals(emptyList(), lines)
+    }
+
     @Test
     fun aCancelledHookStillPropagatesTheCancellation() = runTest {
         givenLibrary()

@@ -28,7 +28,7 @@ class LoginNavigationTest {
 
     /** True means the WebView does NOT load it (and, being handled here, no other app is started either). */
     private fun blocked(url: String): Boolean =
-        InstagramOnlyClient().shouldOverrideUrlLoading(WebView(ApplicationProvider.getApplicationContext()), request(url))
+        InstagramOnlyClient(onRendererGone = {}).shouldOverrideUrlLoading(WebView(ApplicationProvider.getApplicationContext()), request(url))
 
     @Test
     fun httpsPagesOnInstagramAndItsLoginPartnersLoadInsideTheWebView() {

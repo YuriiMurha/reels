@@ -59,7 +59,7 @@ class VideoWiringGuardTest {
     /** A video request carries no cookies (spec 8.3): nothing on the video path may touch the jar or Instagram's API client. */
     @Test
     fun theVideoPathNeverTouchesACookieJar() {
-        val forbidden = Regex("""CookieHandler|CookieManager|CookieStore|cookieStore|CookieJar|instagramHttp|setDefaultRequestProperties|"Cookie"""")
+        val forbidden = Regex("""CookieHandler|CookieManager|CookieStore|cookieStore|CookieJar|instagramHttp|instagramTransport|WebViewTransport|setDefaultRequestProperties|"Cookie"""")
         for (path in listOf("data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt", "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt")) {
             val hit = forbidden.find(main(path))
             assertTrue(hit == null, "$path must not use a cookie jar or the API client: ${hit?.value}")

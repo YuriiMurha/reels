@@ -18,7 +18,9 @@ class JavascriptInterfaceGuardTest {
         assertTrue(files.any { it.extension == "kt" } && files.any { it.name == "ig_fetch.js" }, "unit tests must run from the app module directory")
         val users = files
             .filter { file ->
-                val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return@filter false // a binary resource
+                // readText(UTF_8) decodes bytes that are not text with replacement characters instead of failing, so a binary resource is
+                // scanned too (not skipped); only a file that cannot be read at all is left out.
+                val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return@filter false
                 "addJavascriptInterface" in if (file.extension == "kt" || file.extension == "java") KotlinSource.code(text) else text
             }
             .map { it.invariantSeparatorsPath.substringAfter("src/main/") }

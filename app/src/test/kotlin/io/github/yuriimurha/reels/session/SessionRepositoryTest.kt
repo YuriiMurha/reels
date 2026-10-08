@@ -62,10 +62,11 @@ class SessionRepositoryTest {
         requestLog: InMemoryRequestLog = log,
         beforeSessionChange: suspend () -> Unit = {},
         beforeCheck: suspend () -> Unit = {},
+        debugLog: ((String) -> Unit)? = null,
     ): SessionRepository {
         settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
         val pacer = Pacer(PacingPolicy.Conservative, requestLog, cooldowns, Random(1), now = { testScheduler.currentTime })
-        return SessionRepository(cookies, probe, pacer, settings, beforeSessionChange, beforeCheck)
+        return SessionRepository(cookies, probe, pacer, settings, beforeSessionChange, beforeCheck, debugLog)
     }
 
     /**
@@ -437,6 +438,35 @@ class SessionRepositoryTest {
         assertEquals(SessionState.LoggedOut, repository.state.first())
     }
 
+    /** A reset that fails is swallowed, but a debug build says so: the class of the failure, never its message (it could hold anything). */
+    @Test
+    fun aPageThatCannotBeDestroyedIsLoggedByClassNameOnly() = runTest {
+        signedIn()
+        val lines = mutableListOf<String>()
+        val repository = repository(
+            beforeSessionChange = { throw IllegalStateException("the WebView is gone: secret-detail") },
+            debugLog = lines::add,
+        )
+
+        repository.logout()
+
+        assertFalse(repository.hasSessionCookies(), "the logout still happened")
+        assertEquals(SessionState.LoggedOut, repository.state.first())
+        assertEquals(listOf("transport reset failed: IllegalStateException"), lines)
+    }
+
+    @Test
+    fun aResetThatWorksLogsNothing() = runTest {
+        signedIn()
+        val lines = mutableListOf<String>()
+        val repository = repository(beforeSessionChange = reset, debugLog = lines::add)
+
+        repository.logout()
+
+        assertEquals(listOf("reset"), order)
+        assertEquals(emptyList(), lines)
+    }
+
     @Test
     fun aPageThatCannotBeDestroyedNeverStopsAPastesRollback() = runTest {
         signedIn()
@@ -570,6 +600,63 @@ class SessionRepositoryTest {
             assertEquals(SessionState.Valid("tester"), check.await())
         }
         assertEquals(listOf("allow", "reset", "probe"), order)
+    }
+
+    /**
+     * What a check does about the page depends on the state stored when its turn at the Pacer's gate comes, not on the one stored
+     * when `validate()` began: it can wait for the gate (behind another request, with the Pacer's gaps) while a login or an
+     * answer lands. [first] makes the state the check starts on, [meanwhile] changes it while another request holds the gate.
+     */
+    private fun theCheckReadsTheStoredStateInsideTheGate(
+        first: suspend (SessionRepository, Int) -> Unit,
+        meanwhile: suspend (SessionRepository, Int) -> Unit,
+        expectedOrder: List<String>,
+    ) = runBlocking {
+        signedIn()
+        val ticks = java.util.concurrent.atomic.AtomicLong(0)
+        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = { ticks.addAndGet(10_000) })
+        val repository = SessionRepository(
+            cookies, probe, pacer,
+            SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "gate3.preferences_pb") }),
+            beforeSessionChange = reset, beforeCheck = allow,
+        )
+        probeRecordsItself()
+        val epoch = repository.epoch()
+        first(repository, epoch)
+        val holding = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+
+        withTimeout(20_000) {
+            val other = async { pacer.interactive { holding.complete(Unit); release.await() } } // some other request is out
+            holding.await()
+            val check = async { repository.validate() }
+            kotlinx.coroutines.delay(300) // far longer than the check needs to reach the gate
+            assertEquals(emptyList(), order, "the check is still waiting for the gate")
+
+            meanwhile(repository, epoch)
+            release.complete(Unit)
+            other.await()
+            assertEquals(SessionState.Valid("tester"), check.await())
+        }
+        assertEquals(expectedOrder, order)
+    }
+
+    @Test
+    fun aCheckResetsWhenTheStateStoppedBeingValidWhileItWaitedForTheGate() {
+        theCheckReadsTheStoredStateInsideTheGate(
+            first = { repository, epoch -> repository.sessionOk("tester", epoch) }, // Valid when validate() begins
+            meanwhile = { repository, epoch -> repository.loginRequired(epoch) }, // Expired when its turn comes
+            expectedOrder = listOf("allow", "reset", "probe"),
+        )
+    }
+
+    @Test
+    fun aCheckKeepsItsPageWhenTheStateBecameValidWhileItWaitedForTheGate() {
+        theCheckReadsTheStoredStateInsideTheGate(
+            first = { repository, epoch -> repository.loginRequired(epoch) }, // Expired when validate() begins
+            meanwhile = { repository, epoch -> repository.sessionOk("tester", epoch) }, // Valid when its turn comes
+            expectedOrder = listOf("allow", "probe"),
+        )
     }
 
     @Test

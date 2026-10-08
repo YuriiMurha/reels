@@ -57,6 +57,11 @@ class SessionRepository(
      * transport counts its page limit afresh (`allowNewAttempts()`). Runs inside the Pacer's gate, right before the request.
      */
     private val beforeCheck: suspend () -> Unit = {},
+    /**
+     * Debug builds only (the app passes `null` otherwise): one line when [beforeSessionChange] failed, naming the exception's
+     * class and nothing else (never its message).
+     */
+    private val debugLog: ((String) -> Unit)? = null,
 ) : SessionSignals, LoginSession {
     /** The last known state, shown without a request (spec D7). */
     val state: Flow<SessionState> = settings.session.map { it.toState() }
@@ -282,7 +287,8 @@ class SessionRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // Intentionally ignored.
+            // Swallowed on purpose, but a debug build is told: the class only, never the message.
+            debugLog?.invoke("transport reset failed: ${e.javaClass.simpleName}")
         }
     }
 

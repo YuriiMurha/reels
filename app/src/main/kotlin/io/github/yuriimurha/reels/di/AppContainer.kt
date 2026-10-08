@@ -60,6 +60,9 @@ class AppContainer(context: Context) {
     /** Read once per process, so the library, its thumbnails and the backend can never disagree within one run. */
     val usesFake: Boolean = backendChoice.useFake
 
+    /** Where a debug build's Instagram-side lines go (logcat tag `InstagramHttp`); `null` in a release build, which logs nothing. */
+    private val debugLog: ((String) -> Unit)? = if (BuildConfig.DEBUG) { line -> Log.d("InstagramHttp", line) } else null
+
     /**
      * `library.db`: the real library, and the `api_request` log behind the real 24 h budget even in Mock mode, so session
      * checks and lab calls made in Mock mode still count (P2). The first time it is opened, the last 24 h of requests are
@@ -81,6 +84,7 @@ class AppContainer(context: Context) {
             clearVideoCache = { videoCache.clear() },
             forgetAccount = { libraryAccount.forget() },
             beforeSessionChange = ::resetInstagramTransport,
+            debugLog = debugLog,
         )
     }
 
@@ -135,7 +139,7 @@ class AppContainer(context: Context) {
             createPage = { AndroidWebPage(context) },
             homeUrl = WebEndpoints.HOME_URL,
             script = context.assets.open("ig_fetch.js").bufferedReader().use { it.readText() },
-            log = if (BuildConfig.DEBUG) { line -> Log.d("InstagramHttp", line) } else null,
+            log = debugLog,
         )
     }
 
@@ -192,6 +196,7 @@ class AppContainer(context: Context) {
             settings = settings,
             beforeSessionChange = ::resetInstagramTransport,
             beforeCheck = ::allowNewInstagramAttempts,
+            debugLog = debugLog,
         )
     }
 
