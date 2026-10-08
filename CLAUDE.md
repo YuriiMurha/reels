@@ -16,7 +16,9 @@ never distributed.
 - Never commit or log session material (`sessionid`, cookies, CSRF tokens) or raw Instagram responses.
   Test fixtures must be scrubbed of real handles, captions and URLs.
 - All Instagram-specific code (endpoints, headers, pagination, JSON field extraction) lives in the single
-  Instagram adapter module. Nothing else talks to Instagram.
+  Instagram adapter module. Nothing else talks to Instagram. The only things in `:app` that repeat its names are the
+  hidden page's `ig_fetch.js` (three header values, pinned to `WebHeaders` by `WebViewTransportTest`) and
+  `AndroidWebPage`'s default origin (a string no test compares with `WebEndpoints`).
 - Sync pacing is a hard requirement. No change may raise request rates or concurrency without saying so
   explicitly in the commit and in `ARCHITECTURE.md`.
 - The repo is public on GitHub: treat every commit as published.

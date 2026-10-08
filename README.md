@@ -240,19 +240,25 @@ installed (step 1 above), the phone connected by USB and the exports of step 1.4
 
 1. **Wait for any cooldown to end.** While Sync shows "Cooling down after a rate limit: N min left" the app sends nothing.
    Don't reinstall or clear the app's data to skip it.
-2. **Open Sync → Developer → Adapter lab** (Mock mode off). Its button works only while Sync says "Logged in as @handle".
-   If Sync says "Not logged in", the lab is greyed out: tap **Log in** instead. The check after the login is the same one
-   request, and everything below applies to its log lines. Tap no other button that sends a request.
-3. **Clear the phone's log, then tap Who am I, only that, once.** In a terminal on the Mac:
+2. **Clear the phone's log**, before you open Sync, so the log holds every request from here on, whichever way you go
+   next. In a terminal on the Mac:
 
    ```bash
    adb -d logcat -c
    ```
 
-   Then tap **Who am I** and wait for the result. It sends one API request. The first request after the app starts also
-   loads instagram.com once in the hidden page, and the site's own requests come with that load, as they do in any
-   browser; they are not counted in "Requests in 24 h". The screen should show `200` and `ok`.
-4. **Paste the `InstagramHttp` log lines into a Claude session**, with the code and classification the screen showed:
+3. **Send exactly one request.** Open **Sync** (Mock mode off) and read the session line:
+   - **"Logged in as @handle":** open **Developer → Adapter lab** and tap **Who am I**, only that, once, then wait for the
+     result. The screen should show `200` and `ok`.
+   - **Anything else** ("Not logged in", "Session expired", "Instagram wants verification"): the lab is greyed out, because
+     it works only for a valid session. Tap **Log in** (or **Log in again**; for a verification, **Resolve on Instagram**,
+     then **Check again**). The check after the login is the one request, so skip Who am I and go straight to step 4.
+
+   Tap no other button that sends a request. Either way the first request after the app starts also loads instagram.com
+   once in the hidden page, and the site's own requests come with that load, as they do in any browser; they are not
+   counted in "Requests in 24 h".
+4. **Paste the `InstagramHttp` log lines into a Claude session**, with what the screen showed (the code and classification
+   under Who am I, or the session line after the login):
 
    ```bash
    adb -d logcat -d -s InstagramHttp
@@ -458,9 +464,12 @@ adb -d logcat -s InstagramHttp
 (Ctrl-C stops it.) Debug builds log one line per request to Instagram's API: `GET <path> -> <code> (<ms> ms)`, for example
 `GET api/v1/accounts/edit/web_form_data/ -> 200 (412 ms)`. A run of three or more digits in the path shows as `<n>`. A reply
 that is not 2xx adds a second line, a redacted summary (`<-- 429 reply: ...`). Where there is no HTTP code the line says what
-happened instead (`timeout`, `login page`, `challenge page`, `load http 429`, ...). No cookie, token or header is logged: the
-app never sees them. One `GET` line is one request. The hidden page's own load of instagram.com, thumbnails and videos are
-not in this log. A release build logs nothing.
+happened instead (`timeout`, `login page`, `challenge page`, `load http 429`, ...). Two other lines can appear:
+`page closed (idle)` (the hidden page was closed after 5 minutes without a request) and `transport reset failed: <Class>`
+(a logout, a paste or Delete library could not close the page; the class name only). No cookie, token or header is logged:
+the app never sees them. One `GET` line is one request the app made: the browser may re-send a GET after a dropped
+connection, as it would for the website itself, and the app does not see that. The hidden page's own load of instagram.com,
+thumbnails and videos are not in this log. A release build logs nothing.
 
 ### M2: session
 

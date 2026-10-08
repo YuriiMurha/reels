@@ -258,7 +258,7 @@ class SessionRepository(
      * that same gate, so taking it here would leave each waiting for the other. It needs no lock: [sessionEpoch] is volatile
      * and the state is one DataStore read. The state is read first, the epoch second, the jar last: logout, paste and a new
      * login's check bump the epoch before they record anything else, so one that has begun is always seen. One request can still
-     * go out under the new account if the cookies change between this check and OkHttp reading them a moment later.
+     * go out under the new account if the cookies change between this check and the hidden page (Chromium) reading them a moment later.
      */
     override suspend fun runSession(epoch: Int): RunSession {
         val stored = state.first()
