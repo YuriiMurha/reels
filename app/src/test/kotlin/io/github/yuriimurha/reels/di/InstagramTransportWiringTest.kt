@@ -7,15 +7,18 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.session.SessionState
+import io.github.yuriimurha.reels.testutil.MainThreadTimeout
+import android.os.Looper
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -28,6 +31,10 @@ import kotlin.test.assertTrue
  */
 @RunWith(AndroidJUnit4::class)
 class InstagramTransportWiringTest {
+    /** T6: a hook that waits for the main thread must fail a test here, never hang the suite. */
+    @get:Rule
+    val timeout = MainThreadTimeout(120_000)
+
     private val context: Context = ApplicationProvider.getApplicationContext()
     private val containers = mutableListOf<AppContainer>()
 
@@ -81,24 +88,40 @@ class InstagramTransportWiringTest {
         assertFalse(container.instagramTransportCreated, "a hook built the transport in Mock mode")
     }
 
-    /** The fake library's engine, started for real and stopped after its first requests: its run start must not reach the transport. */
+    /**
+     * The fake library's engine, started for real and stopped after its first requests: its run start must not reach the
+     * transport. The run is on a background thread and the test thread (Robolectric's main thread) idles the main looper while
+     * it waits, never blocks it: a hook that hopped to the main thread (as the transport's do) then runs, builds the transport
+     * and fails the assertion, instead of waiting for a looper nobody turns (T6).
+     */
     @Test
-    fun aMockModeSyncRunNeverBuildsTheTransport() = runBlocking {
+    fun aMockModeSyncRunNeverBuildsTheTransport() {
         val container = container(useFake = true)
-        val runId = container.db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = 0))
+        val runId = runBlocking { container.db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = 0)) }
         val engine = container.syncEngine()
+        val requestsUsed = { runBlocking { container.db.syncDao().run(runId)?.requestsUsed ?: 0 } }
 
-        val run = launch(Dispatchers.Default) { engine.run(runId) }
+        val run = CoroutineScope(Dispatchers.Default).launch { engine.run(runId) }
         try {
-            withTimeout(20_000) {
-                while ((container.db.syncDao().run(runId)?.requestsUsed ?: 0) < 2) delay(20)
-            }
+            idleTheMainLooperUntil(20_000) { requestsUsed() >= 2 }
         } finally {
-            run.cancelAndJoin()
+            run.cancel()
+            assertTrue(idleTheMainLooperUntil(20_000) { run.isCompleted }, "the run did not stop")
         }
 
-        assertTrue((container.db.syncDao().run(runId)?.requestsUsed ?: 0) >= 2, "precondition: the run really sent requests to the fake library")
+        assertTrue(requestsUsed() >= 2, "precondition: the run really sent requests to the fake library")
         assertFalse(container.instagramTransportCreated, "a Mock mode run built the transport")
+    }
+
+    /** Turns the main looper (so work posted to the main thread runs) until [condition] holds or [timeoutMs] passes. */
+    private fun idleTheMainLooperUntil(timeoutMs: Long, condition: () -> Boolean): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (System.nanoTime() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (condition()) return true
+            Thread.sleep(20)
+        }
+        return condition()
     }
 
     /** Building the real graph, and everything that only changes or asks about the session, makes no transport; a request would. */
@@ -117,8 +140,8 @@ class InstagramTransportWiringTest {
 
     /**
      * Once something did build the transport (not its page: that is made by the first call), the hooks run against it and finish
-     * (no hang, no failure). That they reach it is not observable here: its state is private, and a call would load the site,
-     * which no test may do. `BackendWiringGuardTest` pins what each hook calls.
+     * (no hang, no failure): the `withTimeout` is the assertion. That they reach it is not observable here: its state is
+     * private, and a call would load the site, which no test may do. `BackendWiringGuardTest` pins what each hook calls.
      */
     @Test
     fun theHooksFinishOnATransportThatExists() = runBlocking {
@@ -127,7 +150,5 @@ class InstagramTransportWiringTest {
         assertTrue(container.instagramTransportCreated)
 
         withTimeout(20_000) { container.runEveryHook() }
-
-        assertTrue(container.instagramTransportCreated)
     }
 }

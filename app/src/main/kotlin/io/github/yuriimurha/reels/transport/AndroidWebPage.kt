@@ -22,9 +22,15 @@ import java.io.IOException
  * jar the login screen fills.
  *
  * The page talks back through `window.igBridge.postMessage(string)`, installed by
- * [WebViewCompat.addWebMessageListener] for [allowedOrigin] only (tests pass a local one). `addJavascriptInterface` is
- * never used: it would expose an object to every page and frame the WebView ever shows. A message counts only from the main
- * frame of exactly that origin, and only as a string.
+ * [WebViewCompat.addWebMessageListener] for [allowedOrigin] only (tests pass a local one; the default is the scheme and host
+ * of `WebEndpoints.HOME_URL`, pinned by `AndroidWebPageGuardTest`). `addJavascriptInterface` is never used: it would expose an
+ * object to every page and frame the WebView ever shows. A message counts only when the platform credits it to the main frame
+ * of exactly that origin, and only as a string.
+ *
+ * The trust boundary is that origin, not the main frame (R109). The main-frame check stops only a same-origin subframe's own
+ * `window.igBridge`: such a frame can still reach `parent.igBridge` or `top.igBridge`, whose messages the platform credits to
+ * the main frame (pinned on the emulator), and any instagram.com script can forge a reply or replace `__igFetch`. That is
+ * accepted: it is no more than trusting Instagram's own replies, which the app does anyway.
  *
  * A main-frame document answered with an HTTP error (a 429 page, a 503) fails [load] with [PageHttpError], and a dead
  * renderer ([WebViewClient.onRenderProcessGone]) marks the page gone: [currentUrl] is null and [onGone] fires.
@@ -32,7 +38,7 @@ import java.io.IOException
  * Throws on construction when this WebView can't post messages (`WEB_MESSAGE_LISTENER` unsupported) or can't be created at
  * all (no WebView provider); [WebViewTransport] turns either into `Transient`.
  *
- * Exercised on the emulator against a local test server; the JVM tests use a fake [WebPage].
+ * Exercised on the emulator against a local test server; the JVM tests use a fake [WebPage], and drive [PageClient] by hand.
  */
 class AndroidWebPage(
     context: Context,
@@ -59,7 +65,16 @@ class AndroidWebPage(
             } else {
                 throw IllegalStateException("this WebView cannot post messages to the app")
             }
-            webView.webViewClient = PageClient()
+            webView.webViewClient = PageClient(
+                isAllowed = ::isAllowed,
+                onLoaded = { url -> loading?.complete(url) },
+                onLoadFailed = { error -> loading?.completeExceptionally(error) },
+                onGone = {
+                    gone = true
+                    loading?.completeExceptionally(IOException("render process gone"))
+                    goneListener?.invoke()
+                },
+            )
         } catch (e: Exception) {
             webView.destroy()
             throw e
@@ -115,40 +130,55 @@ class AndroidWebPage(
         WebEndpoints.isLoginPage(url.scheme, url.host) ||
             (url.scheme == origin.scheme && url.host == origin.host && url.port == origin.port)
 
-    // onRenderProcessGone IS overridden below. androidx.webkit's lint check also flags the `WebViewClient()` constructor call in
-    // the supertype list of every subclass, override or not, so the one remaining warning is a false positive.
-    @SuppressLint("MissingOnRenderProcessGone")
-    private inner class PageClient : WebViewClient() {
-        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = !isAllowed(request.url)
-
-        override fun onPageFinished(view: WebView, url: String?) {
-            loading?.complete(url.orEmpty())
-        }
-
-        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-            if (request.isForMainFrame) loading?.completeExceptionally(IOException("page load failed (error ${error.errorCode})"))
-        }
-
-        /** The home document itself was refused (429, 503, ...): the load fails with the status, whatever the page shows. */
-        override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
-            if (request.isForMainFrame && errorResponse.statusCode >= 400) loading?.completeExceptionally(PageHttpError(errorResponse.statusCode))
-        }
-
-        /**
-         * The renderer died (out of memory, killed in the background). Returning false would crash the app. This page is
-         * dead either way: it is marked gone, a load in progress fails, and the transport is told so it can fail a call
-         * in flight at once and drop the page.
-         */
-        override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
-            gone = true
-            loading?.completeExceptionally(IOException("render process gone"))
-            goneListener?.invoke()
-            return true
-        }
-    }
-
     private companion object {
         /** The object name the page posts to; `ig_fetch.js` uses the same one. */
         const val BRIDGE = "igBridge"
+    }
+}
+
+/**
+ * The hidden page's [WebViewClient]. Top-level, with what it does said through callbacks, so it is tested without a WebView
+ * provider (as the login screen's `InstagramOnlyClient` is); [AndroidWebPage] wires the callbacks to its load and its
+ * listeners.
+ */
+// onRenderProcessGone IS overridden below. androidx.webkit's lint check also flags the `WebViewClient()` constructor call in the
+// supertype list of every subclass, override or not, so the one remaining warning is a false positive.
+@SuppressLint("MissingOnRenderProcessGone")
+internal class PageClient(
+    /** Whether the page may go to a URL; any other navigation is refused. */
+    private val isAllowed: (Uri) -> Boolean,
+    /** The main frame finished loading, on this URL (empty when the WebView gives none). */
+    private val onLoaded: (String) -> Unit,
+    /** The main frame's load failed: a [PageHttpError] for an HTTP error status, an [IOException] otherwise. */
+    private val onLoadFailed: (IOException) -> Unit,
+    /** The renderer is gone: the page is dead. */
+    private val onGone: () -> Unit,
+) : WebViewClient() {
+    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = !isAllowed(request.url)
+
+    override fun onPageFinished(view: WebView, url: String?) {
+        onLoaded(url.orEmpty())
+    }
+
+    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+        if (request.isForMainFrame) onLoadFailed(IOException("page load failed (error ${error.errorCode})"))
+    }
+
+    /**
+     * The home document itself was refused (429, 503, 404, ...): the load fails with the status, whatever the page shows. A
+     * subframe's or a sub-resource's error status is not the page's.
+     */
+    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
+        if (request.isForMainFrame && errorResponse.statusCode >= 400) onLoadFailed(PageHttpError(errorResponse.statusCode))
+    }
+
+    /**
+     * The renderer died (out of memory, killed in the background). Returning false would crash the app. This page is dead
+     * either way: [onGone] marks it gone, fails a load in progress and tells the transport, so it can fail a call in flight at
+     * once and drop the page.
+     */
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        onGone()
+        return true
     }
 }

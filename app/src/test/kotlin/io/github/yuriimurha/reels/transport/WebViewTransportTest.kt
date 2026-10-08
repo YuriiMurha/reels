@@ -7,6 +7,7 @@ import io.github.yuriimurha.reels.instagram.web.WebHeaders
 import io.github.yuriimurha.reels.instagram.web.classifyReply
 import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
+import io.github.yuriimurha.reels.sync.pacing.LONGEST_TRANSIENT_WAIT_MS
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import kotlinx.coroutines.CompletableDeferred
@@ -260,9 +261,16 @@ class WebViewTransportTest {
         assertTrue(c.isActive)
         page.post(reply(2, body = "for c"))
         assertEquals("for c", c.await().getOrThrow().body)
-        // And one nobody waits for any more is just dropped.
+        // And one nobody waits for any more is just dropped: it answers neither now nor the next call.
         page.post(reply(2, body = "late"))
         runCurrent()
+        val d = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        page.post(reply(2, body = "late again"))
+        runCurrent()
+        assertTrue(d.isActive, "a late reply answers no later call")
+        page.post(reply(3, body = "for d"))
+        assertEquals("for d", d.await().getOrThrow().body)
     }
 
     @Test
@@ -362,16 +370,19 @@ class WebViewTransportTest {
         page.post("""{"id":1,"code":-1,"contentType":null,"body":null,"redirected":false}""")
         assertIs<InstagramException.Transient>(first.await().exceptionOrNull())
 
-        // Not a status either: an unreadable code is never handed to the classifier.
-        val second = call(transport, "api/v1/collections/list/")
-        runCurrent()
-        page.post(reply(2, code = 0))
-        assertIs<InstagramException.Transient>(second.await().exceptionOrNull())
+        // Not a status either: a code outside HTTP's 100..599 is never handed to the classifier (T11: 600 included).
+        var id = 1L
+        for (code in listOf(0, 99, 600, 1000)) {
+            val unreadable = call(transport, "api/v1/collections/list/")
+            runCurrent()
+            page.post(reply(++id, code = code))
+            assertIs<InstagramException.Transient>(unreadable.await().exceptionOrNull(), "code $code")
+        }
 
         // The page itself is fine and is kept.
         val third = call(transport, "api/v1/collections/list/")
         runCurrent()
-        page.post(reply(3))
+        page.post(reply(++id))
         assertEquals(200, third.await().getOrThrow().code)
         assertEquals(1, pages.created.size)
         assertFalse(page.destroyed)
@@ -1276,6 +1287,18 @@ class WebViewTransportTest {
         assertTrue(slow.created.single().destroyed)
     }
 
+    /**
+     * T9: R93's idle time must outlast every gap a sync run leaves between two calls of its own: the Pacer's longest break with
+     * its longest gap, and the longest transient backoff (288 s with its jitter). Otherwise a run would reload the site mid-run.
+     */
+    @Test
+    fun theIdleTimeOutlastsThePacersLongestPauseAndTheLongestBackoff() {
+        val conservative = PacingPolicy.Conservative
+        assertTrue(WebViewTransport.IDLE_MS > 288_000)
+        assertTrue(WebViewTransport.IDLE_MS > LONGEST_TRANSIENT_WAIT_MS, "the longest transient backoff: $LONGEST_TRANSIENT_WAIT_MS")
+        assertTrue(WebViewTransport.IDLE_MS > conservative.breakMs.last + conservative.maxGapMs, "the longest break with its gap")
+    }
+
     @Test
     fun anIdlePageIsClosedAfterFiveMinutes() = runTest {
         val pages = Pages()
@@ -1671,25 +1694,124 @@ class WebViewTransportTest {
         }
     }
 
+    private fun script(): String =
+        File("src/main/assets/ig_fetch.js").also { assertTrue(it.isFile, "unit tests must run from the app module directory") }.readText()
+
     @Test
     fun theScriptsHeadersMatchTheConstants() {
-        val script = File("src/main/assets/ig_fetch.js").also { assertTrue(it.isFile, "unit tests must run from the app module directory") }.readText()
-        assertTrue("'x-ig-app-id': '${WebHeaders.APP_ID}'" in script, "x-ig-app-id")
-        assertTrue("'x-asbd-id': '${WebHeaders.ASBD_ID}'" in script, "x-asbd-id")
-        assertTrue("'x-requested-with': 'XMLHttpRequest'" in script, "x-requested-with")
-        // One GET, same origin, never following a redirect.
-        assertTrue("method: 'GET'" in script)
-        assertTrue("credentials: 'same-origin'" in script)
-        assertTrue("redirect: 'manual'" in script)
-        // Nothing but the reply goes to Kotlin: a cookie, the CSRF token or the www-claim must never be in a message.
-        val posts = Regex("""igBridge\.postMessage\(JSON\.stringify\(\{(.*?)\}\)\)""").findAll(script).map { it.groupValues[1] }.toList()
-        assertEquals(4, posts.size, "the script posts a message in four places")
-        for (fields in posts) {
-            val keys = Regex("""(\w+):""").findAll(fields).map { it.groupValues[1] }.toSet()
-            assertEquals(setOf("id", "code", "contentType", "body", "redirected"), keys)
-        }
-        assertEquals(4, Regex("""igBridge\.postMessage\(""").findAll(script).count(), "every postMessage is one of those")
+        assertScriptSendsOnlyWhatItShould(script())
     }
+
+    /** The pin itself: each way of making the script send or post what it must not fails it, so a pass above means something. */
+    @Test
+    fun eachWayOfLeakingOrWideningTheScriptFailsThePin() {
+        val real = script()
+        val mutants = mapOf(
+            "S1: a reply body that is the cookie jar" to real.replaceFirst("body: null, redirected: false", "body: document.cookie, redirected: false"),
+            "S1: a body that is the CSRF token" to real.replaceFirst("body: t,", "body: cookie('csrftoken'),"),
+            "S1: a content type that is the claim" to real.replaceFirst("contentType: ct, body: t", "contentType: claim(), body: t"),
+            "S1: a second body field" to real.replaceFirst("body: t, redirected: false", "body: t, body: document.title, redirected: false"),
+            "S1: sessionStorage read outside the claim helper" to real.replaceFirst("body: null, redirected: true", "body: sessionStorage.getItem('x'), redirected: true"),
+            "a second redirect option that follows" to real.replace("redirect: 'manual',", "redirect: 'manual', redirect: 'follow',"),
+            "a redirect that is followed" to real.replace("redirect: 'manual'", "redirect: 'follow'"),
+            "credentials sent cross-site" to real.replace("credentials: 'same-origin'", "credentials: 'include'"),
+            "another method" to real.replace("method: 'GET'", "method: 'POST'"),
+            "an extra fetch option" to real.replace("method: 'GET',", "method: 'GET', mode: 'no-cors',"),
+            "no CSRF header" to real.replace("      'x-csrftoken': cookie('csrftoken'),\n", ""),
+            "no claim header" to real.replace(",\n      'x-ig-www-claim': claim()", ""),
+            "J03: another claim key" to real.replace("'www-claim-v2'", "'www-claim'"),
+            "J04: a path relative to the page" to real.replace("fetch('/' + path,", "fetch(path,"),
+            "J05: a network failure posted for another id" to real.replace("id: id, code: -1", "id: 0, code: -1"),
+            "another app id" to real.replace(WebHeaders.APP_ID, "936619743392459"),
+            "a fifth post" to real.replace("      .then(forget, forget);", "      .then(forget, forget);\n    window.igBridge.postMessage(document.cookie);"),
+        )
+        for ((what, mutant) in mutants) {
+            assertTrue(mutant != real, "the mutant '$what' did not change the script")
+            assertFailsWith<AssertionError>(what) { assertScriptSendsOnlyWhatItShould(mutant) }
+        }
+    }
+
+    /**
+     * What `ig_fetch.js` may send and post. The header constants are `WebHeaders`' own; the CSRF token and the claim go into the
+     * request's headers and nowhere else; the request is one same-origin GET to `/` + the path that follows no redirect; and
+     * every message to Kotlin is `{id, code, contentType, body, redirected}` with the call's own id, the status, the reply's
+     * content type and text (or null) and nothing else, so no cookie, token or claim can ever reach the app or its log.
+     */
+    private fun assertScriptSendsOnlyWhatItShould(script: String) {
+        val headers = block(script, "var headers = {")
+        assertTrue("'x-ig-app-id': '${WebHeaders.APP_ID}'" in headers, "x-ig-app-id: $headers")
+        assertTrue("'x-asbd-id': '${WebHeaders.ASBD_ID}'" in headers, "x-asbd-id: $headers")
+        assertTrue("'x-requested-with': 'XMLHttpRequest'" in headers, "x-requested-with: $headers")
+        assertTrue("'x-csrftoken': cookie('csrftoken')" in headers, "x-csrftoken: $headers")
+        assertTrue("'x-ig-www-claim': claim()" in headers, "x-ig-www-claim: $headers")
+
+        // The jar and the session storage are read only by the two helpers, and the helpers are called only for the headers.
+        val cookieHelper = block(script, "function cookie(name) {")
+        val claimHelper = block(script, "function claim() {")
+        assertTrue("sessionStorage.getItem('www-claim-v2')" in claimHelper, "the site's own claim key: $claimHelper")
+        val outsideHelpers = script.replace(cookieHelper, "").replace(claimHelper, "")
+        assertFalse("document.cookie" in outsideHelpers, "document.cookie is read only by cookie()")
+        assertFalse("sessionStorage" in outsideHelpers, "sessionStorage is read only by claim()")
+        val outsideHeaders = outsideHelpers.replace(headers, "")
+        assertFalse(Regex("""(?<!function )\bcookie\(""").containsMatchIn(outsideHeaders), "cookie() is called only for the headers")
+        assertFalse(Regex("""(?<!function )\bclaim\(""").containsMatchIn(outsideHeaders), "claim() is called only for the headers")
+
+        // One same-origin GET to the path, no redirect followed: each option once, and no other.
+        assertEquals(1, Regex("""\bfetch\(""").findAll(script).count(), "one fetch")
+        val options = fieldsOf(block(script, "fetch('/' + path, {"))
+        assertEquals(
+            listOf("method" to "'GET'", "credentials" to "'same-origin'", "redirect" to "'manual'", "headers" to "headers", "signal" to "controller.signal")
+                .sortedBy { it.first },
+            options.sortedBy { it.first },
+            "the fetch options",
+        )
+
+        // Nothing but the reply goes to Kotlin.
+        val posts = Regex("""igBridge\.postMessage\(JSON\.stringify\(\{(.*?)\}\)\)""").findAll(script).map { fieldsOf(it.groupValues[1]) }.toList()
+        assertEquals(4, posts.size, "the script posts a message in four places")
+        assertEquals(4, Regex("""postMessage\(""").findAll(script).count(), "every postMessage is one of those")
+        for (fields in posts) {
+            val keys = fields.map { it.first }
+            assertEquals(keys.distinct(), keys, "each field once: $fields")
+            val post = fields.toMap()
+            assertEquals(setOf("id", "code", "contentType", "body", "redirected"), post.keys, "$post")
+            assertEquals("id", post["id"], "a message carries its call's own id: $post")
+            assertTrue(post["code"] in setOf("r.status", "0", "-1"), "$post")
+            assertTrue(post["contentType"] in setOf("ct", "null"), "the content type is the reply's or none: $post")
+            assertTrue(post["body"] in setOf("t", "null"), "the body is the reply's text or none: $post")
+            assertTrue(post["redirected"] in setOf("true", "false"), "$post")
+        }
+        assertTrue("var ct = r.headers.get('content-type');" in script, "ct is the reply's content type")
+        assertTrue("function (t) {" in script && "r.text().then(" in script, "t is the reply's text")
+    }
+
+    /** The text between the `{` that ends [opening] and its matching `}` (quoted strings skipped). */
+    private fun block(script: String, opening: String): String {
+        val start = script.indexOf(opening)
+        assertTrue(start >= 0, "the script has no `$opening`")
+        var depth = 0
+        var quote: Char? = null
+        var k = start + opening.length - 1
+        while (k < script.length) {
+            val c = script[k]
+            when {
+                quote != null -> if (c == '\\') k++ else if (c == quote) quote = null
+                c == '\'' || c == '"' -> quote = c
+                c == '{' -> depth++
+                c == '}' -> if (--depth == 0) return script.substring(start + opening.length, k)
+            }
+            k++
+        }
+        error("unbalanced `$opening` in the script")
+    }
+
+    /** `key: value` pairs of a flat object literal, in order (a key that appears twice appears twice). */
+    private fun fieldsOf(literal: String): List<Pair<String, String>> =
+        literal.split(',').map { it.trim() }.filter { it.isNotEmpty() }.map { field ->
+            val colon = field.indexOf(':')
+            assertTrue(colon > 0, "not a key: value field: $field")
+            field.substring(0, colon).trim() to field.substring(colon + 1).trim()
+        }
 
     /**
      * R105: every call's fetch has its own AbortController, kept by id, and `window.__igAbort(id)` aborts it; both are defined in

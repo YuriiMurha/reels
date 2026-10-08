@@ -4,6 +4,7 @@ import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.ErrorReplySummary
 import io.github.yuriimurha.reels.instagram.web.InstagramTransport
 import io.github.yuriimurha.reels.instagram.web.RawReply
+import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -52,7 +53,8 @@ import kotlin.time.TimeSource
  *
  * **Where the page is** is checked before EVERY call, not only after the load: the site can move itself (`pushState`, a
  * client-side redirect). A path under `/accounts/login` is [InstagramException.LoginRequired], under `/challenge` or
- * `/accounts/suspended` [InstagramException.ChallengeRequired] (never with a URL). Another host, scheme or port (facebook.com,
+ * `/accounts/suspended` [InstagramException.ChallengeRequired] (never with a URL); the rule is `:instagram`'s
+ * ([WebEndpoints.landingOf]). Another host, scheme or port (facebook.com,
  * say), an unreadable URL, or no URL at all (the renderer is gone) is [InstagramException.Transient]. Login and challenge
  * are remembered: every call fails the same way, without creating a page or evaluating anything, until [reset]. The others
  * are not a verdict on the account, so the page is dropped and the next call starts over. Nothing is evaluated on a page
@@ -324,11 +326,11 @@ class WebViewTransport(
             uri.host.equals(home.host, ignoreCase = true) &&
             effectivePort(uri) == effectivePort(home)
         if (!sameOrigin) return Verdict.OffSite
-        val path = uri.path.orEmpty()
-        return when {
-            path.startsWith("/accounts/login") -> Blocked.LOGIN
-            path.startsWith("/challenge") || path.startsWith("/accounts/suspended") -> Blocked.CHALLENGE
-            else -> null
+        // Which paths mean what is Instagram's knowledge, so `:instagram` owns it.
+        return when (WebEndpoints.landingOf(uri.path.orEmpty())) {
+            WebEndpoints.Landing.LOGIN -> Blocked.LOGIN
+            WebEndpoints.Landing.CHALLENGE -> Blocked.CHALLENGE
+            null -> null
         }
     }
 

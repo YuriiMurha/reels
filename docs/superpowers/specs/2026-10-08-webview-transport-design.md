@@ -153,9 +153,13 @@ the controller's rulings; `ARCHITECTURE.md` describes the result):
   deprecated no-op and unsupported on WebView 145, and overriding the header on the main-frame `loadUrl` alone would make
   the fingerprint inconsistent (the header goes on every request the WebView makes itself; the API `fetch` carries only the
   script's own `XMLHttpRequest`). A known marker, accepted.
-- **Frames.** Found on the emulator: a frame of another origin gets no `window.igBridge` at all (the origin rule keeps it
-  undefined there), so "messages from any other origin are ignored" holds by construction. A frame of the same origin does
-  get it, and its messages are dropped because the listener accepts only the main frame.
+- **Frames, and the trust boundary (R109).** Found on the emulator: a frame of another origin gets no `window.igBridge` at
+  all (the origin rule keeps it undefined there), so "messages from any other origin are ignored" holds by construction. A
+  frame of the same origin does get one, and its messages through it are dropped because the listener accepts only the
+  main frame. But that frame can also reach `parent.igBridge` and `top.igBridge`, and the platform credits those messages to
+  the main frame, so its forged reply is accepted. The trust boundary is therefore the instagram.com origin, not the main
+  frame: any script of that origin can forge a reply or replace `__igFetch`. That is accepted, because it is no more than
+  trusting Instagram's own replies; no nonce is added (R89: a same-origin script owns the realm anyway).
 - **Also, in 3.2.** The page's location is checked before every call (a client-side redirect or `pushState` can move it),
   and a login or challenge landing is remembered until `reset()`. A home page answered with an HTTP error fails the load:
   429 is `RateLimited` (the cooldown arms with no API request made), any other status `Transient`.

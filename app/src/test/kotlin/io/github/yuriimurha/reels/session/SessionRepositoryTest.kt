@@ -27,6 +27,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -430,6 +431,43 @@ class SessionRepositoryTest {
             cookies.events.indexOfLast { it == "reset" } < cookies.events.indexOfLast { it.startsWith("set sessionid=s1") },
             "the page goes before the old cookies come back: ${cookies.events}",
         )
+    }
+
+    /**
+     * T3: the real hook (the transport's reset) suspends: it switches to the main thread. A cancelled paste's rollback runs it
+     * under NonCancellable, so the suspension does not end the rollback before the previous cookies are back (S04).
+     */
+    @Test
+    fun aCancelledPasteRestoresThePreviousSessionEvenWhenTheResetSuspends() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = {
+            yield()
+            cookies.events += "reset"
+        })
+        probe.gate = CompletableDeferred()
+        val paste = launch { repository.pasteSessionId("43%3Acd") }
+        probe.entered.await()
+
+        paste.cancelAndJoin()
+
+        assertEquals("s1", cookies.cookieValue(SessionRepository.INSTAGRAM, "sessionid"), "the previous session is back: ${cookies.events}")
+        assertEquals("42", cookies.cookieValue(SessionRepository.INSTAGRAM, "ds_user_id"))
+        assertEquals(2, cookies.events.count { it == "reset" }, "the rollback's reset ran to its end: ${cookies.events}")
+    }
+
+    /**
+     * T10: a hook that is itself cancelled is not "a failure to destroy the page" to swallow: the cancellation reaches the caller,
+     * and the logout stops before it touches the cookies (S08).
+     */
+    @Test
+    fun aCancelledResetIsNotSwallowedAndTheLogoutStopsBeforeTheCookies() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = { throw CancellationException("the caller went away") })
+
+        assertFailsWith<CancellationException> { repository.logout() }
+
+        assertTrue(repository.hasSessionCookies(), "nothing was cleared")
+        assertEquals(emptyList(), cookies.events)
     }
 
     @Test

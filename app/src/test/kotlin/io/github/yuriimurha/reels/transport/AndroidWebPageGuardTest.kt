@@ -1,7 +1,9 @@
 package io.github.yuriimurha.reels.transport
 
+import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.testutil.KotlinSource
 import java.io.File
+import java.net.URI
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -36,7 +38,8 @@ class AndroidWebPageGuardTest {
 
     /**
      * The call's arguments and the `&&`-terms of the single `if` in its lambda; fails when the lambda hands a message to the
-     * listener from anywhere else (before the `if`, or in a second one).
+     * listener from anywhere else: before the `if`, in a second one, in an `else`, or after the `if`'s block. The `if` must be the
+     * lambda's last statement, with a braced block that holds the one hand-over.
      */
     private fun channelOf(text: String): Channel {
         val shape = KotlinSource.skeleton(text)
@@ -61,8 +64,17 @@ class AndroidWebPageGuardTest {
         val conditionClose = matching(bodyShape, conditionOpen, '(', ')')
         val condition = body.substring(conditionOpen + 1, conditionClose)
         val before = body.substring(0, conditionOpen)
-        val after = body.substring(conditionClose + 1)
-        assertTrue("listener" !in before && "listener?.invoke(" in after, "the transport's listener is called only inside the condition's block")
+        assertTrue("listener" !in before, "nothing reaches the listener before the condition")
+        // The block of the `if`: a `{` right after the condition, to its matching `}`; after it, nothing at all (no `else`, no
+        // second hand-over), and inside it the one hand-over.
+        var blockOpen = conditionClose + 1
+        while (bodyShape[blockOpen].isWhitespace()) blockOpen++
+        assertEquals('{', bodyShape[blockOpen], "the condition guards a braced block")
+        val blockClose = matching(bodyShape, blockOpen, '{', '}')
+        val block = body.substring(blockOpen + 1, blockClose)
+        assertTrue(bodyShape.substring(blockClose + 1).isBlank(), "nothing follows the condition's block (no else, no second hand-over)")
+        assertEquals(1, Regex("""listener\?\.invoke\(""").findAll(body).count(), "the listener is called exactly once in the lambda")
+        assertTrue("listener?.invoke(" in block, "the transport's listener is called only inside the condition's block")
         return Channel(rules, condition.split("&&").map { it.trim().replace(Regex("""\s+"""), " ") })
     }
 
@@ -77,6 +89,36 @@ class AndroidWebPageGuardTest {
     }
 
     private fun assertChannelIsClosed(text: String) = assertEquals(expected, channelOf(text))
+
+    /**
+     * P3: the page's default origin, the one origin its bridge accepts in the app (`AppContainer` passes none: pinned by
+     * `BackendWiringGuardTest`), is exactly the scheme and host of `WebEndpoints.HOME_URL`, the page the transport loads. A
+     * trailing slash, another host or plain http would never match the sender's origin, and every call would time out.
+     */
+    private fun assertDefaultOriginIsTheHomePages(text: String) {
+        val defaults = Regex("""\ballowedOrigin\s*:\s*String\s*=\s*"([^"]*)"""").findAll(text).map { it.groupValues[1] }.toList()
+        assertEquals(1, defaults.size, "one default for allowedOrigin: $defaults")
+        val home = URI(WebEndpoints.HOME_URL)
+        assertEquals("${home.scheme}://${home.host}", defaults.single())
+    }
+
+    @Test
+    fun theDefaultOriginIsTheHomePagesOrigin() {
+        assertDefaultOriginIsTheHomePages(source())
+    }
+
+    @Test
+    fun eachWayOfMissingTheHomePagesOriginFailsThePin() {
+        val real = source()
+        for ((what, mutant) in mapOf(
+            "A04: a trailing slash" to real.replace("= \"https://www.instagram.com\"", "= \"https://www.instagram.com/\""),
+            "another host" to real.replace("= \"https://www.instagram.com\"", "= \"https://instagram.com\""),
+            "plain http" to real.replace("= \"https://www.instagram.com\"", "= \"http://www.instagram.com\""),
+        )) {
+            assertTrue(mutant != real, "the mutant '$what' did not change the source")
+            assertFailsWith<AssertionError>(what) { assertDefaultOriginIsTheHomePages(mutant) }
+        }
+    }
 
     @Test
     fun theBridgeIsOnlyForTheAllowedOriginAndOnlyTheMainFrameStringsGetThrough() {
@@ -100,6 +142,18 @@ class AndroidWebPageGuardTest {
                 "run {",
             ),
             "handed over before the guard" to real.replace("// The data is read only once", "listener?.invoke(\"\")\n                    // The data is read only once"),
+            "handed over in an else branch" to real.replace(
+                "                        message.data?.let { listener?.invoke(it) }\n                    }\n",
+                "                        message.data?.let { listener?.invoke(it) }\n                    } else {\n                        message.data?.let { listener?.invoke(it) }\n                    }\n",
+            ),
+            "handed over a second time after the guard" to real.replace(
+                "                        message.data?.let { listener?.invoke(it) }\n                    }\n",
+                "                        message.data?.let { listener?.invoke(it) }\n                    }\n                    message.data?.let { listener?.invoke(it) }\n",
+            ),
+            "a guard without a block" to real.replace(
+                "TYPE_STRING) {\n                        message.data?.let { listener?.invoke(it) }\n                    }\n",
+                "TYPE_STRING) message.data?.let { listener?.invoke(it) }\n",
+            ),
         )
         for ((what, mutant) in mutants) {
             assertTrue(mutant != real, "the mutant '$what' did not change the source")

@@ -44,6 +44,20 @@ class WebEndpointsTest {
         }
     }
 
+    /** The hidden page's landing rule (the transport asks this before every call). */
+    @Test
+    fun aPagesPathSaysWhetherTheOwnerMustLogInOrVerify() {
+        for (path in listOf("/accounts/login/", "/accounts/login", "/accounts/login/two_factor/")) {
+            assertEquals(WebEndpoints.Landing.LOGIN, WebEndpoints.landingOf(path), path)
+        }
+        for (path in listOf("/challenge/", "/challenge/action/AXabc/", "/accounts/suspended/")) {
+            assertEquals(WebEndpoints.Landing.CHALLENGE, WebEndpoints.landingOf(path), path)
+        }
+        for (path in listOf("/", "", "/explore/", "/accounts/onetap/", "/accounts/edit/", "/api/v1/accounts/login/", "/reel/challenge/")) {
+            assertNull(WebEndpoints.landingOf(path), path)
+        }
+    }
+
     @Test
     fun onlyHttpsWithAHostIsAllowed() {
         assertFalse(WebEndpoints.isLoginPage("http", "www.instagram.com"))

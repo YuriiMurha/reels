@@ -162,6 +162,24 @@ class BackendWiringGuardTest {
         }
     }
 
+    /**
+     * T2: the one transport loads Instagram's home page (A05: the login page would be a page whose every call fails
+     * LoginRequired), logs through the debug-only sink (A03: anything else would log in a release build), and makes its page
+     * with nothing but the context, so the page's own default origin, pinned to the home page's by `AndroidWebPageGuardTest`, is
+     * the one its bridge accepts (A04: an origin with a trailing slash never matches, and every call times out).
+     */
+    @Test
+    fun theTransportLoadsTheHomePageLogsToTheDebugSinkAndMakesItsPageWithTheDefaultOrigin() {
+        val container = main("di/AppContainer.kt")
+        val transports = callArguments(container, "WebViewTransport(")
+        assertEquals(1, transports.size, "expected exactly one WebViewTransport in AppContainer: $transports")
+        val arguments = transports.single()
+        assertTrue(Regex("""\bhomeUrl\s*=\s*WebEndpoints\.HOME_URL\s*,""").containsMatchIn(arguments), "the home page: $arguments")
+        assertTrue(Regex("""\blog\s*=\s*debugLog\s*,""").containsMatchIn(arguments), "the debug-only sink: $arguments")
+        assertTrue(Regex("""\bcreatePage\s*=\s*\{\s*AndroidWebPage\(""").containsMatchIn(arguments), "the page factory: $arguments")
+        assertEquals(listOf("context"), callArguments(container, "AndroidWebPage(").map { it.trim() }, "the page gets the context only")
+    }
+
     /** The WebView behind the transport is made in one place, so Mock mode and the guards above can reason about when it exists. */
     @Test
     fun androidWebPageIsConstructedOnlyByTheContainer() {
@@ -239,7 +257,10 @@ class BackendWiringGuardTest {
         assertTrue(Regex("""beforeRun\s*=\s*beforeRun\b""").containsMatchIn(engines.single()), "the engine's run hook: ${engines.single()}")
         val fake = Regex("""is Backend\.Fake\s*->\s*\{([^}]*\{[^}]*}[^}]*)}""").find(container)?.groupValues?.get(1)
         assertTrue(fake != null && Regex("""sessionUsable\s*=\s*\{\s*RunSession\.USABLE\s*}""").containsMatchIn(fake), "Backend.Fake's gate: $fake")
-        assertTrue(fake != null && "allowNewInstagramAttempts" !in fake, "Mock mode's engine must not touch the transport: $fake")
+        // T6: neither the guarded hook nor the transport itself (`instagramTransport.allowNewAttempts()` would build it).
+        for (forbidden in listOf("allowNewInstagramAttempts", "instagramTransport", "Instagram")) {
+            assertTrue(fake != null && forbidden !in fake, "Mock mode's engine must not touch the transport ($forbidden): $fake")
+        }
     }
 
     /** R84: the engine checks the account against the container's one per-library store, the same one Delete library clears. */

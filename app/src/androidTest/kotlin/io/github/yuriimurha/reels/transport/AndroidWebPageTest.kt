@@ -6,9 +6,11 @@ import android.webkit.CookieManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.yuriimurha.reels.NOT_AN_EMULATOR
+import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.RawReply
 import io.github.yuriimurha.reels.isEmulator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -16,6 +18,7 @@ import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
+import mockwebserver3.SocketEffect
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -143,11 +146,12 @@ class AndroidWebPageTest {
 
         assertEquals("the real reply won", REPLY_BODY, result.reply.body)
         assertEquals(200, result.reply.code)
-        // The frame did run its attempts (this is not a test of a frame that never loaded). Route 0 is its own `window.igBridge`:
-        // the listener's origin rule (exactly the page's origin, never "*") is what keeps it undefined in a frame of another origin,
-        // so this is the assertion that pins the rule. How the parent and top routes end is the platform's business (logged).
+        // The frame did run its attempts (this is not a test of a frame that never loaded). Its own `window.igBridge` is the route
+        // the listener's origin rule (exactly the page's origin, never "*") keeps undefined in a frame of another origin, so this
+        // is the assertion that pins the rule. How the parent and top routes end is the platform's business (logged).
         Log.i(TAG, "forging frame from another origin reported: ${result.report}")
-        assertFalse("a frame of another origin got the bridge: ${result.report}", "0=sent" in result.report)
+        assertTrue("the frame reported nothing for its own bridge: ${result.report}", "window.igBridge=" in result.report)
+        assertFalse("a frame of another origin got the bridge: ${result.report}", "window.igBridge=sent" in result.report)
         assertEquals(1, site.requestsTo(API).size)
     }
 
@@ -161,10 +165,30 @@ class AndroidWebPageTest {
         val result = callWithAForgingFrame(site, site, listOf("window.igBridge"))
 
         // The forged post was really made, through the subframe's own bridge...
-        assertEquals("0=sent", result.report)
+        assertEquals("window.igBridge=sent", result.report)
         // ...and was dropped.
         assertEquals("the real reply won", REPLY_BODY, result.reply.body)
         assertEquals(200, result.reply.code)
+    }
+
+    /**
+     * R109: what the main-frame check does NOT stop, pinned as the platform does it. A frame of the same origin can reach its
+     * parent's (or the top window's) `igBridge`, and a message posted through that object is credited to the main frame, so its
+     * forged reply is accepted and wins over the real one. The trust boundary is therefore the instagram.com origin, not the
+     * main frame: any script of that origin can forge a reply or replace `__igFetch`, which is no more than trusting
+     * Instagram's own replies. If this test ever fails, the platform got stricter (and the docs can say so).
+     */
+    @Test
+    fun aSameOriginFrameCanSpeakThroughTheParentsBridge() {
+        for (route in listOf("parent.igBridge", "top.igBridge")) {
+            val site = site()
+            val result = callWithAForgingFrame(site, site, listOf(route))
+
+            Log.i(TAG, "same-origin frame through $route reported: ${result.report}, reply body: ${result.reply.body}")
+            assertEquals(route, "$route=sent", result.report)
+            assertEquals(route, "forged", result.reply.body)
+            runBlocking { transport?.reset() } // this round's page; tearDown resets only the last transport
+        }
     }
 
     // --- 4. Threads ------------------------------------------------------------------------------------------------------------
@@ -233,6 +257,176 @@ class AndroidWebPageTest {
         }
     }
 
+    // --- 6. The page's own failures (spec 5) -------------------------------------------------------------------------------
+
+    /** A home page answered 429 is a rate limit: the call fails `RateLimited` and no API request is sent into the limit. */
+    @Test
+    fun aHomePageAnsweredWithRateLimitingIsRateLimitedAndSendsNoApiRequest() {
+        val site = site()
+        site.route("/") { MockResponse.Builder().code(429).addHeader("Content-Type", "text/html; charset=utf-8").body("<html>slow down</html>").build() }
+        site.route(API) { json(REPLY_BODY) }
+
+        val result = runBlocking { runCatching { transport(site).get(API.removePrefix("/")) } }
+
+        assertTrue("expected RateLimited: $result", result.exceptionOrNull() is InstagramException.RateLimited)
+        assertEquals(1, site.requestsTo("/").size)
+        assertEquals("no request reached the API path", 0, site.requestsTo(API).size)
+    }
+
+    /** A reset (a logout) while the home page loads ends the call at once, not at the 30 s load bound. */
+    @Test
+    fun aResetWhileTheHomePageLoadsEndsTheCallAtOnce() {
+        val site = site()
+        val homeAsked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        site.route("/") {
+            homeAsked.countDown()
+            release.await(GATE_SECONDS, TimeUnit.SECONDS) // the server is slow to answer the home page
+            html("<html><body>home</body></html>")
+        }
+        site.route(API) { json(REPLY_BODY) }
+        val transport = transport(site)
+        try {
+            val (result, elapsedMs) = runBlocking {
+                val started = System.nanoTime()
+                val call = async(Dispatchers.Default) { runCatching { transport.get(API.removePrefix("/")) } }
+                assertTrue("the home page was never asked for", homeAsked.await(GATE_SECONDS, TimeUnit.SECONDS))
+                transport.reset()
+                call.await() to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            }
+            assertTrue("expected Transient: $result", result.exceptionOrNull() is InstagramException.Transient)
+            assertTrue("the reset ended the load in $elapsedMs ms", elapsedMs < 10_000)
+            assertEquals(0, site.requestsTo(API).size)
+        } finally {
+            release.countDown()
+        }
+    }
+
+    /** A reply that never comes ends in `Transient` at the call's own bound, and the stuck page is not reused. */
+    @Test
+    fun aCallWhoseReplyNeverComesTimesOutAndThePageIsDropped() {
+        val site = site()
+        val release = CountDownLatch(1)
+        val apiCalls = AtomicInteger()
+        site.route("/") { html("<html><body>home</body></html>") }
+        site.route(API) {
+            if (apiCalls.incrementAndGet() == 1) {
+                release.await(GATE_SECONDS, TimeUnit.SECONDS) // never answered in time
+                json("{\"late\":true}")
+            } else {
+                json(REPLY_BODY)
+            }
+        }
+        val transport = transport(site, callTimeoutMs = 2_000)
+        try {
+            val (result, elapsedMs) = runBlocking {
+                val started = System.nanoTime()
+                runCatching { transport.get(API.removePrefix("/")) } to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            }
+            assertTrue("expected Transient: $result", result.exceptionOrNull() is InstagramException.Transient)
+            assertTrue("timed out after $elapsedMs ms", elapsedMs in 2_000 until 15_000)
+
+            // The next call loads the home page again: the page that timed out was dropped.
+            val reply = runBlocking { transport.get(API.removePrefix("/")) }
+            assertEquals(REPLY_BODY, reply.body)
+            assertEquals(2, site.requestsTo("/").size)
+        } finally {
+            release.countDown()
+        }
+    }
+
+    /** A reset (a logout) while a reply is awaited fails the call at once; the late reply is ignored and the next call works. */
+    @Test
+    fun aResetDuringACallFailsItAtOnceAndItsLateReplyIsIgnored() {
+        val site = site()
+        val inFlight = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val apiCalls = AtomicInteger()
+        site.route("/") { html("<html><body>home</body></html>") }
+        site.route(API) {
+            if (apiCalls.incrementAndGet() == 1) {
+                inFlight.countDown()
+                release.await(GATE_SECONDS, TimeUnit.SECONDS)
+                json("{\"late\":true}")
+            } else {
+                json(REPLY_BODY)
+            }
+        }
+        val transport = transport(site)
+        try {
+            val (result, elapsedMs) = runBlocking {
+                val started = System.nanoTime()
+                val call = async(Dispatchers.Default) { runCatching { transport.get(API.removePrefix("/")) } }
+                assertTrue("the call's request never reached the server", inFlight.await(GATE_SECONDS, TimeUnit.SECONDS))
+                transport.reset()
+                call.await() to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            }
+            assertTrue("expected Transient: $result", result.exceptionOrNull() is InstagramException.Transient)
+            assertTrue("failed after $elapsedMs ms", elapsedMs < 10_000)
+            release.countDown() // the late reply goes to a page that is gone
+
+            val reply = runBlocking { transport.get(API.removePrefix("/")) }
+            assertEquals(REPLY_BODY, reply.body)
+            assertEquals("a new page after the reset", 2, site.requestsTo("/").size)
+        } finally {
+            release.countDown()
+        }
+    }
+
+    // --- 7. The script's request, as the server sees it ----------------------------------------------------------------------
+
+    /** `x-ig-www-claim` is the site's own `sessionStorage['www-claim-v2']` when the site has set it (else `0`, test 1). */
+    @Test
+    fun theClaimHeaderIsTheSitesOwnStoredClaim() {
+        val site = site()
+        val claim = listOf("fake", "claim", UUID.randomUUID().toString().take(8)).joinToString("-")
+        site.route("/") { html("<html><body><script>sessionStorage.setItem('www-claim-v2', '$claim');</script>home</body></html>") }
+        site.route(API) { json(REPLY_BODY) }
+
+        runBlocking { transport(site).get(API.removePrefix("/")) }
+
+        assertEquals(listOf(claim), site.requestsTo(API).map { it.headers["x-ig-www-claim"] })
+    }
+
+    /** The site may move itself (`pushState`); the script's path is absolute, so the request still goes to the API path. */
+    @Test
+    fun aPageThatMovedItselfStillRequestsTheApiPath() {
+        val site = site()
+        site.route("/") { html("<html><body><script>history.pushState(null, '', '/explore/');</script>home</body></html>") }
+        site.route(API) { json(REPLY_BODY) }
+
+        val reply = runBlocking { transport(site).get(API.removePrefix("/")) }
+
+        assertEquals(REPLY_BODY, reply.body)
+        assertEquals(1, site.requestsTo(API).size)
+        assertEquals(emptyList<RecordedRequest>(), site.requestsTo("/explore/" + API.removePrefix("/")))
+    }
+
+    /** A connection the server drops is the page's fetch failing (code -1): `Transient` at once, and the page is kept. */
+    @Test
+    fun aDroppedConnectionIsTransientAtOnceAndThePageIsKept() {
+        val site = site()
+        val disconnecting = AtomicBoolean(true)
+        site.route("/") { html("<html><body>home</body></html>") }
+        site.route(API) {
+            if (disconnecting.get()) MockResponse.Builder().onResponseStart(SocketEffect.CloseSocket()).build() else json(REPLY_BODY)
+        }
+        val transport = transport(site)
+
+        val (result, elapsedMs) = runBlocking {
+            val started = System.nanoTime()
+            runCatching { transport.get(API.removePrefix("/")) } to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+        }
+        Log.i(TAG, "dropped connection: $result after $elapsedMs ms, ${site.requestsTo(API).size} API request(s) seen")
+        assertTrue("expected Transient: $result", result.exceptionOrNull() is InstagramException.Transient)
+        assertTrue("failed after $elapsedMs ms", elapsedMs < 10_000)
+
+        disconnecting.set(false)
+        val reply = runBlocking { transport.get(API.removePrefix("/")) }
+        assertEquals(REPLY_BODY, reply.body)
+        assertEquals("no second home load", 1, site.requestsTo("/").size)
+    }
+
     // --- The forging frame ---------------------------------------------------------------------------------------------------
 
     private class ForgedCall(val reply: RawReply, val report: String)
@@ -272,17 +466,20 @@ class AndroidWebPageTest {
         return ForgedCall(reply, report.get())
     }
 
-    /** A frame page that posts forged replies for ids 0..[FORGED_IDS] through each of [routes], once the real call is in flight. */
+    /**
+     * A frame page that posts forged replies for ids 0..[FORGED_IDS] through each of [routes], once the real call is in flight,
+     * and reports `<route>=sent` or `<route>=<error name>` for each, by the route's own name.
+     */
     private fun forgingFrame(routes: List<String>): String {
-        val posts = routes.joinToString(",") { "function (message) { $it.postMessage(message); }" }
+        val posts = routes.joinToString(",") { "['$it', function (message) { $it.postMessage(message); }]" }
         return """
             <html><body><script>
             function forged(id) { return JSON.stringify({id: id, code: 200, contentType: 'text/plain', body: 'forged', redirected: false}); }
             var posts = [$posts];
             fetch('/go').then(function () {
-              var out = posts.map(function (post, i) {
+              var out = posts.map(function (route) {
                 // Every id the call could have (the first one is 1): a change of the transport's numbering cannot hide a forgery.
-                try { for (var id = 0; id <= $FORGED_IDS; id++) post(forged(id)); return i + '=sent'; } catch (e) { return i + '=' + e.name; }
+                try { for (var id = 0; id <= $FORGED_IDS; id++) route[1](forged(id)); return route[0] + '=sent'; } catch (e) { return route[0] + '=' + e.name; }
               });
               return fetch('/report?' + out.join('&'));
             });
@@ -326,7 +523,7 @@ class AndroidWebPageTest {
      * The real transport on the real page, pointed at [site]: its origin is the home page and the only allowed sender. With
      * [heard], every message the page hands the transport is also kept there (the transport keeps none it does not wait for).
      */
-    private fun transport(site: Site, heard: MutableList<String>? = null): WebViewTransport {
+    private fun transport(site: Site, heard: MutableList<String>? = null, callTimeoutMs: Long = 30_000): WebViewTransport {
         val origin = site.origin
         // The one thing standing between these tests and the real site: nothing but a local address is ever the home page.
         require(origin.startsWith("http://127.0.0.1:")) { "the page tests talk to a local server only: $origin" }
@@ -335,6 +532,7 @@ class AndroidWebPageTest {
             createPage = { AndroidWebPage(context, allowedOrigin = origin).let { page -> if (heard == null) page else Recorded(page, heard) } },
             homeUrl = "$origin/",
             script = script,
+            callTimeoutMs = callTimeoutMs,
         ).also { transport = it }
     }
 

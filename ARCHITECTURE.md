@@ -30,11 +30,13 @@ A debug build starts in Mock mode (the fake library); a release build always use
 
 - `:instagram` (pure Kotlin/JVM) is the only place that knows Instagram: endpoints, header constants, pagination, JSON
   fields. `:app` reaches it through the `InstagramClient` contract; it builds no Instagram URL and parses no Instagram
-  JSON. Two small things in `:app` do repeat Instagram's names: `ig_fetch.js` (the hidden page's script, which spells the
-  three constant header values; `WebViewTransportTest` pins them to `WebHeaders`) and `AndroidWebPage`'s default origin
-  (the one origin its message bridge accepts; no test compares the string with `WebEndpoints`, but
-  `AndroidWebPageGuardTest` pins how the bridge uses it). Outside comments, a grep of `app/src/main` for the domains finds
-  only that origin.
+  JSON, and the hidden page's landing rule (which paths mean "log in" or "verify") is `WebEndpoints.landingOf`. Two small
+  things in `:app` do repeat Instagram's names, as named exceptions: `ig_fetch.js` (the hidden page's script: the three
+  constant header values, which `WebViewTransportTest` pins to `WebHeaders`, and the names it needs to build the site's own
+  request, the header names, the `csrftoken` cookie and the `www-claim-v2` storage key, pinned by the same test) and
+  `AndroidWebPage`'s default origin (the one origin its message bridge accepts; `AndroidWebPageGuardTest` pins it to the
+  scheme and host of `WebEndpoints.HOME_URL`, and `BackendWiringGuardTest` that the container passes no other). Outside
+  comments, a grep of `app/src/main` for the domains finds only that origin.
 - `AppContainer` hand-wires `:app`, one per process. It picks a backend (fake or real) once per process, and the library
   database, thumbnails, client, fetcher and video resolver follow that choice.
 - Every Instagram API request, from a sync, a session check, the viewer or the lab, goes through the one `Pacer` and then
@@ -333,17 +335,22 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   settles, and `window.__igAbort(id)` (defined once, behind the same guard as `__igFetch`) aborts it (R105); an aborted fetch
   posts code -1 for its id, which nobody waits for any more.
 - **The message channel** is `WebViewCompat.addWebMessageListener`, installed before the first load as `window.igBridge`
-  for the origin `https://www.instagram.com` only. A message reaches the transport only from the MAIN frame, from exactly
-  that origin, and only as a STRING; `AndroidWebPageGuardTest` pins the rule set and the three conditions (each removal, and
-  a rule widened to `*`, fails it). The transport then accepts a message only from the current page, only when it parses,
-  and only for the id it waits for. On the emulator a frame of another origin got no `window.igBridge` at all (the origin
-  rule keeps it undefined there), while a frame of the SAME origin did, so its forged reply reaches the listener and is
-  dropped by the main-frame check. A WebView that cannot post messages (`WEB_MESSAGE_LISTENER` unsupported), or cannot be
-  created at all, makes `AndroidWebPage` refuse to construct, never falling back to `addJavascriptInterface`; the call
-  fails `Transient`.
+  for the origin `https://www.instagram.com` only. A message reaches the transport only when the platform credits it to the
+  MAIN frame, from exactly that origin, and only as a STRING; `AndroidWebPageGuardTest` pins the rule set and the three
+  conditions (each removal, a rule widened to `*`, and a hand-over in an `else` or after the `if` fails it). The transport
+  then accepts a message only from the current page, only when it parses, and only for the id it waits for. On the emulator
+  a frame of another origin got no `window.igBridge` at all (the origin rule keeps it undefined there), while a frame of the
+  SAME origin did: its forged reply through its own `window.igBridge` is dropped by the main-frame check, but one through
+  `parent.igBridge` or `top.igBridge` is credited to the main frame and accepted (pinned by
+  `aSameOriginFrameCanSpeakThroughTheParentsBridge`). **The trust boundary is therefore the instagram.com origin, not the
+  main frame (R109):** the main-frame check only stops a same-origin subframe's own bridge, and any instagram.com script can
+  forge a reply or replace `__igFetch`. That is accepted, because it equals trusting Instagram's replies, which the app does
+  anyway; no nonce (R89). A WebView that cannot post messages (`WEB_MESSAGE_LISTENER` unsupported), or cannot be created at
+  all, makes `AndroidWebPage` refuse to construct, never falling back to `addJavascriptInterface`; the call fails
+  `Transient`.
 - **Where the page is** is checked before EVERY call, not only after the load: the site can move itself (`pushState`, a
   client-side redirect). A path under `/accounts/login` is `LoginRequired`, under `/challenge` or `/accounts/suspended`
-  `ChallengeRequired(null)` (never with a URL). Another host, scheme or port, an unreadable URL, or no URL (the renderer
+  `ChallengeRequired(null)` (never with a URL); the rule is `:instagram`'s `WebEndpoints.landingOf`. Another host, scheme or port, an unreadable URL, or no URL (the renderer
   is gone) is `Transient`. Login and challenge are remembered: every later call fails the same way, with no page created
   and nothing evaluated, until `reset()` (the account needs the owner, so a retry would only ask again). The other
   verdicts are not a judgement on the account: the page is dropped and the next call starts over. Nothing is evaluated on
@@ -468,15 +475,24 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   one. The CDN client has no jar and never had them.
 - **Tests.** `WebViewTransportTest` (JVM, a fake page and virtual time) covers the call, the landing checks, the timeouts,
   the page cap, the idle timer, cancelled callers (R104, R104a, R105, through a real Conservative Pacer for the remembered
-  429), the logging and that the script's headers match `WebHeaders`. `AndroidWebPageTest` exists
-  twice: under `src/test` (Robolectric, which has no WebView provider or JavaScript) only that a WebView that cannot post
-  messages refuses to construct; under `src/androidTest` (emulator only: it skips on a physical device with the smoke suite's
+  429), the logging, and what the script may send and post (the header constants match `WebHeaders`; the CSRF token and the
+  claim go into the request's headers only; one same-origin GET to `/` + the path, each fetch option once; every message is
+  `{id, code, contentType, body, redirected}` with the reply's own content type and text or null; a self-check of
+  mutants, `body: document.cookie` and a duplicate `redirect` among them, shows the pin fails each). `AndroidWebPageTest`
+  exists twice: under `src/test` (Robolectric, which has no WebView provider or JavaScript) that a WebView that cannot post
+  messages refuses to construct, and the page's `PageClient` (a top-level class for that reason) driven by hand: a dead
+  renderer is handled (`true`) and reported, a main-frame HTTP error of 400 or more fails the load with its status, a
+  subframe's does not. Under `src/androidTest` (emulator only: it skips on a physical device with the smoke suite's
   `isEmulator()` check) it runs the real page, the real `ig_fetch.js` and the transport against LOCAL MockWebServers at
   `http://127.0.0.1:<port>`, which is also the allowed origin passed in for the test. It checks that one `get` reaches the
   server exactly once with the site headers and the page's cookie, that a redirect is reported and not followed, that
-  forged messages from another origin's frame and from a same-origin subframe are dropped, that the transport works
-  from a `Dispatchers.Default` coroutine, and that a cancelled call aborts its fetch (the page posts code -1 for it while the
-  server still holds the reply) and the next call goes through. Loopback cleartext needed no configuration on the API 37 emulator (the platform
+  forged messages from another origin's frame and from a same-origin subframe's own bridge are dropped (and that one through
+  `parent.`/`top.igBridge` gets through, R109), that the transport works from a `Dispatchers.Default` coroutine, that a
+  cancelled call aborts its fetch (the page posts code -1 for it while the server still holds the reply) and the next call
+  goes through, that a 429 home page is `RateLimited` with no API request, that a reset ends a load or a call at once, that
+  a reply that never comes times out at the call's bound and the page is dropped, that the claim header is the site's own
+  stored claim, that a page that moved itself (`pushState`) still requests the API path, and that a dropped connection is
+  `Transient` at once with the page kept. Loopback cleartext needed no configuration on the API 37 emulator (the platform
   allows it for `127.0.0.1` and `localhost`), so no network security config exists; `CleartextGuardTest` pins that no
   release source set permits cleartext or names a config, that a debug-only one could permit loopback only, and that no
   release or debug source set overrides `onReceivedSslError`.

@@ -17,8 +17,9 @@ never distributed.
   Test fixtures must be scrubbed of real handles, captions and URLs.
 - All Instagram-specific code (endpoints, headers, pagination, JSON field extraction) lives in the single
   Instagram adapter module. Nothing else talks to Instagram. The only things in `:app` that repeat its names are the
-  hidden page's `ig_fetch.js` (three header values, pinned to `WebHeaders` by `WebViewTransportTest`) and
-  `AndroidWebPage`'s default origin (a string no test compares with `WebEndpoints`).
+  hidden page's `ig_fetch.js` (three header values, pinned to `WebHeaders` by `WebViewTransportTest`, plus the header
+  names, the `csrftoken` cookie and the `www-claim-v2` storage key it needs to build the site's own request) and
+  `AndroidWebPage`'s default origin (pinned to the scheme and host of `WebEndpoints.HOME_URL` by `AndroidWebPageGuardTest`).
 - Sync pacing is a hard requirement. No change may raise request rates or concurrency without saying so
   explicitly in the commit and in `ARCHITECTURE.md`.
 - The repo is public on GitHub: treat every commit as published.

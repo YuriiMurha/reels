@@ -30,6 +30,26 @@ object WebEndpoints {
         return LOGIN_DOMAINS.any { lower == it || lower.endsWith(".$it") }
     }
 
+    /** What a page of Instagram's own site says about the session by where it is. */
+    enum class Landing {
+        /** The login page: the session is gone, the owner must log in. */
+        LOGIN,
+
+        /** A checkpoint or a suspension: Instagram wants the owner to verify. */
+        CHALLENGE,
+    }
+
+    /**
+     * The [Landing] of a page of Instagram's own origin whose path is [path]: [Landing.LOGIN] under `/accounts/login`,
+     * [Landing.CHALLENGE] under `/challenge` or `/accounts/suspended`, null for any other page (the home page, `/explore/`, ...).
+     * The caller has already checked that the page is on Instagram's origin.
+     */
+    fun landingOf(path: String): Landing? = when {
+        path.startsWith("/accounts/login") -> Landing.LOGIN
+        path.startsWith("/challenge") || path.startsWith("/accounts/suspended") -> Landing.CHALLENGE
+        else -> null
+    }
+
     /**
      * The login check: the account edit form the website loads for the logged-in user. The reply holds `form_data.username`;
      * the pk comes from the `ds_user_id` cookie, so this URL carries no id.
