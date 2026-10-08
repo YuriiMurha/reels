@@ -115,3 +115,7 @@ Six small commits on `claude/hardening`; each started with a failing test. Every
 - **`epoch()` never throws.** It reads the jar, and `CookieManager` throws without a WebView provider; it is called outside every try. It now records nothing and retries on failure, and the engine reads it inside its try (a run ends PAUSED "Unexpected error" instead of staying RUNNING).
 - **Delete library messages** moved under the Delete library button (a Storage message line) and say exactly what was left: the account record, only cached files ("Library deleted; some cached files couldn't be removed"), or, only when the delete itself failed, "Couldn't delete the library; try again". `ThumbnailStore.deleteAll()` reports a file it could not remove.
 - Tests: a first-validate test that really reaches the "nothing recorded yet" branch; a dot-ends-each-group case for the lab's digit rule; the any-case one-word rule pinned for every visible-value key. `TODO.md` gets an on-phone check for whether Instagram re-issues `sessionid` on ordinary responses; docs no longer claim the login screen validates every new session.
+
+## 2026-10-08: review test gaps closed
+
+- Tests now pin that the Adapter lab and the video resolver check the session they started under (not the one current when the pacer gate opens), that Delete library keeps removing every other thumbnail when one cannot be removed, and that the storage message clears when a new Delete library starts. Each test was shown to fail under the mutation it guards against. No app code changed.
