@@ -1143,6 +1143,36 @@ class WebViewTransportTest {
     }
 
     @Test
+    fun aRendererDeathBetweenCallsLeavesNoIdleTimerPending() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        completedCall(transport, pages, 1)
+        val dead = pages.created.single()
+        assertEquals(1, pendingIdleTimers(), "the call that just ended armed the timer")
+
+        dead.die()
+        runCurrent()
+        // The page is dropped at once and its timer goes with it: a dead page is not held for the idle time.
+        assertTrue(dead.destroyed)
+        assertEquals(0, pendingIdleTimers())
+
+        // The next call starts over, and its own timer is the only one: the dead page's deadline cannot close the new page.
+        advanceTimeBy(100_000)
+        runCurrent()
+        completedCall(transport, pages, 2)
+        val fresh = pages.created.last()
+        assertEquals(2, pages.created.size)
+        assertEquals(1, pendingIdleTimers())
+        advanceTimeBy(WebViewTransport.IDLE_MS - 100_000 + 1)
+        runCurrent()
+        assertFalse(fresh.destroyed, "the first page's deadline has passed")
+        advanceTimeBy(100_000)
+        runCurrent()
+        assertTrue(fresh.destroyed)
+        assertEquals(0, pendingIdleTimers())
+    }
+
+    @Test
     fun resetCancelsTheIdleTimer() = runTest {
         val pages = Pages()
         val transport = transport(pages)
@@ -1190,11 +1220,16 @@ class WebViewTransportTest {
         assertTrue(page.destroyed)
     }
 
+    /**
+     * A login landing drops the page, so no page exists to arm a timer for and no idle close ever runs in it: the landing is
+     * remembered by the transport itself, and the idle time that passes changes nothing about it.
+     */
     @Test
-    fun anIdleCloseNeverForgetsALoginLanding() = runTest {
+    fun aLoginLandingStaysStickyPastTheIdleDeadline() = runTest {
         val pages = Pages(FakeWebPage(landing = "https://www.instagram.com/accounts/login/?next=%2F"))
         val transport = transport(pages)
         assertIs<InstagramException.LoginRequired>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertEquals(0, pendingIdleTimers(), "the dropped page has no timer")
 
         advanceTimeBy(WebViewTransport.IDLE_MS + 1)
         runCurrent()

@@ -92,8 +92,12 @@ class BackendWiringGuardTest {
                     if (c == '(') depth++
                     if (c == ')') depth--
                     if (depth == 0 && c == '{') break
-                    // A header goes on over a line that ends in `:` or `,`, and stops at any other end of line.
-                    if (depth == 0 && c == '\n' && shape.substring(keyword.range.first, end).trimEnd().lastOrNull() !in listOf(':', ',')) break
+                    // A header goes on over a line that ends in `:` or `,`, and over one whose next non-blank line starts with `:` or `,`
+                    // (the colon of the supertypes on its own line, after the constructor's `)`); any other end of line stops it.
+                    if (depth == 0 && c == '\n' &&
+                        shape.substring(keyword.range.first, end).trimEnd().lastOrNull() !in listOf(':', ',') &&
+                        shape.substring(end).trimStart().firstOrNull() !in listOf(':', ',')
+                    ) break
                     end++
                 }
                 val header = StringBuilder()
@@ -128,6 +132,8 @@ class BackendWiringGuardTest {
             "interface extending it" to "interface Sneaky : InstagramTransport {",
             "delegation" to "class Sneaky(private val inner: InstagramTransport) : InstagramTransport by inner",
             "supertype on the next line" to "class Sneaky :\n    InstagramTransport {",
+            "colon on the next line" to "class Sneaky\n    : InstagramTransport {",
+            "colon on the line after the constructor" to "class Sneaky(\n    private val x: Int,\n)\n    : InstagramTransport {",
         )
         for ((what, text) in forms) assertEquals(1, declaredTransports(mapOf("a.kt" to text)).size, "the scan must see $what: $text")
         // What only mentions the type is not a declaration of one.

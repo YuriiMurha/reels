@@ -35,9 +35,12 @@ import kotlin.time.TimeSource
  *
  * **Idle.** The page is a live single-page app whose own scripts keep sending background requests while it exists, and the
  * process can stay cached for hours. So when a call ends, whatever its outcome, and a page exists, a timer starts; if no call
- * begins within [idleMs] ([IDLE_MS] by default) the page is closed. A call's start cancels the timer, and so does [reset].
- * That clean end of a visit gives back the page limit (a page dropped by a failure never has a timer and still counts), and
- * never touches a remembered login or challenge landing. The cost is one more home-page load per active period.
+ * begins within [idleMs] ([IDLE_MS] by default) the page is closed. A call's start cancels the timer, and so do [reset] and
+ * a dead renderer. A sync run normally keeps one page for the whole run, because the gaps between its API calls (the Pacer's
+ * breaks, a transient backoff of up to 288 s with its jitter, a batch of thumbnail downloads) are normally shorter than 5 min;
+ * that is not a promise, and a longer gap closes the page and the next call loads the site again. That clean end of a visit
+ * gives back the page limit (a page dropped by a failure never has a timer and still counts), and never touches a remembered
+ * login or challenge landing. The cost is one more home-page load per active period.
  *
  * **A home page that is an HTTP error** fails the load: 429 is [InstagramException.RateLimited] (so the caller's cooldown
  * arms with no API request made), any other status [InstagramException.Transient]. The page is dropped either way.
@@ -278,11 +281,14 @@ class WebViewTransport(
     }
 
     /**
-     * The current page's renderer died: the page goes, and then a call waiting on it fails now. In that order, as in [reset]:
-     * completing the waiter may run the woken call at once (on an immediate dispatcher), and it must find no page left.
+     * The current page's renderer died: the page goes, its idle timer with it, and then a call waiting on it fails now. In that
+     * order, as in [reset]: completing the waiter may run the woken call at once (on an immediate dispatcher), and it must find
+     * no page left (and no stale timer to cancel a fresh one).
      */
     private fun pageGone() {
         dropPage()
+        // A dead page is not held for the idle time: the timer armed for it has nothing left to close.
+        cancelIdleTimer()
         waiting?.let { it.reply.complete(Answer.Destroyed) }
     }
 
@@ -368,7 +374,9 @@ class WebViewTransport(
 
         /**
          * How long the page may sit between calls before it is closed. Longer than the Pacer's longest break (192 s) and its
-         * longest transient backoff (240 s), so one sync run keeps one page.
+         * longest transient backoff (240 s, up to 288 s with its +20 % jitter), so one sync run normally keeps one page: the
+         * gaps between a run's API calls are normally shorter than this. A run's thumbnail downloads also sit between API
+         * calls, so a longer gap is possible and then simply costs one more home-page load.
          */
         const val IDLE_MS = 300_000L
 
