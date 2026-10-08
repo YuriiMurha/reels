@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -67,6 +68,9 @@ import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.Thumbnail
 import io.github.yuriimurha.reels.ui.common.carouselLabel
 import kotlinx.coroutines.flow.distinctUntilChanged
+
+/** Test tag of the page that has the player (only the settled, playing page has one); the on-device smoke suite looks for it. */
+const val VIDEO_SURFACE_TAG = "video-surface"
 
 /** The player stopped on [media] with [error]; a new instance per failure, so the effect that handles it restarts. */
 private class PlayerFailure(val media: MediaEntity, val error: Throwable)
@@ -220,7 +224,7 @@ fun ViewerPage(
             player != null -> ContentFrame(
                 player = player,
                 surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
-                modifier = Modifier.fillMaxSize().clickable(onClick = onTogglePlay),
+                modifier = Modifier.fillMaxSize().testTag(VIDEO_SURFACE_TAG).clickable(onClick = onTogglePlay),
                 contentScale = ContentScale.Fit,
                 shutter = { Thumbnail(media.thumbPath, Modifier.fillMaxSize(), ContentScale.Fit) },
             )

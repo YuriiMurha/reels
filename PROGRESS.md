@@ -91,3 +91,9 @@ Every line was written and tested without any agent contacting Instagram (MockWe
 - The Full sync guard counts as "the library" only items first seen before the last finished sync, so items left by a refused, paused or discarded run can't make a large removal look small; and a library remembers its Instagram account, so a run under another account stops before writing anything (Delete library to switch).
 - Video: the player no longer retries a refused link by itself (the renew-once path handles 403/410); Mock mode has its own video cache. The Adapter lab re-checks the session inside the gate.
 - Docs: Android may re-run queued sync work by itself (paced, budgeted, session-gated); a 403 on one reel's link renewal reads as an expired session (on-phone check); two new known limits in `TODO.md`.
+
+## 2026-10-07: On-device smoke tests
+
+- Added an Android instrumented suite (`app/src/androidTest/`) that drives the debug app through its real UI on the emulator, in Mock mode: launch, Sync (logged-out session, Developer section, a fake Sync to the end), grid, viewer, video playback and Search, with a numbered screenshot per step. It skips on a physical phone and fails unless Mock mode is on, both before the Activity launches; it taps nothing that logs in or reaches Instagram. No pacing or request-rate change.
+- Production change: one test tag (`video-surface`) on the viewer page that has the player.
+- Build: androidx.test runner and rules 1.7.0 and Espresso 3.7.0 (Compose's 3.5.0 crashes on API 37); `gradle.properties` keeps the app installed after `connectedDebugAndroidTest` so a run never deletes a device's app data.

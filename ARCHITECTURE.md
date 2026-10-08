@@ -90,6 +90,18 @@ A debug build starts in Mock mode (the fake library); a release build always use
     a swipe to the next reel, Search and Back. No `FATAL`, `ClassNotFound` or `NoSuchMethod`, so no further keep rule.
   - **Not exercised under R8** (it needs Instagram, which no agent contacts): the real client (OkHttp and the JSON
     parsing in `:instagram`), the CDN fetcher and the WebView login.
+- **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, README "Automated smoke tests"):
+  `SmokeTest` drives the debug app through its real UI on the emulator, in Mock mode: Home, Sync (logged-out session, the
+  Developer section, a fake Sync to the end), grid, viewer, video playback and Search, with a screenshot per step in the
+  app's `files/smoke/`. It never touches Instagram: `SmokeGuard`, the outermost rule, skips every test on a physical device
+  (`isEmulator()`, pinned by `EmulatorDetectionTest`) and fails unless `AppContainer.usesFake`, both before the Activity is
+  launched; no test taps a login, check, Instagram-link, lab or Mock mode control. Video playback is read from the viewer's
+  `TextureView` (the playing page carries the `video-surface` test tag): a frame is drawn and a later one differs. Sync pacing
+  is unchanged (the fake backend's own Fast policy). Deps: androidx.test runner and rules 1.7.0, Espresso 3.7.0 (the 3.5.0
+  that Compose's test library pulls in crashes on API 37), Compose `ui-test-junit4`. The rule is the v1 `createAndroidComposeRule`
+  on purpose: v2 runs composition coroutines on the test thread, and the viewer's ExoPlayer insists on the main thread.
+  `android.injected.androidTest.leaveApksInstalledAfterRun=true` in `gradle.properties` stops Gradle from uninstalling the app
+  (and its data) after the run.
 
 ## `:instagram`
 

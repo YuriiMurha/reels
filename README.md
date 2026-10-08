@@ -139,6 +139,37 @@ and never contacts Instagram. A release build has no such switch and always uses
   cooldown armed by a session check or a lab call is not shown there until you switch Mock mode off (the app still
   refuses the requests).
 
+### Automated smoke tests (emulator only)
+
+An on-device UI suite (`app/src/androidTest/`) drives the real app through its screens, like a browser test for the phone
+app. It covers: launch (Home's "Saved" bar, Search, the sync chip), the Sync screen (the session shown logged out, the
+Developer section with Mock mode on), a fake **Sync** to the end, a collection grid, opening the viewer, a reel that
+starts playing, and Search. It never contacts Instagram: it never logs in and never taps Log in, Check now, Open on
+Instagram, the Adapter lab or the Mock mode switch (it only checks that they are there).
+
+- **It skips on a real phone.** Every test begins by checking that the device is an emulator, before anything is
+  launched, so a phone that is plugged in only gets the debug build installed over its own.
+- **It needs Mock mode on** (a fresh debug install has it on). With Mock mode off the tests fail with "Turn Mock mode on
+  (Sync → Developer) before running the smoke tests". Switch it on by hand: the tests never flip it.
+- **Run it** with an emulator running and the exports of step 1.4 done in this terminal (that step also puts `adb` on the
+  path). `-e` means "the only emulator": with none running, or two, `adb` fails and Gradle does not start.
+
+  ```bash
+  SERIAL="$(adb -e get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew connectedDebugAndroidTest
+  ```
+
+  Always with `ANDROID_SERIAL`: without it Gradle runs on every connected device, a phone included. The app stays
+  installed afterwards (`gradle.properties`), so the emulator keeps its fake library and the screenshots survive.
+- **Screenshots:** one PNG per step (`t1-01-home.png`, `t2-02-developer-mock-mode-on.png`, …) in the app's files folder
+  on the emulator, replaced on every run. Copy them to the Mac with:
+
+  ```bash
+  rm -rf "$HOME/reels-smoke-shots" && adb -e pull /sdcard/Android/data/io.github.yuriimurha.reels/files/smoke/ "$HOME/reels-smoke-shots"
+  ```
+
+  The Gradle report (`app/build/reports/androidTests/connected/debug/index.html`) lists a skipped test as failed; the
+  build itself still succeeds.
+
 ## 4. Log in (on the phone only)
 
 On the Sync screen, under **Instagram session**:
