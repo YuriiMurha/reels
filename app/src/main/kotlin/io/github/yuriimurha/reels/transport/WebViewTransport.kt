@@ -2,9 +2,11 @@ package io.github.yuriimurha.reels.transport
 
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.ErrorReplySummary
+import io.github.yuriimurha.reels.instagram.web.GraphQlQuery
 import io.github.yuriimurha.reels.instagram.web.InstagramTransport
 import io.github.yuriimurha.reels.instagram.web.RawReply
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
+import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -30,7 +32,10 @@ import kotlin.time.TimeSource
 /**
  * [InstagramTransport] that runs each API call as one same-origin `fetch()` (`ig_fetch.js`) inside a hidden
  * instagram.com page, so Chromium sends the request with its own TLS stack, headers and cookies. Production transport;
- * [io.github.yuriimurha.reels.instagram.web.OkHttpTransport] is the JVM-test one.
+ * [io.github.yuriimurha.reels.instagram.web.OkHttpTransport] is the JVM-test one. A call is a GET ([get],
+ * `window.__igFetch`) or a POST of one of the website's own GraphQL queries ([graphql], `window.__igGraphQl`, allow-listed
+ * by [WebGraphQl.ALL] here and by the script's own list in the page). The GraphQL form needs the page's `fb_dtsg` and `lsd`:
+ * the script reads them in the page and uses them there, and they never reach this class. Everything below holds for both.
  *
  * **One page.** The first call (and the first after [reset]) creates the page and loads [homeUrl]; later calls reuse it until
  * it has been idle for [IDLE_MS]. At most one call is in flight, the load included: a second one is refused with
@@ -70,7 +75,9 @@ import kotlin.time.TimeSource
  * [CompletableDeferred] under `withTimeoutOrNull`, which leaves a caller's own deadline alone). A load that fails or times
  * out, a call that times out, and a page that throws all drop the page: a stuck page is never reused. A dead renderer
  * ([WebPage.onGone]) drops it and fails a call in flight at once. A network failure inside the page (`code == -1`) is
- * [InstagramException.Transient] and keeps it.
+ * [InstagramException.Transient] and keeps it. A GraphQL call on a page that has no tokens to send it with (`code == -2`, no
+ * request made) is [InstagramException.Transient] and drops the page; a name outside the script's own list (`code == -3`,
+ * no request made either) is [InstagramException.Transient] and keeps it.
  *
  * **A cancelled caller** always ends with its own `CancellationException`, never with another exception (one thrown by a
  * cancelled coroutine fails its parent scope, the viewer's `collectLatest` say). Cancelled while the page LOADS (R104), it
@@ -85,14 +92,15 @@ import kotlin.time.TimeSource
  * ends as an OkHttp call's did and the next call's request is never sent beside it; the late message carries an old id and is
  * ignored.
  *
- * **Threads.** The page is touched on [main] only and all state below is confined to it ([get] and [reset] switch to it, and
- * the idle timer runs there too). A message is accepted only from the page that is current, only when it parses, and only for
- * the awaited call id.
+ * **Threads.** The page is touched on [main] only and all state below is confined to it ([get], [graphql] and [reset] switch
+ * to it, and the idle timer runs there too). A message is accepted only from the page that is current, only when it parses,
+ * and only for the awaited call id.
  *
- * **Debug log** ([log], debug builds only): one line per call, `GET <path, digit runs of 3+ as <n>> -> <code> (<ms> ms)`;
- * `<code>` is `redirect`, `timeout` and so on when there is no status. A non-2xx reply is followed by its
- * [ErrorReplySummary] line. Never a body in a 2xx line, never a header (none is visible here). An idle close logs
- * `page closed (idle)`, [closePage] `page closed (owner needed)`.
+ * **Debug log** ([log], debug builds only): one line per call, `GET <path, digit runs of 3+ as <n>> -> <code> (<ms> ms)` or
+ * `GRAPHQL <friendly name> -> <code> (<ms> ms)` (never its doc id or variables); `<code>` is `redirect`, `timeout`,
+ * `no tokens` and so on when there is no status. A non-2xx reply is followed by its [ErrorReplySummary] line. Never a body in
+ * a 2xx line, never a header (none is visible here). An idle close logs `page closed (idle)`, [closePage]
+ * `page closed (owner needed)`.
  */
 class WebViewTransport(
     private val createPage: () -> WebPage,
@@ -125,7 +133,27 @@ class WebViewTransport(
         // The script prefixes "/", so a slash or a backslash first would make a URL to another host, and so would a tab or a
         // newline in front of one (URL parsing drops them). Nothing but a letter or a digit starts a path of ours.
         require(isPath(pathAndQuery)) { "not a path on the Instagram origin" }
-        return withContext(main) { logged(pathAndQuery) { call(pathAndQuery) } }
+        return withContext(main) {
+            logged("GET ${pathAndQuery.replace(DIGIT_RUN, "<n>")}") {
+                call { id -> "window.__igFetch && window.__igFetch($id,${JsonPrimitive(pathAndQuery)})" }
+            }
+        }
+    }
+
+    /**
+     * The website's own GraphQL [query], sent by the page (`window.__igGraphQl`) as one POST with the page's own tokens, which
+     * never leave it. Only a query of [WebGraphQl.ALL] is sent (the page checks its own list too). Every rule of [get] holds:
+     * the busy flag, the landing check, the sticky verdicts, the page limit, the idle close, the remembered 429 and the abort.
+     */
+    override suspend fun graphql(query: GraphQlQuery, docId: String, variables: String): RawReply {
+        require(query in WebGraphQl.ALL) { "not an allowed query" }
+        return withContext(main) {
+            logged("GRAPHQL ${query.friendlyName}") {
+                call { id ->
+                    "window.__igGraphQl && window.__igGraphQl($id,${JsonPrimitive(query.friendlyName)},${JsonPrimitive(docId)},${JsonPrimitive(variables)})"
+                }
+            }
+        }
     }
 
     /**
@@ -172,7 +200,8 @@ class WebViewTransport(
         }
     }
 
-    private suspend fun call(path: String): RawReply {
+    /** One call in the page: [invocation] is the script that makes it, given the call's id. */
+    private suspend fun call(invocation: (id: Long) -> String): RawReply {
         // First, before the page is created or looked at: a call that arrives while another loads the page must not use it.
         if (busy) throw Failed("busy", InstagramException.Transient())
         busy = true
@@ -192,7 +221,7 @@ class WebViewTransport(
             waiting = waiter
             try {
                 current.evaluate(script)
-                current.evaluate("window.__igFetch && window.__igFetch($id,${JsonPrimitive(path)})")
+                current.evaluate(invocation(id))
             } catch (e: Exception) {
                 dropPage()
                 throw Failed("page error", InstagramException.Transient(e))
@@ -373,6 +402,13 @@ class WebViewTransport(
 
     private fun toReply(message: PageMessage): RawReply = when {
         message.redirected -> RawReply(0, null, null, redirected = true)
+        // The page has no tokens to send a GraphQL query with: it is not a page to use, so the next call loads a fresh one.
+        message.code == NO_TOKENS -> {
+            dropPage()
+            throw Failed("no tokens", InstagramException.Transient())
+        }
+        // The page's own list of queries refused the name: nothing was sent, and the page is fine.
+        message.code == REFUSED_QUERY -> throw Failed("refused query", InstagramException.Transient())
         // -1 is the page's fetch failing (offline, DNS, reset); anything else outside HTTP's range is no status at all.
         message.code !in 100..599 -> throw Failed("network error", InstagramException.Transient())
         else -> RawReply(message.code, message.contentType, message.body)
@@ -389,7 +425,8 @@ class WebViewTransport(
         runCatching { old.destroy() }
     }
 
-    private suspend fun logged(path: String, block: suspend () -> RawReply): RawReply {
+    /** Runs [block] and logs `<line> -> <outcome> (<ms> ms)`; [line] is the call as the log may show it (`GET <path>`, say). */
+    private suspend fun logged(line: String, block: suspend () -> RawReply): RawReply {
         val started = timeSource.markNow()
         var outcome = "error"
         var reply: RawReply? = null
@@ -405,7 +442,7 @@ class WebViewTransport(
             throw e
         } finally {
             log?.let { sink ->
-                sink("GET ${path.replace(DIGIT_RUN, "<n>")} -> $outcome (${started.elapsedNow().inWholeMilliseconds} ms)")
+                sink("$line -> $outcome (${started.elapsedNow().inWholeMilliseconds} ms)")
                 if (reply != null && !reply.redirected && reply.code !in 200..299) {
                     sink(ErrorReplySummary.of(reply.code, reply.contentType, reply.body))
                 }
@@ -461,6 +498,12 @@ class WebViewTransport(
 
         private val JSON = Json { ignoreUnknownKeys = true }
         private val DIGIT_RUN = Regex("\\d{3,}")
+
+        /** What `ig_fetch.js` posts when the page has no `fb_dtsg`/`lsd` to send a GraphQL query with. */
+        private const val NO_TOKENS = -2
+
+        /** What `ig_fetch.js` posts for a GraphQL name that is not in its own list. */
+        private const val REFUSED_QUERY = -3
 
         /** A letter or a digit first, no tab, carriage return or newline anywhere. */
         private fun isPath(path: String): Boolean =

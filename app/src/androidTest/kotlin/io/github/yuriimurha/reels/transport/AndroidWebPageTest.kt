@@ -8,6 +8,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import io.github.yuriimurha.reels.NOT_AN_EMULATOR
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.RawReply
+import io.github.yuriimurha.reels.instagram.web.WebGraphQl
+import io.github.yuriimurha.reels.instagram.web.WebHeaders
 import io.github.yuriimurha.reels.isEmulator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -30,6 +32,7 @@ import org.junit.rules.TestRule
 import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
 import java.net.InetAddress
+import java.net.URLDecoder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -427,6 +430,154 @@ class AndroidWebPageTest {
         assertEquals("no second home load", 1, site.requestsTo("/").size)
     }
 
+    // --- 8. GraphQL: the website's own query, with the page's tokens, which stay in the page -------------------------------
+
+    /**
+     * One `graphql` is exactly one POST to the GraphQL path, with the website's form (the page's own `fb_dtsg` and `lsd`, read
+     * from the page's HTML here: the test page has no module system) and headers, and the reply comes back intact.
+     */
+    @Test
+    fun graphqlSendsOnePostWithTheFormAndHeaders() {
+        val site = site()
+        val csrf = fakeToken()
+        assertTrue("the cookie jar refused the fake cookie", setCookie(site.origin, "csrftoken=$csrf; Path=/"))
+        val tokens = PageTokens()
+        site.route("/") { html(tokens.homePage()) }
+        site.route(GRAPHQL) { json(REPLY_BODY) }
+        val variables = WebGraphQl.savedCollectionsVariables(null)
+
+        val reply = runBlocking { transport(site).graphql(WebGraphQl.SAVED_COLLECTIONS, "123", variables) }
+
+        val calls = site.requestsTo(GRAPHQL)
+        assertEquals("exactly one request reached the GraphQL path: $calls", 1, calls.size)
+        val call = calls.single()
+        assertEquals("POST", call.method)
+        assertEquals(
+            mapOf(
+                "fb_dtsg" to tokens.dtsg,
+                "lsd" to tokens.lsd,
+                "fb_api_caller_class" to "RelayModern",
+                "fb_api_req_friendly_name" to "PolarisProfileSavedTabContentQuery",
+                "variables" to variables,
+                "server_timestamps" to "true",
+                "doc_id" to "123",
+            ),
+            formOf(call),
+        )
+        assertTrue(call.headers["Content-Type"].orEmpty().startsWith("application/x-www-form-urlencoded"))
+        assertEquals("PolarisProfileSavedTabContentQuery", call.headers["x-fb-friendly-name"])
+        assertEquals(tokens.lsd, call.headers["x-fb-lsd"])
+        assertEquals(WebHeaders.APP_ID, call.headers["x-ig-app-id"])
+        assertEquals(WebHeaders.ASBD_ID, call.headers["x-asbd-id"])
+        assertEquals(csrf, call.headers["x-csrftoken"])
+        assertTrue("the page's cookie was sent", "csrftoken=$csrf" in call.headers["Cookie"].orEmpty())
+        assertEquals(1, site.requestsTo("/").size)
+
+        assertEquals(200, reply.code)
+        assertFalse(reply.redirected)
+        assertEquals("application/json; charset=utf-8", reply.contentType)
+        assertEquals(REPLY_BODY, reply.body)
+    }
+
+    /**
+     * A page without both tokens sends nothing: the call is `Transient` with no request made, and the page is dropped (the next
+     * call loads the home page again).
+     */
+    @Test
+    fun aPageWithoutTokensSendsNothing() {
+        val tokens = PageTokens()
+        for ((what, home) in listOf(
+            "no tokens" to "<html><body>home</body></html>",
+            "no lsd" to tokens.homePage(lsd = false),
+            "no dtsg" to tokens.homePage(dtsg = false),
+        )) {
+            val site = site()
+            site.route("/") { html(home) }
+            site.route(GRAPHQL) { json(REPLY_BODY) }
+            val transport = transport(site)
+
+            val first = runBlocking { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}") } }
+            assertTrue("$what: expected Transient: $first", first.exceptionOrNull() is InstagramException.Transient)
+            val second = runBlocking { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}") } }
+            assertTrue("$what: expected Transient: $second", second.exceptionOrNull() is InstagramException.Transient)
+
+            assertEquals("$what: no POST was made", emptyList<RecordedRequest>(), site.requests().filter { it.method == "POST" })
+            assertEquals("$what: nothing reached the GraphQL path", 0, site.requestsTo(GRAPHQL).size)
+            assertEquals("$what: the page was dropped, so the second call loaded the site again", 2, site.requestsTo("/").size)
+            runBlocking { transport.reset() } // this round's page; tearDown resets only the last transport
+        }
+    }
+
+    /** What the page hands the transport carries the reply and never a token, though the server did get both. */
+    @Test
+    fun theTokensNeverReachTheApp() {
+        val site = site()
+        val tokens = PageTokens()
+        site.route("/") { html(tokens.homePage()) }
+        site.route(GRAPHQL) { json(REPLY_BODY) }
+        val heard = CopyOnWriteArrayList<String>()
+
+        val reply = runBlocking { transport(site, heard).graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}") }
+
+        assertEquals(REPLY_BODY, reply.body)
+        // Not vacuous: the tokens were in the page, and went out in the request.
+        assertEquals(tokens.dtsg, formOf(site.requestsTo(GRAPHQL).single())["fb_dtsg"])
+        assertEquals(tokens.lsd, site.requestsTo(GRAPHQL).single().headers["x-fb-lsd"])
+        Log.i(TAG, "messages the page posted: ${heard.size}")
+        assertEquals("one message, the reply: $heard", 1, heard.size)
+        assertFalse("a token reached the app", heard.any { tokens.dtsg in it || tokens.lsd in it })
+    }
+
+    /**
+     * The page's own allow-list (spec 6): a name that is not in it is refused in the page with code -3 and nothing is sent. The
+     * transport never asks for one (its own list refuses it first), so the test renames the query on its way into the page.
+     */
+    @Test
+    fun anUnknownFriendlyNameIsRefusedInThePage() {
+        val site = site()
+        val tokens = PageTokens()
+        site.route("/") { html(tokens.homePage()) }
+        site.route(GRAPHQL) { json(REPLY_BODY) }
+        site.route(API) { json(REPLY_BODY) }
+        val heard = CopyOnWriteArrayList<String>()
+        val transport = transport(site, heard, rewrite = { it.replace("\"PolarisProfileSavedTabContentQuery\"", "\"PolarisSomeOtherQuery\"") })
+
+        val result = runBlocking { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}") } }
+
+        assertTrue("expected Transient: $result", result.exceptionOrNull() is InstagramException.Transient)
+        assertTrue("the page refused it with -3: $heard", heard.single().contains("\"code\":-3,"))
+        assertEquals("nothing reached the GraphQL path", 0, site.requestsTo(GRAPHQL).size)
+        // The page is kept: the next call uses it, with no second load of the site.
+        assertEquals(REPLY_BODY, runBlocking { transport.get(API.removePrefix("/")) }.body)
+        assertEquals(1, site.requestsTo("/").size)
+    }
+
+    /** Fake `fb_dtsg`/`lsd` values (built from parts, different on every run) and a home page that carries them as the site does. */
+    private class PageTokens {
+        val dtsg = listOf("fake", "dtsg", UUID.randomUUID().toString().take(8)).joinToString("-")
+        val lsd = listOf("fake", "lsd", UUID.randomUUID().toString().take(8)).joinToString("-")
+
+        /** The site's server-rendered module data, in a JSON script element, with the tokens asked for. */
+        fun homePage(dtsg: Boolean = true, lsd: Boolean = true): String {
+            val modules = listOfNotNull(
+                if (dtsg) "[\"DTSGInitialData\",[],{\"token\":\"" + this.dtsg + "\"},258]" else null,
+                if (lsd) "[\"LSD\",[],{\"token\":\"" + this.lsd + "\"},323]" else null,
+                "[\"SomethingElse\",[],{\"value\":1},1]",
+            )
+            return "<html><head><script type=\"application/json\">{\"define\":[${modules.joinToString(",")}]}</script></head><body>home</body></html>"
+        }
+    }
+
+    /** The `application/x-www-form-urlencoded` body of [request], decoded (a key twice fails the test). */
+    private fun formOf(request: RecordedRequest): Map<String, String> {
+        val pairs = request.body?.utf8().orEmpty().split('&').filter { it.isNotEmpty() }.map { field ->
+            val (key, value) = field.split('=', limit = 2).let { it[0] to it.getOrElse(1) { "" } }
+            URLDecoder.decode(key, "UTF-8") to URLDecoder.decode(value, "UTF-8")
+        }
+        assertEquals("each form field once: $pairs", pairs.map { it.first }.distinct(), pairs.map { it.first })
+        return pairs.toMap()
+    }
+
     // --- The forging frame ---------------------------------------------------------------------------------------------------
 
     private class ForgedCall(val reply: RawReply, val report: String)
@@ -514,6 +665,8 @@ class AndroidWebPageTest {
 
         fun requestsTo(path: String): List<RecordedRequest> = seen.filter { it.url.encodedPath == path }
 
+        fun requests(): List<RecordedRequest> = seen.toList()
+
         override fun close() = server.close()
     }
 
@@ -522,14 +675,24 @@ class AndroidWebPageTest {
     /**
      * The real transport on the real page, pointed at [site]: its origin is the home page and the only allowed sender. With
      * [heard], every message the page hands the transport is also kept there (the transport keeps none it does not wait for).
+     * With [rewrite], every script the transport evaluates is changed by it on the way into the page.
      */
-    private fun transport(site: Site, heard: MutableList<String>? = null, callTimeoutMs: Long = 30_000): WebViewTransport {
+    private fun transport(
+        site: Site,
+        heard: MutableList<String>? = null,
+        callTimeoutMs: Long = 30_000,
+        rewrite: ((String) -> String)? = null,
+    ): WebViewTransport {
         val origin = site.origin
         // The one thing standing between these tests and the real site: nothing but a local address is ever the home page.
         require(origin.startsWith("http://127.0.0.1:")) { "the page tests talk to a local server only: $origin" }
         val script = context.assets.open("ig_fetch.js").bufferedReader().use { it.readText() }
         return WebViewTransport(
-            createPage = { AndroidWebPage(context, allowedOrigin = origin).let { page -> if (heard == null) page else Recorded(page, heard) } },
+            createPage = {
+                AndroidWebPage(context, allowedOrigin = origin)
+                    .let { page -> if (heard == null) page else Recorded(page, heard) }
+                    .let { page -> if (rewrite == null) page else Rewritten(page, rewrite) }
+            },
             homeUrl = "$origin/",
             script = script,
             callTimeoutMs = callTimeoutMs,
@@ -542,6 +705,11 @@ class AndroidWebPageTest {
             heard += raw
             listener(raw)
         }
+    }
+
+    /** [page], with every script changed by [rewrite] before it is evaluated. */
+    private class Rewritten(private val page: WebPage, private val rewrite: (String) -> String) : WebPage by page {
+        override fun evaluate(script: String) = page.evaluate(rewrite(script))
     }
 
     /** Polls [condition] until it holds or [timeoutMs] passes; true when it held. */
@@ -586,6 +754,9 @@ class AndroidWebPageTest {
 
         /** The login check's path: the real one, so the test reads like the call it stands for. */
         const val API = "/api/v1/accounts/edit/web_form_data/"
+
+        /** Where the page's GraphQL POST goes. */
+        const val GRAPHQL = "/" + WebGraphQl.PATH
 
         /** JSON escapes, a backslash and real non-ASCII (an accent, a symbol, an emoji): a body that survives the trip through JSON twice is intact. */
         const val REPLY_BODY =

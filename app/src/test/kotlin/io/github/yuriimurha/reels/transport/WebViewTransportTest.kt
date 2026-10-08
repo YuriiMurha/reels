@@ -2,7 +2,9 @@ package io.github.yuriimurha.reels.transport
 
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.ErrorReplySummary
+import io.github.yuriimurha.reels.instagram.web.GraphQlQuery
 import io.github.yuriimurha.reels.instagram.web.RawReply
+import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import io.github.yuriimurha.reels.instagram.web.WebHeaders
 import io.github.yuriimurha.reels.instagram.web.classifyReply
 import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
@@ -1694,6 +1696,205 @@ class WebViewTransportTest {
         }
     }
 
+    // --- GraphQL: the website's own query, one POST from the same page, under the same rules as a GET ------------------------
+
+    private fun TestScope.graphQlCall(transport: WebViewTransport, docId: String = "123", variables: String = """{"first":12}"""): Deferred<Result<RawReply>> =
+        async { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, docId, variables) } }
+
+    /** What the transport evaluates for a GraphQL call with the default arguments of [graphQlCall]. */
+    private fun graphQlOf(id: Long) =
+        "window.__igGraphQl && window.__igGraphQl($id,\"PolarisProfileSavedTabContentQuery\",\"123\",\"{\\\"first\\\":12}\")"
+
+    @Test
+    fun graphqlEvaluatesTheGraphQlCallWithItsArguments() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val pending = graphQlCall(transport)
+        runCurrent()
+        val page = pages.created.single()
+        assertEquals(listOf(home), page.loaded)
+        page.post(reply(1, body = """{"data":{}}"""))
+
+        val result = pending.await().getOrThrow()
+        assertEquals(200, result.code)
+        assertEquals("""{"data":{}}""", result.body)
+        // The script goes in, then exactly one call, every argument JSON-quoted.
+        assertEquals(
+            listOf(SCRIPT, "window.__igGraphQl && window.__igGraphQl(1,\"PolarisProfileSavedTabContentQuery\",\"123\",\"{\\\"first\\\":12}\")"),
+            page.evaluated,
+        )
+
+        // Quoting holds for arguments that would break out of a string or the script tag.
+        val hostile = graphQlCall(transport, docId = "1\");x(\"", variables = "{\"after\":\"</script>\\\\\"}")
+        runCurrent()
+        assertEquals(
+            "window.__igGraphQl && window.__igGraphQl(2,\"PolarisProfileSavedTabContentQuery\",\"1\\\");x(\\\"\",\"{\\\"after\\\":\\\"</script>\\\\\\\\\\\"}\")",
+            page.evaluated.last(),
+        )
+        page.post(reply(2))
+        assertEquals(200, hostile.await().getOrThrow().code)
+        assertEquals(1, pages.created.size)
+    }
+
+    @Test
+    fun graphqlSharesTheBusyRuleAndTheLandingCheck() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+
+        // A GET in flight: the GraphQL call is refused, and sends nothing.
+        val get = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        val page = pages.created.single()
+        assertIs<InstagramException.Transient>(graphQlCall(transport).await().exceptionOrNull())
+        assertEquals(listOf(SCRIPT, fetchOf(1, "\"api/v1/feed/saved/posts/\"")), page.evaluated)
+        page.post(reply(1))
+        get.await().getOrThrow()
+
+        // And the other way round: a GraphQL call in flight refuses a GET.
+        val graphQl = graphQlCall(transport)
+        runCurrent()
+        assertIs<InstagramException.Transient>(call(transport, "api/v1/feed/saved/posts/").await().exceptionOrNull())
+        assertEquals(graphQlOf(2), page.evaluated.last())
+        page.post(reply(2))
+        graphQl.await().getOrThrow()
+
+        // Where the page is now is checked before the GraphQL call too: moved to a challenge, nothing is evaluated.
+        page.url = "https://www.instagram.com/challenge/?next=%2F"
+        assertIs<InstagramException.ChallengeRequired>(graphQlCall(transport).await().exceptionOrNull())
+        assertEquals(4, page.evaluated.size)
+        assertTrue(page.destroyed)
+
+        // A page that lands on the login makes no GraphQL call, and the verdict sticks for GETs and GraphQL calls alike.
+        val loginPages = Pages(FakeWebPage(landing = "https://www.instagram.com/accounts/login/?next=%2F"))
+        val loginTransport = transport(loginPages)
+        assertIs<InstagramException.LoginRequired>(graphQlCall(loginTransport).await().exceptionOrNull())
+        assertIs<InstagramException.LoginRequired>(call(loginTransport, "api/v1/feed/saved/posts/").await().exceptionOrNull())
+        assertIs<InstagramException.LoginRequired>(graphQlCall(loginTransport).await().exceptionOrNull())
+        assertEquals(1, loginPages.attempts)
+        assertEquals(emptyList(), loginPages.created.single().evaluated)
+    }
+
+    @Test
+    fun aPageWithoutTokensIsTransientAndDropped() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val pending = graphQlCall(transport)
+        runCurrent()
+        val page = pages.created.single()
+        page.post("""{"id":1,"code":-2,"contentType":null,"body":null,"redirected":false}""")
+
+        assertIs<InstagramException.Transient>(pending.await().exceptionOrNull())
+        assertTrue(page.destroyed)
+        // Dropped by a failure: no idle timer, and the page still counts towards the limit.
+        assertEquals(0, pendingIdleTimers())
+
+        val next = graphQlCall(transport)
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        assertEquals(listOf(SCRIPT, graphQlOf(2)), pages.created.last().evaluated)
+        pages.created.last().post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    /** The page's own allow-list refused the name (-3): the Kotlin and script lists disagree. Transient; the page is fine. */
+    @Test
+    fun aQueryThePageRefusesIsTransientAndThePageIsKept() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val pending = graphQlCall(transport)
+        runCurrent()
+        val page = pages.created.single()
+        page.post("""{"id":1,"code":-3,"contentType":null,"body":null,"redirected":false}""")
+
+        assertIs<InstagramException.Transient>(pending.await().exceptionOrNull())
+        assertFalse(page.destroyed)
+        val next = graphQlCall(transport)
+        runCurrent()
+        page.post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+        assertEquals(1, pages.created.size)
+    }
+
+    @Test
+    fun graphqlIsLogged() = runTest {
+        val lines = mutableListOf<String>()
+        val pages = Pages()
+        val transport = transport(pages, log = lines::add)
+        val docId = "27584326974521636"
+        val variables = WebGraphQl.savedCollectionsVariables("QVFE_cursor_9")
+
+        val ok = async { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, docId, variables) } }
+        runCurrent()
+        advanceTimeBy(75)
+        pages.created.single().post(reply(1, body = """{"data":{"viewer":{"collections_unified_with_auto_collections":{}}}}"""))
+        ok.await().getOrThrow()
+
+        val errorBody = """{"errors":[{"message":"a private message","code":1675002}],"status":"fail"}"""
+        val failing = async { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, docId, variables) } }
+        runCurrent()
+        advanceTimeBy(20)
+        pages.created.single().post(reply(2, code = 400, body = errorBody))
+        failing.await().getOrThrow()
+
+        val noTokens = async { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, docId, variables) } }
+        runCurrent()
+        pages.created.single().post("""{"id":3,"code":-2,"contentType":null,"body":null,"redirected":false}""")
+        assertIs<InstagramException.Transient>(noTokens.await().exceptionOrNull())
+
+        assertEquals(
+            listOf(
+                "GRAPHQL PolarisProfileSavedTabContentQuery -> 200 (75 ms)",
+                "GRAPHQL PolarisProfileSavedTabContentQuery -> 400 (20 ms)",
+                ErrorReplySummary.of(400, "application/json", errorBody),
+                "GRAPHQL PolarisProfileSavedTabContentQuery -> no tokens (0 ms)",
+            ),
+            lines,
+        )
+        // Never the doc id, never the variables, never the body of a 2xx.
+        assertFalse(lines.any { docId in it || "QVFE_cursor_9" in it || "collection_types" in it || "first" in it || "viewer" in it }, "$lines")
+    }
+
+    @Test
+    fun aGraphQlQueryOutsideTheAllowListIsRefused() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        // Only `:instagram` can make a query; a test can only reach the constructor by reflection.
+        val other = GraphQlQuery::class.java.getDeclaredConstructor(String::class.java, String::class.java)
+            .apply { isAccessible = true }
+            .newInstance("PolarisSomeOtherQuery", "1")
+
+        assertFailsWith<IllegalArgumentException> { transport.graphql(other, "1", "{}") }
+        assertEquals(0, pages.attempts)
+
+        // Nothing was left behind: an allowed query goes through.
+        val next = graphQlCall(transport)
+        runCurrent()
+        assertEquals(listOf(SCRIPT, graphQlOf(1)), pages.created.single().evaluated)
+        pages.created.single().post(reply(1))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    /** R105 holds for a GraphQL call: the caller gives up, the page's fetch for it is aborted, the next call goes through. */
+    @Test
+    fun aCancelledGraphQlCallAbortsItsFetch() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val abandoned = launch { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, "123", """{"first":12}""") }
+        runCurrent()
+        val page = pages.created.single()
+        abandoned.cancel()
+        runCurrent()
+
+        val next = graphQlCall(transport)
+        runCurrent()
+        assertEquals(listOf(SCRIPT, graphQlOf(1), abortOf(1), SCRIPT, graphQlOf(2)), page.evaluated)
+        page.post(reply(1, body = "late"))
+        runCurrent()
+        assertTrue(next.isActive)
+        page.post(reply(2, body = "answer"))
+        assertEquals("answer", next.await().getOrThrow().body)
+    }
+
     private fun script(): String =
         File("src/main/assets/ig_fetch.js").also { assertTrue(it.isFile, "unit tests must run from the app module directory") }.readText()
 
@@ -1723,7 +1924,31 @@ class WebViewTransportTest {
             "J04: a path relative to the page" to real.replace("fetch('/' + path,", "fetch(path,"),
             "J05: a network failure posted for another id" to real.replace("id: id, code: -1", "id: 0, code: -1"),
             "another app id" to real.replace(WebHeaders.APP_ID, "936619743392459"),
-            "a fifth post" to real.replace("      .then(forget, forget);", "      .then(forget, forget);\n    window.igBridge.postMessage(document.cookie);"),
+            "one more post" to real.replace("      .then(forget, forget);", "      .then(forget, forget);\n    window.igBridge.postMessage(document.cookie);"),
+            // GraphQL: the page's tokens stay in the page, the allow-list holds, and the POST is the website's own.
+            "S1: a body that is the page's token" to inGraphQl(real) { it.replace("code: -1, contentType: null, body: null", "code: -1, contentType: null, body: t.dtsg") },
+            "S1: the page's tokens posted whole" to inGraphQl(real) { it.replace("code: -1, contentType: null, body: null", "code: -1, contentType: null, body: JSON.stringify(t)") },
+            "S1: the page's HTML posted" to real.replace("code: -3, contentType: null, body: null", "code: -3, contentType: null, body: document.documentElement.innerHTML"),
+            "S1: a GraphQL reply handled apart from answer()" to inGraphQl(real) {
+                it.replace(".then(answer(id))", ".then(function (r) { window.igBridge.postMessage(JSON.stringify({ id: id, code: r.status, contentType: null, body: null, redirected: false })); })")
+            },
+            "a token kept outside the form and the headers" to real.replace("var t = tokens();", "var t = tokens(); window.__kept = t.lsd;"),
+            "a token in the GraphQL URL" to real.replace("fetch('/api/graphql', {", "fetch('/api/graphql?q=' + t.lsd, {"),
+            "a second query in the script's list" to real.replace("var QUERIES = ['PolarisProfileSavedTabContentQuery'];", "var QUERIES = ['PolarisProfileSavedTabContentQuery', 'PolarisOtherQuery'];"),
+            "another query in the script's list" to real.replace("var QUERIES = ['PolarisProfileSavedTabContentQuery'];", "var QUERIES = ['PolarisOtherQuery'];"),
+            "no allow-list check" to real.replace("if (QUERIES.indexOf(name) < 0) {", "if (false) {"),
+            "a refused name that still sends" to inGraphQl(real) { it.replaceFirst("      return;\n", "") },
+            "a page without tokens that still sends" to inGraphQl(real) { it.substringBeforeLast("      return;\n") + it.substringAfterLast("      return;\n") },
+            "the no-tokens and refused codes swapped" to real.replace("code: -3,", "code: -9,").replace("code: -2,", "code: -3,").replace("code: -9,", "code: -2,"),
+            "a GraphQL POST that follows redirects" to inGraphQl(real) { it.replace("redirect: 'manual'", "redirect: 'follow'") },
+            "a GraphQL POST with credentials cross-site" to inGraphQl(real) { it.replace("credentials: 'same-origin'", "credentials: 'include'") },
+            "a GraphQL call as a GET" to inGraphQl(real) { it.replace("method: 'POST'", "method: 'GET'") },
+            "another GraphQL path" to real.replace("fetch('/api/graphql', {", "fetch('/api/graphql/query', {"),
+            "an extra form field" to real.replace("doc_id: docId });", "doc_id: docId, av: document.title });"),
+            "the doc id from somewhere else" to real.replace("doc_id: docId });", "doc_id: '1' });"),
+            "an extra GraphQL header" to real.replace("'x-csrftoken': cookie('csrftoken') };", "'x-csrftoken': cookie('csrftoken'), 'x-ig-www-claim': claim() };"),
+            "no friendly-name header" to real.replace("'x-fb-friendly-name': name, ", ""),
+            "another app id on the GraphQL POST" to inGraphQl(real) { it.replace(WebHeaders.APP_ID, "936619743392459") },
         )
         for ((what, mutant) in mutants) {
             assertTrue(mutant != real, "the mutant '$what' did not change the script")
@@ -1731,19 +1956,63 @@ class WebViewTransportTest {
         }
     }
 
+    /** [real] with [change] applied to the body of `window.__igGraphQl` only. */
+    private fun inGraphQl(real: String, change: (String) -> String): String {
+        val graphQl = block(real, GRAPHQL_OPENING)
+        return real.replace(graphQl, change(graphQl))
+    }
+
     /**
      * What `ig_fetch.js` may send and post. The header constants are `WebHeaders`' own; the CSRF token and the claim go into the
-     * request's headers and nowhere else; the request is one same-origin GET to `/` + the path that follows no redirect; and
-     * every message to Kotlin is `{id, code, contentType, body, redirected}` with the call's own id, the status, the reply's
-     * content type and text (or null) and nothing else, so no cookie, token or claim can ever reach the app or its log.
+     * request's headers and nowhere else; a GET is one same-origin GET to `/` + the path that follows no redirect; and every
+     * message to Kotlin is `{id, code, contentType, body, redirected}` with the call's own id, the status, the reply's content
+     * type and text (or null) and nothing else, so no cookie, token or claim can ever reach the app or its log.
+     *
+     * GraphQL: one same-origin POST to `/` + `WebGraphQl.PATH` that follows no redirect, with exactly the website's form and
+     * headers. Its name must be in the script's own list, which is `WebGraphQl.ALL`'s, and is checked before anything else. The
+     * page's `fb_dtsg` and `lsd` are named only in `tokens()`, the form and the headers, so they can reach the request and
+     * nothing else; the messages it posts itself carry no content type and no body, and its reply goes through the same
+     * `answer(id)` as a GET's, so the posted shape cannot drift.
      */
     private fun assertScriptSendsOnlyWhatItShould(script: String) {
-        val headers = block(script, "var headers = {")
+        val get = block(script, "window.__igFetch = function (id, path) {")
+        val graphQl = block(script, GRAPHQL_OPENING)
+        val answer = block(script, "function answer(id) {")
+
+        val headers = block(get, "var headers = {")
         assertTrue("'x-ig-app-id': '${WebHeaders.APP_ID}'" in headers, "x-ig-app-id: $headers")
         assertTrue("'x-asbd-id': '${WebHeaders.ASBD_ID}'" in headers, "x-asbd-id: $headers")
         assertTrue("'x-requested-with': 'XMLHttpRequest'" in headers, "x-requested-with: $headers")
         assertTrue("'x-csrftoken': cookie('csrftoken')" in headers, "x-csrftoken: $headers")
         assertTrue("'x-ig-www-claim': claim()" in headers, "x-ig-www-claim: $headers")
+
+        val graphQlHeaders = block(graphQl, "var headers = {")
+        assertEquals(
+            listOf(
+                "'content-type'" to "'application/x-www-form-urlencoded'",
+                "'x-fb-friendly-name'" to "name",
+                "'x-fb-lsd'" to "t.lsd",
+                "'x-ig-app-id'" to "'${WebHeaders.APP_ID}'",
+                "'x-asbd-id'" to "'${WebHeaders.ASBD_ID}'",
+                "'x-csrftoken'" to "cookie('csrftoken')",
+            ).sortedBy { it.first },
+            fieldsOf(graphQlHeaders).sortedBy { it.first },
+            "the GraphQL headers",
+        )
+        val form = block(graphQl, "var body = new URLSearchParams({")
+        assertEquals(
+            listOf(
+                "fb_dtsg" to "t.dtsg",
+                "lsd" to "t.lsd",
+                "fb_api_caller_class" to "'RelayModern'",
+                "fb_api_req_friendly_name" to "name",
+                "variables" to "variables",
+                "server_timestamps" to "'true'",
+                "doc_id" to "docId",
+            ).sortedBy { it.first },
+            fieldsOf(form).sortedBy { it.first },
+            "the GraphQL form",
+        )
 
         // The jar and the session storage are read only by the two helpers, and the helpers are called only for the headers.
         val cookieHelper = block(script, "function cookie(name) {")
@@ -1752,38 +2021,94 @@ class WebViewTransportTest {
         val outsideHelpers = script.replace(cookieHelper, "").replace(claimHelper, "")
         assertFalse("document.cookie" in outsideHelpers, "document.cookie is read only by cookie()")
         assertFalse("sessionStorage" in outsideHelpers, "sessionStorage is read only by claim()")
-        val outsideHeaders = outsideHelpers.replace(headers, "")
+        val outsideHeaders = outsideHelpers.replace(headers, "").replace(graphQlHeaders, "")
         assertFalse(Regex("""(?<!function )\bcookie\(""").containsMatchIn(outsideHeaders), "cookie() is called only for the headers")
         assertFalse(Regex("""(?<!function )\bclaim\(""").containsMatchIn(outsideHeaders), "claim() is called only for the headers")
 
-        // One same-origin GET to the path, no redirect followed: each option once, and no other.
-        assertEquals(1, Regex("""\bfetch\(""").findAll(script).count(), "one fetch")
-        val options = fieldsOf(block(script, "fetch('/' + path, {"))
+        // The page's tokens: read by tokens() alone, called once by the GraphQL call, and used only in its form and headers.
+        val tokensHelper = block(script, "function tokens() {")
+        val outsideTokenUse = script.replace(tokensHelper, "").replace(form, "").replace(graphQlHeaders, "")
+        assertFalse(Regex("(?i)dtsg|lsd").containsMatchIn(outsideTokenUse), "the tokens are named only in tokens(), the form and the headers")
+        assertFalse("innerHTML" in script.replace(tokensHelper, ""), "the page's HTML is read only by tokens()")
+        assertEquals(1, Regex("""(?<!function )\btokens\(""").findAll(script).count(), "tokens() is called once")
+        assertTrue("var t = tokens();" in graphQl, "by the GraphQL call")
+        assertFalse(Regex("""\bt\.""").containsMatchIn(graphQl.replace(form, "").replace(graphQlHeaders, "")), "t's members only in the form and headers")
+
+        // The allow-list: the script's own list is `:instagram`'s, it is the first thing the call checks, and a refused name or a
+        // page without tokens ends the call before its request.
+        val lists = Regex("""var QUERIES = \[([^\]]*)];""").findAll(script).toList()
+        assertEquals(1, lists.size, "one list of queries")
+        assertEquals(
+            WebGraphQl.ALL.map { it.friendlyName },
+            lists.single().groupValues[1].split(',').map { it.trim().removeSurrounding("'") },
+            "the script's queries are WebGraphQl.ALL's",
+        )
+        assertEquals(2, Regex("""\bQUERIES\b""").findAll(script).count(), "the list is declared and checked, nothing else")
+        val check = "if (QUERIES.indexOf(name) < 0) {"
+        assertTrue(graphQl.trimStart().startsWith(check), "the name is checked first: $graphQl")
+        val refused = block(graphQl, check)
+        val noTokens = block(graphQl, "if (!t) {")
+        assertTrue(refused.trimEnd().endsWith("return;"), "a refused name ends the call: $refused")
+        assertTrue(noTokens.trimEnd().endsWith("return;"), "a page without tokens ends the call: $noTokens")
+        assertEquals("-3", postsOf(refused).single().toMap()["code"], "a refused name is code -3")
+        assertEquals("-2", postsOf(noTokens).single().toMap()["code"], "a page without tokens is code -2")
+        val order = listOf(check, "var t = tokens();", "if (!t) {", "fetch(").map { graphQl.indexOf(it) }
+        assertEquals(order.sorted(), order, "check the name, read the tokens, check them, then fetch: $order")
+
+        // One same-origin GET to the path and one same-origin POST to the GraphQL path, no redirect followed: each option once,
+        // and no other.
+        assertEquals(2, Regex("""\bfetch\(""").findAll(script).count(), "two fetches: the GET and the GraphQL POST")
         assertEquals(
             listOf("method" to "'GET'", "credentials" to "'same-origin'", "redirect" to "'manual'", "headers" to "headers", "signal" to "controller.signal")
                 .sortedBy { it.first },
-            options.sortedBy { it.first },
-            "the fetch options",
+            fieldsOf(block(get, "fetch('/' + path, {")).sortedBy { it.first },
+            "the GET's fetch options",
+        )
+        assertEquals(
+            listOf(
+                "method" to "'POST'",
+                "credentials" to "'same-origin'",
+                "redirect" to "'manual'",
+                "headers" to "headers",
+                "body" to "body",
+                "signal" to "controller.signal",
+            ).sortedBy { it.first },
+            fieldsOf(block(graphQl, "fetch('/${WebGraphQl.PATH}', {")).sortedBy { it.first },
+            "the GraphQL fetch options",
         )
 
         // Nothing but the reply goes to Kotlin.
-        val posts = Regex("""igBridge\.postMessage\(JSON\.stringify\(\{(.*?)\}\)\)""").findAll(script).map { fieldsOf(it.groupValues[1]) }.toList()
-        assertEquals(4, posts.size, "the script posts a message in four places")
-        assertEquals(4, Regex("""postMessage\(""").findAll(script).count(), "every postMessage is one of those")
+        val posts = postsOf(script)
+        assertEquals(7, posts.size, "the script posts a message in seven places")
+        assertEquals(7, Regex("""postMessage\(""").findAll(script).count(), "every postMessage is one of those")
         for (fields in posts) {
             val keys = fields.map { it.first }
             assertEquals(keys.distinct(), keys, "each field once: $fields")
             val post = fields.toMap()
             assertEquals(setOf("id", "code", "contentType", "body", "redirected"), post.keys, "$post")
             assertEquals("id", post["id"], "a message carries its call's own id: $post")
-            assertTrue(post["code"] in setOf("r.status", "0", "-1"), "$post")
+            assertTrue(post["code"] in setOf("r.status", "0", "-1", "-2", "-3"), "$post")
             assertTrue(post["contentType"] in setOf("ct", "null"), "the content type is the reply's or none: $post")
             assertTrue(post["body"] in setOf("t", "null"), "the body is the reply's text or none: $post")
             assertTrue(post["redirected"] in setOf("true", "false"), "$post")
         }
-        assertTrue("var ct = r.headers.get('content-type');" in script, "ct is the reply's content type")
-        assertTrue("function (t) {" in script && "r.text().then(" in script, "t is the reply's text")
+        // A reply is posted by answer() alone (for both kinds of call); every other message is a code with nothing in it.
+        assertEquals(3, postsOf(answer).size, "answer() posts a redirect, a reply's text, or its status alone")
+        for (post in postsOf(script.replace(answer, "")).map { it.toMap() }) {
+            assertTrue(post["code"] in setOf("-1", "-2", "-3"), "outside answer() a message is a failure code: $post")
+            assertEquals("null", post["contentType"], "with no content type: $post")
+            assertEquals("null", post["body"], "and no body: $post")
+            assertEquals("false", post["redirected"], "$post")
+        }
+        assertEquals(1, Regex("""\.then\(answer\(id\)\)""").findAll(get).count(), "the GET's reply goes through answer()")
+        assertEquals(1, Regex("""\.then\(answer\(id\)\)""").findAll(graphQl).count(), "the GraphQL reply goes through answer()")
+        assertTrue("var ct = r.headers.get('content-type');" in answer, "ct is the reply's content type")
+        assertTrue("function (t) {" in answer && "r.text().then(" in answer, "t is the reply's text")
     }
+
+    /** The fields of every `igBridge.postMessage(JSON.stringify({...}))` in [script], in order. */
+    private fun postsOf(script: String): List<List<Pair<String, String>>> =
+        Regex("""igBridge\.postMessage\(JSON\.stringify\(\{(.*?)\}\)\)""").findAll(script).map { fieldsOf(it.groupValues[1]) }.toList()
 
     /** The text between the `{` that ends [opening] and its matching `}` (quoted strings skipped). */
     private fun block(script: String, opening: String): String {
@@ -1821,11 +2146,15 @@ class WebViewTransportTest {
     @Test
     fun theScriptCanAbortACallById() {
         val script = File("src/main/assets/ig_fetch.js").also { assertTrue(it.isFile, "unit tests must run from the app module directory") }.readText()
-        assertTrue(Regex("""signal:\s*controller\.signal""").containsMatchIn(script), "the fetch takes the call's signal")
-        assertTrue(Regex("""aborts\[id]\s*=\s*controller""").containsMatchIn(script), "the controller is kept by id")
+        // Both kinds of call: the GET and the GraphQL POST.
+        for (call in listOf(block(script, "window.__igFetch = function (id, path) {"), block(script, GRAPHQL_OPENING))) {
+            assertTrue(Regex("""signal:\s*controller\.signal""").containsMatchIn(call), "the fetch takes the call's signal: $call")
+            assertTrue(Regex("""aborts\[id]\s*=\s*controller""").containsMatchIn(call), "the controller is kept by id: $call")
+        }
         assertTrue("window.__igAbort = function (id)" in script, "the abort is exposed")
         val guard = script.indexOf("if (window.__igFetch) return;")
         assertTrue(guard in 0 until script.indexOf("window.__igAbort = function"), "defined once, behind the same guard")
+        assertTrue(guard in 0 until script.indexOf(GRAPHQL_OPENING), "the GraphQL call too")
     }
 
     @Test
@@ -1899,5 +2228,8 @@ class WebViewTransportTest {
     private companion object {
         /** Stands in for ig_fetch.js: the transport only passes it on. */
         const val SCRIPT = "/* ig_fetch stand-in */ window.standIn = 1;"
+
+        /** Where the GraphQL call's body begins in ig_fetch.js. */
+        const val GRAPHQL_OPENING = "window.__igGraphQl = function (id, name, docId, variables) {"
     }
 }

@@ -127,4 +127,31 @@ class OkHttpTransportTest {
         assertEquals("secret-zq7", reply.body)
         assertEquals("RawReply(code=200, redirected=false, body=<10 chars>)", reply.toString())
     }
+
+    @Test
+    fun savedCollectionsVariablesMatchTheWebsite() {
+        assertEquals(
+            """{"collection_types":["ALL_MEDIA_AUTO_COLLECTION","MEDIA","AUDIO_AUTO_COLLECTION"],"first":12}""",
+            WebGraphQl.savedCollectionsVariables(null),
+        )
+        assertEquals(
+            """{"collection_types":["ALL_MEDIA_AUTO_COLLECTION","MEDIA","AUDIO_AUTO_COLLECTION"],"first":12,"after":"c\"1"}""",
+            WebGraphQl.savedCollectionsVariables("c\"1"),
+        )
+    }
+
+    @Test
+    fun graphqlSendsOnePostWithTheQueryForm() = runTest {
+        server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "application/json").body("""{"data":{}}""").build())
+        val reply = transport().graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}")
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/graphql", request.url.encodedPath)
+        val form = request.body!!.utf8()
+        assertTrue("doc_id=123" in form)
+        assertTrue("fb_api_req_friendly_name=PolarisProfileSavedTabContentQuery" in form)
+        assertEquals("PolarisProfileSavedTabContentQuery", request.headers["x-fb-friendly-name"])
+        assertEquals(200, reply.code)
+        assertEquals(1, server.requestCount)
+    }
 }
