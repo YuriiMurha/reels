@@ -16,6 +16,14 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.cancellation.CancellationException
 
+/** How far [LibraryRepository.deleteLibrary] got. Either way the items, thumbnails and cached videos are gone. */
+enum class LibraryDeletion {
+    COMPLETE,
+
+    /** The settings write that forgets the library's account failed: the next run still checks against the old account. Delete library again. */
+    ACCOUNT_RECORD_KEPT,
+}
+
 /** Read side of the library for the UI. */
 class LibraryRepository(
     private val db: ReelsDatabase,
@@ -66,10 +74,22 @@ class LibraryRepository(
      * Wipes synced items, collections, history, thumbnails and cached videos, and forgets which Instagram account the library
      * belonged to (R84), so the next sync may be another account's. Keeps the session and the request log (spec 9.5). The
      * account is forgotten only after the rows are gone: the other order could leave a library with no owner to check against.
+     *
+     * Forgetting the account is a settings write and can fail after the rows are gone. That must not stop the rest (thumbnails
+     * and cached videos would be left orphaned) and must not escape to the caller's scope, where it would crash the app: it is
+     * reported as [LibraryDeletion.ACCOUNT_RECORD_KEPT] instead, and a second Delete library finishes the job. Cancellation
+     * still propagates. A failure of the delete itself still throws, for the caller to say so.
      */
-    suspend fun deleteLibrary() {
+    suspend fun deleteLibrary(): LibraryDeletion {
         db.deleteLibrary()
-        forgetAccount()
+        var result = LibraryDeletion.COMPLETE
+        try {
+            forgetAccount()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            result = LibraryDeletion.ACCOUNT_RECORD_KEPT
+        }
         withContext(Dispatchers.IO) {
             thumbnails.deleteAll()
             try {
@@ -80,5 +100,6 @@ class LibraryRepository(
                 // The library is already gone; cached videos only take space until the cache evicts them.
             }
         }
+        return result
     }
 }

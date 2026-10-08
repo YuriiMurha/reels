@@ -287,7 +287,10 @@ sync**) refills from scratch. Use it when:
   sync under the other account stops with "This library belongs to another Instagram account";
 - the library looks wrong and you would rather start clean.
 
-It costs a full, paced re-sync.
+It costs a full, paced re-sync. If the Sync screen then says "Library deleted, but the account record couldn't be
+cleared; try Delete library again", the items are gone but the phone still remembers the old account: tap **Delete
+library** once more. (Log out has a similar one, "Couldn't finish logging out; try again": the login is already gone from
+the phone, and a second **Log out** finishes the job.)
 
 ## 6. Watching videos
 

@@ -1,6 +1,8 @@
 package io.github.yuriimurha.reels.ui.sync
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.content.Context
 import androidx.lifecycle.viewModelScope
@@ -48,6 +50,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -59,6 +62,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -107,14 +111,16 @@ class SyncViewModelTest {
         mockSwitch: MockModeSwitch? = null,
         requiresSession: Boolean = false,
         realPacer: Pacer? = null,
+        forgetAccount: suspend () -> Unit = {},
     ): SyncViewModel {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, now = clock)
-        val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
+        val file = PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") }
+        val settings = SettingsStore(FlakyDataStore(file) { storageFailure })
         session = SessionRepository(cookies, probe, pacer, settings)
         return SyncViewModel(
             SyncController(db, scheduler, now = clock),
-            LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs"))),
+            LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs")), forgetAccount = forgetAccount),
             pacer,
             session,
             requiresSession = requiresSession,
@@ -128,6 +134,18 @@ class SyncViewModelTest {
     /** The process's real Pacer as Mock mode sees it: its own log and cooldown, on the same clock as the ViewModel. */
     private fun kotlinx.coroutines.test.TestScope.realPacer(log: InMemoryRequestLog, cooldowns: InMemoryCooldownStore) =
         Pacer(PacingPolicy.Conservative, log, cooldowns, now = { START + testScheduler.currentTime })
+
+    /** While set, every write to the settings file throws it, as a full disk would. Reads still work. */
+    private var storageFailure: Exception? = null
+
+    private class FlakyDataStore(private val inner: DataStore<Preferences>, private val failure: () -> Exception?) : DataStore<Preferences> {
+        override val data get() = inner.data
+
+        override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+            failure()?.let { throw it }
+            return inner.updateData(transform)
+        }
+    }
 
     /** A jar that already holds a session, as after a WebView login. Forgets the seeding writes so tests see only their own. */
     private fun signedIn(sessionId: String = "s1", userId: String = "41") {
@@ -487,6 +505,96 @@ class SyncViewModelTest {
 
         assertFalse(session.hasSessionCookies())
         assertEquals(SyncStatus.PAUSED, db.syncDao().latestRun()!!.status, "the run was cancelled too")
+    }
+
+    // ---- H4: a storage failure during Logout or Delete library never crashes the app ----
+    //
+    // "Never crashes": an exception that escapes `viewModelScope.launch` reaches the uncaught-exception handler, which ends the
+    // process on a phone. Under `runTest` it is collected and fails the test (before the fix it shows as the Suppressed
+    // IOException of the failing assertion), so each test below passes only if nothing escapes.
+
+    /** The detail an exception carries (here a session value) must never reach the screen. */
+    private val secretDetail = "disk full while writing sessionid=" + "s1"
+
+    @Test
+    fun aStorageFailureDuringLogoutSaysSoAndLeavesNoSessionInTheJar() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        storageFailure = java.io.IOException(secretDetail)
+        cookies.events.clear()
+
+        viewModel.logout() // before the fix this throws inside viewModelScope.launch: the app's uncaught handler, i.e. a crash
+        val message = messageOf(viewModel)
+
+        assertEquals("Couldn't finish logging out; try again", message)
+        assertFalse(secretDetail in message!!)
+        assertFalse(session.hasSessionCookies(), "the cookies were cleared before the write failed, and stay cleared")
+        assertEquals(listOf("scheduler.cancel", "clear"), cookies.events)
+    }
+
+    @Test
+    fun logoutCanBeRetriedAfterAStorageFailureAndTheMessageGoes() = runTest {
+        signedIn()
+        val viewModel = viewModel()
+        assertEquals(SessionState.Valid("tester"), session.validate())
+        storageFailure = java.io.IOException(secretDetail)
+        viewModel.logout()
+        assertNotNull(messageOf(viewModel), "no message was shown")
+        assertEquals(SessionState.Valid("tester"), session.state.first(), "the stored state could not be written")
+
+        storageFailure = null
+        viewModel.logout()
+        awaitLoggedOut()
+
+        assertNull(viewModel.sessionMessage.value, "the retry cleared the message")
+        assertFalse(session.hasSessionCookies())
+    }
+
+    @Test
+    fun aStorageFailureDuringDeleteLibraryKeepingTheAccountRecordSaysSoAndNothingElseIsLeft() = runTest {
+        val viewModel = viewModel(forgetAccount = { throw java.io.IOException(secretDetail) })
+        db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = START))
+
+        viewModel.deleteLibrary() // before the fix the failure escapes viewModelScope.launch: a crash
+        val message = messageOf(viewModel)
+
+        assertEquals("Library deleted, but the account record couldn't be cleared; try Delete library again", message)
+        assertFalse(secretDetail in message!!)
+        assertNull(db.syncDao().latestRun(), "the rows are gone")
+    }
+
+    @Test
+    fun deleteLibraryThatCompletesLeavesNoMessage() = runTest {
+        val viewModel = viewModel()
+        viewModel.deleteLibrary()
+        runCurrent()
+        awaitLibraryEmpty()
+        assertNull(viewModel.sessionMessage.value)
+    }
+
+    /** Any other failure of the delete (here the database is closed under it) is shown too, in words that carry no detail. */
+    @Test
+    fun aFailureOfTheDeleteItselfIsShownAndNeverCrashes() = runTest {
+        val viewModel = viewModel()
+        db.close()
+
+        viewModel.deleteLibrary()
+        val message = messageOf(viewModel)
+
+        assertEquals("Couldn't delete the library; try again", message)
+    }
+
+    /** The screen's message, waited for in real time (the work hops to I/O threads); null if none came within 3 s. */
+    private suspend fun messageOf(viewModel: SyncViewModel): String? = withContext(Dispatchers.Default) {
+        withTimeoutOrNull(3_000) {
+            while (viewModel.sessionMessage.value == null) delay(10)
+            viewModel.sessionMessage.value
+        }
+    }
+
+    private suspend fun awaitLibraryEmpty() {
+        withContext(Dispatchers.Default) { withTimeout(5_000) { while (db.syncDao().latestRun() != null) delay(10) } }
     }
 
     @Test

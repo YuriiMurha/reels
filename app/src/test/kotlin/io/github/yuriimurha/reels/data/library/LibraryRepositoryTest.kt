@@ -157,6 +157,45 @@ class LibraryRepositoryTest {
         assertEquals(listOf(0), cardsWhenForgotten, "forgotten exactly once, after the library itself was deleted")
     }
 
+    /**
+     * H4: forgetting the account is a settings write that can fail after the rows are gone. Delete library must not throw
+     * (it would crash the app from the ViewModel's scope), must still remove everything else, and must say what was left undone.
+     */
+    @Test
+    fun anAccountRecordThatCannotBeClearedIsReportedNotThrownAndTheRestStillGoes() = runTest {
+        givenLibrary()
+        val path = thumbs.write("m1", byteArrayOf(1))
+        var cleared = 0
+        val repository = LibraryRepository(
+            db, thumbs,
+            clearVideoCache = { cleared++ },
+            forgetAccount = { throw java.io.IOException("disk full") },
+        )
+
+        assertEquals(LibraryDeletion.ACCOUNT_RECORD_KEPT, repository.deleteLibrary())
+
+        assertEquals(emptyList(), repository.collectionCards().first(), "the rows are gone")
+        assertFalse(File(path).exists(), "the thumbnails are gone too: the failure came after the rows, and must not leave orphans")
+        assertEquals(1, cleared, "and the cached videos")
+    }
+
+    @Test
+    fun aCompleteDeleteSaysSo() = runTest {
+        givenLibrary()
+        assertEquals(LibraryDeletion.COMPLETE, repository.deleteLibrary())
+    }
+
+    @Test
+    fun aCancelledAccountClearStillPropagatesTheCancellation() = runTest {
+        givenLibrary()
+        val repository = LibraryRepository(
+            db, thumbs,
+            forgetAccount = { throw kotlin.coroutines.cancellation.CancellationException("cancelled") },
+        )
+
+        kotlin.test.assertFailsWith<kotlin.coroutines.cancellation.CancellationException> { repository.deleteLibrary() }
+    }
+
     @Test
     fun aCancelledClearStillPropagatesTheCancellation() = runTest {
         givenLibrary()

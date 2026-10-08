@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.data.library.LibraryDeletion
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.di.MockModeSwitch
 import io.github.yuriimurha.reels.session.SessionRepository
@@ -43,6 +44,9 @@ sealed interface PasteOutcome {
 internal const val NOT_A_SESSIONID = "That doesn't look like a sessionid"
 internal const val PASTE_REJECTED = "Instagram rejected that session; your current login is unchanged"
 internal const val PASTE_FAILED = "Couldn't check that session"
+internal const val LOGOUT_FAILED = "Couldn't finish logging out; try again"
+internal const val ACCOUNT_RECORD_KEPT = "Library deleted, but the account record couldn't be cleared; try Delete library again"
+internal const val DELETE_LIBRARY_FAILED = "Couldn't delete the library; try again"
 
 /**
  * Maps [SessionRepository.pasteSessionId]'s answer. Only Valid means the paste was committed: Expired and Challenge
@@ -132,9 +136,22 @@ class SyncViewModel(
         viewModelScope.launch { controller.discardResumable() }
     }
 
+    /**
+     * A storage failure is said on the screen ([sessionMessage]), never thrown: an exception that escapes this scope ends the
+     * app. The wording carries no exception text. A delete that got as far as the account record leaves the library empty.
+     */
     fun deleteLibrary() {
         if (run.value?.status == SyncStatus.RUNNING) return
-        viewModelScope.launch { library.deleteLibrary() }
+        viewModelScope.launch {
+            mutableSessionMessage.value = null
+            try {
+                if (library.deleteLibrary() == LibraryDeletion.ACCOUNT_RECORD_KEPT) mutableSessionMessage.value = ACCOUNT_RECORD_KEPT
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mutableSessionMessage.value = DELETE_LIBRARY_FAILED
+            }
+        }
     }
 
     /** The mode this process runs in (true: the fake library), or null when there is no switch. */
@@ -199,9 +216,14 @@ class SyncViewModel(
      * asked to forget the session, so that always happens: the whole thing is shielded from the screen going away (the
      * scope being cancelled), and a failure to cancel the run (WorkManager, the database) is not allowed to stop it. The
      * run then keeps whatever state it had; its signals are ignored anyway, because the logout changes the epoch.
+     *
+     * The logout clears the cookies before it writes the stored state. If that write fails the cookies are gone all the same,
+     * and the failure is said on the screen ([sessionMessage], no exception text) instead of escaping this scope, where it
+     * would end the app. Tapping Log out again finishes the job.
      */
     fun logout() {
         viewModelScope.launch {
+            mutableSessionMessage.value = null
             withContext(NonCancellable) {
                 try {
                     controller.cancel()
@@ -209,7 +231,13 @@ class SyncViewModel(
                     // Nothing to show. This scope cannot be cancelled, so even a CancellationException here is some inner
                     // failure, not ours, and must not skip the logout either.
                 }
-                session.logout()
+                try {
+                    session.logout()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    mutableSessionMessage.value = LOGOUT_FAILED
+                }
             }
         }
     }
