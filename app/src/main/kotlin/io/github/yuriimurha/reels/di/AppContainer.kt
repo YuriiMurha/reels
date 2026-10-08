@@ -162,6 +162,14 @@ class AppContainer(context: Context) {
     }
 
     /**
+     * R106: the session needs the owner (an expiry or a challenge was stored, or the login screen opened to fix one): closes the
+     * transport's page now instead of after its idle time, keeping what it remembers. Only if there is a transport; never builds it.
+     */
+    suspend fun closeInstagramPage() {
+        if (instagramTransportLazy.isInitialized()) instagramTransportLazy.value.closePage()
+    }
+
+    /**
      * The CDN's own client (P6): no cookie jar, never shared with the Instagram transport. Lazy, because its user agent comes
      * from the WebView provider, which must not load just because the container was built.
      */
@@ -185,8 +193,9 @@ class AppContainer(context: Context) {
 
     /**
      * Building this loads no WebView: the transport (and its page) is only built when the first request needs the probe, and
-     * the cookie store reaches CookieManager per call, not at construction. The session changing, or a check the owner asked
-     * for, tells the transport (if there is one) through [resetInstagramTransport] and [allowNewInstagramAttempts].
+     * the cookie store reaches CookieManager per call, not at construction. The session changing, a check the owner asked
+     * for, or a session that needs the owner tells the transport (if there is one) through [resetInstagramTransport],
+     * [allowNewInstagramAttempts] and [closeInstagramPage].
      */
     val session: SessionRepository by lazy {
         SessionRepository(
@@ -196,6 +205,7 @@ class AppContainer(context: Context) {
             settings = settings,
             beforeSessionChange = ::resetInstagramTransport,
             beforeCheck = ::allowNewInstagramAttempts,
+            closePage = ::closeInstagramPage,
             debugLog = debugLog,
         )
     }

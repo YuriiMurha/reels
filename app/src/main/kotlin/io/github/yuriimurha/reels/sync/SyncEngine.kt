@@ -159,11 +159,19 @@ class SyncEngine(
         }
     }
 
-    /** One paced request, retried after a transient failure. Every attempt first passes [ensureSessionUsable], inside the gate. */
-    private suspend fun <T> call(progress: Progress, request: suspend () -> T): T =
-        retryTransient(random) {
+    /**
+     * One paced request, retried after a transient failure. Every attempt first passes [ensureSessionUsable], inside the gate,
+     * and the answer passes it again when it returns, before the caller writes anything of it (R107): a paste, a logout or a
+     * login as another account can land while the request is out, and the answer then belongs to a session that is gone. Only a
+     * read; it sends nothing.
+     */
+    private suspend fun <T> call(progress: Progress, request: suspend () -> T): T {
+        val answer = retryTransient(random) {
             pacer.sync(progress.budget, precondition = { ensureSessionUsable(progress.epoch) }, request = request)
         }
+        ensureSessionUsable(progress.epoch)
+        return answer
+    }
 
     private suspend fun ensureSessionUsable(epoch: Int) {
         when (sessionUsable(epoch)) {

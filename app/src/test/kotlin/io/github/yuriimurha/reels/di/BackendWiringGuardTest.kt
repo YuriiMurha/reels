@@ -181,12 +181,13 @@ class BackendWiringGuardTest {
         val session = callArguments(container, "SessionRepository(").single()
         assertTrue(Regex("""beforeSessionChange\s*=\s*::resetInstagramTransport\b""").containsMatchIn(session), "the session's reset: $session")
         assertTrue(Regex("""beforeCheck\s*=\s*::allowNewInstagramAttempts\b""").containsMatchIn(session), "the session's check hook: $session")
+        assertTrue(Regex("""closePage\s*=\s*::closeInstagramPage\b""").containsMatchIn(session), "the session's close hook (R106): $session")
         val library = callArguments(container, "LibraryRepository(").single()
         assertTrue(Regex("""beforeSessionChange\s*=\s*::resetInstagramTransport\b""").containsMatchIn(library), "Delete library's reset: $library")
         val lab = callArguments(main("ui/lab/AdapterLabScreen.kt"), "AdapterLabViewModel(").single()
         assertTrue(Regex("""beforeCall\s*=\s*container::allowNewInstagramAttempts\b""").containsMatchIn(lab), "the lab's hook: $lab")
 
-        for (guarded in listOf("fun resetInstagramTransport", "fun allowNewInstagramAttempts")) {
+        for (guarded in listOf("fun resetInstagramTransport", "fun allowNewInstagramAttempts", "fun closeInstagramPage")) {
             val body = container.substringAfter(guarded).substringBefore("\n    }")
             assertTrue("instagramTransportLazy.isInitialized()" in body, "$guarded must only act on a transport that exists: $body")
         }

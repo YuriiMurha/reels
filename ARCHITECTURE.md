@@ -384,7 +384,7 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
 - **The idle close (R93, R97).** The page is a live single-page app: while it exists, the site's own scripts keep sending
   background requests, and Android can keep the process cached for hours. So when a call ends, whatever its outcome, and a
   page exists, a timer starts on the main dispatcher; if no call begins within `IDLE_MS` (300 000 ms, 5 minutes) the page
-  is closed. A call's start, `reset()` and a dead renderer cancel the timer; `allowNewAttempts()` does not. 5 minutes is
+  is closed. A call's start, `reset()`, `closePage()` and a dead renderer cancel the timer; `allowNewAttempts()` does not. 5 minutes is
   longer than the longest the Pacer leaves between two calls (a break of up to 180 s and a gap of up to 12 s, 192 s) and than
   its longest transient backoff (240 s, 288 s with its +20 % jitter), so a sync run normally keeps one page, because the
   gaps between its API calls are normally shorter. That is not a promise
@@ -392,6 +392,17 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   An idle close is the clean end of a visit, so it gives back the page cap; a page dropped by a failure never has a timer
   and still counts; a remembered login or challenge verdict is untouched. "Once per app run" in the spec's 3.2 and 4 is
   therefore "once per active period".
+- **The owner-needed close (R106).** `closePage()` is the idle close made immediate, for a session that needs the owner: it
+  cancels the timer, drops the page and gives back the cap (only when there is a page: never a refund without one), and
+  never forgets a login or challenge verdict or a remembered 429 (the session has not changed; that is `reset()`'s). A call
+  in flight on the page fails `Transient` at once, as with `reset()`. `SessionRepository` calls it (through its `closePage`
+  hook, `AppContainer.closeInstagramPage()`, which only acts on a transport that exists) right after it stores an Expired or
+  a Challenge: from `loginRequired` and `challengeRequired` (a sync run, the viewer, the lab) and from a `validate()` that finds
+  one (Check now, the login screen). And the login screen calls it (`LoginSession.closeHiddenPage()`) when it opens with the
+  RELOGIN or CHALLENGE purpose, never LOGIN or CSRF. So the site stops running for an account that was just found expired or
+  challenged, instead of for up to 5 more minutes, and is not live beside the visible login that fixes it. The cost is one
+  more home-page load on the next call. A failure is swallowed (cancellation excepted) and logged in a debug build as
+  `transport close failed: <Class>`.
 - **Traffic, and the pacing rule.** API request rates and concurrency are unchanged: one `fetch` per call through the one
   Conservative Pacer, and "Requests in 24 h" counts those calls only. A cancelled call is aborted, so request starts stay at
   least the Pacer's gap apart and no two of the app's API requests are open at once (R105). What is new is unpaced traffic the Pacer does not
@@ -412,9 +423,10 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
 - **The destroy hooks.** The page belongs to one session: it may sit on a login or challenge page it will not leave, or act
   for an account that is gone. `WebViewTransport.reset()` destroys the page (failing a call in flight with `Transient`),
   forgets a login or challenge verdict and gives back the page cap. `AppContainer` keeps the transport as a `Lazy` and its
-  two hooks, `resetInstagramTransport()` and `allowNewInstagramAttempts()`, act only when `isInitialized()`: nothing that
-  merely changes or asks about the session may build it. Mock mode's engine never touches it, and a cold logout and a cold
-  Delete library build nothing (`InstagramTransportWiringTest`); Check now and a lab tap with a logged-in jar in Mock mode
+  three hooks, `resetInstagramTransport()`, `allowNewInstagramAttempts()` and `closeInstagramPage()` (R106, above), act only
+  when `isInitialized()`: nothing that merely changes or asks about the session may build it. Mock mode's engine never
+  touches it, and a cold logout, a cold Delete library, a stored expiry or challenge and a login screen opened to fix one
+  build nothing (`InstagramTransportWiringTest`); Check now and a lab tap with a logged-in jar in Mock mode
   may build it, as they could use the network before. Building the transport builds no WebView either: the page is made
   by the first call. `reset()` runs (`beforeSessionChange`):
   - in `SessionRepository.logout`, first, before the cookies are cleared, so a page that outlives them cannot write them
@@ -441,12 +453,16 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   `page destroyed`, `page error`, `network error`, `cancelled`, or `error` (the default, for a failure that is none of
   these). A non-2xx reply is followed by its `ErrorReplySummary` line
   (`<-- 429 reply: ...`, see [`:instagram`](#instagram)). Never a body in a 2xx line and never a header (the app sees none,
-  so none is logged). The idle close logs `page closed (idle)`. A release build logs nothing: `AppContainer.debugLog` is
+  so none is logged). The idle close logs `page closed (idle)`, `closePage()` `page closed (owner needed)`. A release build logs nothing: `AppContainer.debugLog` is
   null there. This replaces the OkHttp header log (`--> GET https://...` blocks with redacted cookies) for API calls, and
   amends spec 4.4.
 - **`SessionGuard` and the OkHttp cookie bridge are no longer on the API path.** Chromium stores the page's cookies in the
-  jar itself, and the destroy hooks above replace the Set-Cookie guard: the page is gone before the session's cookies
-  change, so it cannot write the old ones back. `:app`'s `src/main` uses none of `SessionGuard`, `CookieStoreJar`,
+  jar itself, and the hooks above replace the Set-Cookie guard. When the app itself changes the session's cookies (a logout,
+  a paste, a paste's rollback, Delete library), `reset()` destroys the page first, so it cannot write the old ones back. A
+  WebView login is the owner's, not the app's: a login screen opened to fix the session (RELOGIN, CHALLENGE) closes the page
+  as it opens (R106), a first login (LOGIN, from LoggedOut) normally finds none (a logout destroyed it, and nothing sends
+  without a valid session), and a login-screen check that starts from a stored state that is not Valid resets the page inside
+  the Pacer's gate before its request (R92). `:app`'s `src/main` uses none of `SessionGuard`, `CookieStoreJar`,
   `OkHttpTransport` and `HttpClientFactory.create`. They still live in `:instagram`'s `src/main`, used only by JVM tests
   (see there for why they were not deleted), and `BackendWiringGuardTest` fails if `:app`'s production code starts using
   one. The CDN client has no jar and never had them.
@@ -594,6 +610,11 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
   lab or Check now meets a challenge or an expiry mid-run, a paste replaces the session mid-run, or WorkManager re-runs
   work by itself after a process death under a session that is no longer valid (it then sends zero requests). The
   default (the fake backend) lets every request through. It only removes requests.
+  - **And again when the request returns (R107).** The gate is asked before a request is sent, and a paste, a logout or a
+    login as another account can land while it is out. So `call` asks `sessionUsable(epoch)` once more when the request (with
+    its transient retries) has returned, before anything of its answer is written: a page that came back under a session
+    that is gone is dropped and the run stops as above. For the first `currentUser()` this also means a library is never
+    given the account of a session that changed while the check was out (R84). A read, never a request.
 - `SortKeys` gives newest-first keys.
 
 ### Run outcomes
@@ -866,11 +887,14 @@ Mock mode switch.
   - `sessionOk` (sent after a run's successful `currentUser`) restores `Valid(handle)` over a stale Expired or Challenge
     banner; it writes nothing when the state is already `Valid` for that handle, flushes the jar before storing `Valid` (as
     `validate` does), and is ignored when the jar holds no session cookies.
-- **The transport's page follows the session.** The hidden page is destroyed before the jar's session changes (logout, a
-  paste, a paste's rollback) and before a check that starts on a stored state that is not Valid; `validate()` also tells
-  the transport that a new user action begins. Delete library does the same destroy. These hooks replace what
-  `SessionGuard` did for OkHttp (a stale response writing the old session's cookies back). Details, and why they are
-  injected and only act on a transport that exists: [Transport](#transport).
+- **The transport's page follows the session.** The hidden page is destroyed (`reset()`) before the app changes the jar's
+  session (logout, a paste, a paste's rollback) and before a check that starts on a stored state that is not Valid;
+  `validate()` also tells the transport that a new user action begins. Delete library does the same destroy. It is closed
+  (`closePage()`, R106, which keeps the transport's verdicts) right after an Expired or a Challenge is stored
+  (`loginRequired`, `challengeRequired`, a `validate()` that finds one) and when the login screen opens to fix the session
+  (RELOGIN, CHALLENGE, through `closeHiddenPage()`), so a WebView login that fixes it never runs beside a live page. These
+  hooks replace what `SessionGuard` did for OkHttp (a stale response writing the old session's cookies back). Details, and
+  why they are injected and only act on a transport that exists: [Transport](#transport).
 - **Gating.** `SyncViewModel(requiresSession = container.backend is Backend.Real)`; `sessionReady = !requiresSession ||
   state is Valid` (a state still loading counts as not ready, but says nothing: no banner until the state is known), and
   `syncUiState(..., sessionReady, sessionLoading)` turns Sync, Full sync and Resume off and, when no other banner applies,
@@ -912,10 +936,10 @@ Mock mode switch.
     again" re-validates on request.
   - RELOGIN ("Log in again" in the Expired state): LOGIN, except that the fingerprint of the stale session in the jar is
     seeded as already checked, because it is known to be dead, so opening costs no request and only a session the owner logs
-    in with afterwards is validated, once.
+    in with afterwards is validated, once. Opening closes the hidden page (R106, `LoginSession.closeHiddenPage()`).
   - CHALLENGE: opened for the session Instagram already flagged. Opening costs no request, and a start page without a usable
     URL is Instagram's home, which redirects to the checkpoint; a Challenge result without a URL loads Instagram's home, and
-    a page that is already showing is not reloaded.
+    a page that is already showing is not reloaded. Opening closes the hidden page, as for RELOGIN.
   - CSRF (after an accepted paste): no request at all, polls for a csrftoken locally and closes when it arrives or after 30 s.
 - **After a Challenge result** (LOGIN, RELOGIN or CHALLENGE) automatic validation stops for the rest of the screen's life,
   because Instagram may re-issue the sessionid during a checkpoint flow and each new fingerprint would otherwise be a paced

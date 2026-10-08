@@ -33,6 +33,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -63,10 +64,14 @@ class SessionRepositoryTest {
         beforeSessionChange: suspend () -> Unit = {},
         beforeCheck: suspend () -> Unit = {},
         debugLog: ((String) -> Unit)? = null,
+        closePage: suspend () -> Unit = {},
     ): SessionRepository {
         settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
         val pacer = Pacer(PacingPolicy.Conservative, requestLog, cooldowns, Random(1), now = { testScheduler.currentTime })
-        return SessionRepository(cookies, probe, pacer, settings, beforeSessionChange, beforeCheck, debugLog)
+        return SessionRepository(
+            cookies, probe, pacer, settings,
+            beforeSessionChange = beforeSessionChange, beforeCheck = beforeCheck, closePage = closePage, debugLog = debugLog,
+        )
     }
 
     /**
@@ -477,6 +482,102 @@ class SessionRepositoryTest {
 
         assertEquals("s1", cookies.cookieValue(SessionRepository.INSTAGRAM, "sessionid"), "the previous session is put back")
         assertEquals("42", cookies.cookieValue(SessionRepository.INSTAGRAM, "ds_user_id"))
+    }
+
+    // ---- R106: the hidden page closes when the session needs the owner ----
+
+    private val close: suspend () -> Unit = { order += "close" }
+
+    @Test
+    fun storingAnExpiryClosesTheHiddenPage() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = reset, closePage = close)
+
+        repository.loginRequired(repository.epoch())
+
+        assertEquals(SessionState.Expired(null), repository.state.first())
+        assertEquals(listOf("close"), order, "closed, not reset: the transport keeps what it remembers")
+    }
+
+    @Test
+    fun storingAChallengeClosesTheHiddenPage() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = reset, closePage = close)
+
+        repository.challengeRequired(CHALLENGE_URL, repository.epoch())
+
+        assertEquals(SessionState.Challenge(CHALLENGE_URL, null), repository.state.first())
+        assertEquals(listOf("close"), order)
+    }
+
+    /** A signal from an older epoch is ignored altogether: the session it was about is gone, and so is its page. */
+    @Test
+    fun aStaleSignalClosesNothing() = runTest {
+        signedIn()
+        val repository = repository(closePage = close)
+        val stale = repository.epoch()
+        repository.pasteSessionId("43%3Acd")
+
+        repository.loginRequired(stale)
+        repository.challengeRequired(null, stale)
+
+        assertEquals(emptyList(), order)
+    }
+
+    /** A check that comes back Expired or Challenge stores it, and the page it ran on closes too. A Valid one keeps it. */
+    @Test
+    fun aCheckThatFindsTheSessionExpiredOrChallengedClosesTheHiddenPage() = runTest {
+        signedIn()
+        val repository = repository(closePage = close)
+
+        probe.next = { order += "probe"; throw InstagramException.LoginRequired() }
+        assertEquals(SessionState.Expired(null), repository.validate())
+        assertEquals(listOf("probe", "close"), order)
+
+        order.clear()
+        probe.next = { order += "probe"; throw InstagramException.ChallengeRequired(null) }
+        assertEquals(SessionState.Challenge(null, null), repository.validate())
+        assertEquals(listOf("probe", "close"), order)
+
+        order.clear()
+        probeRecordsItself()
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        assertEquals(listOf("probe"), order, "a page that just answered for a valid session is kept")
+    }
+
+    /** The login screen opened to fix the session asks for it directly: no request, nothing stored, nothing reset. */
+    @Test
+    fun closeHiddenPageOnlyClosesThePage() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = reset, beforeCheck = allow, closePage = close)
+
+        repository.closeHiddenPage()
+
+        assertEquals(listOf("close"), order)
+        assertEquals(0, probe.calls)
+        assertEquals(0, log.countSince(0))
+        assertTrue(repository.hasSessionCookies())
+    }
+
+    @Test
+    fun aPageThatCannotBeClosedNeverStopsTheVerdictAndIsLoggedByClassNameOnly() = runTest {
+        signedIn()
+        val lines = mutableListOf<String>()
+        val repository = repository(closePage = { throw IllegalStateException("the WebView is gone: secret-detail") }, debugLog = lines::add)
+
+        repository.loginRequired(repository.epoch())
+        repository.closeHiddenPage()
+
+        assertEquals(SessionState.Expired(null), repository.state.first())
+        assertEquals(listOf("transport close failed: IllegalStateException", "transport close failed: IllegalStateException"), lines)
+    }
+
+    @Test
+    fun aCancelledCloseIsNotSwallowed() = runTest {
+        signedIn()
+        val repository = repository(closePage = { throw CancellationException("the caller went away") })
+
+        assertFailsWith<CancellationException> { repository.closeHiddenPage() }
     }
 
     /**

@@ -1465,6 +1465,109 @@ class WebViewTransportTest {
         assertTrue(second.destroyed)
     }
 
+    // ---- R106: closePage(), the idle close made immediate, when the session needs the owner ----
+
+    @Test
+    fun closePageClosesThePageNowAsTheIdleCloseWouldLater() = runTest {
+        val lines = mutableListOf<String>()
+        val pages = Pages()
+        val transport = transport(pages, log = lines::add)
+        completedCall(transport, pages, 1)
+        val page = pages.created.single()
+        assertEquals(1, pendingIdleTimers())
+
+        transport.closePage()
+        runCurrent()
+        assertTrue(page.destroyed)
+        assertEquals(0, pendingIdleTimers(), "nothing is left to close later")
+        assertEquals("page closed (owner needed)", lines.last())
+
+        // The next call starts over on a new page.
+        assertEquals(200, completedCall(transport, pages, 2).code)
+        assertEquals(2, pages.created.size)
+        assertEquals(listOf(home), pages.created.last().loaded)
+    }
+
+    /** Like the idle close: a clean end of a visit gives back the page cap. */
+    @Test
+    fun closePageGivesBackThePageLimit() = runTest {
+        val pages = Pages(FakeWebPage(loadError = IOException("first")), FakeWebPage(loadError = IOException("second")))
+        val transport = transport(pages)
+        repeat(2) { assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull()) }
+        completedCall(transport, pages, 1)
+        assertEquals(WebViewTransport.MAX_PAGES, pages.attempts, "the cap is used up")
+
+        transport.closePage()
+        assertEquals(200, completedCall(transport, pages, 2).code)
+        assertEquals(WebViewTransport.MAX_PAGES + 1, pages.attempts)
+    }
+
+    /** R89, R97: the cap is never given back without a page. With none, there is nothing to close and nothing to give back. */
+    @Test
+    fun closePageWithNoPageGivesNothingBack() = runTest {
+        val pages = Pages(*Array(WebViewTransport.MAX_PAGES) { FakeWebPage(loadError = IOException("load $it")) })
+        val transport = transport(pages)
+        repeat(WebViewTransport.MAX_PAGES) { assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull()) }
+
+        transport.closePage()
+        assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertEquals(WebViewTransport.MAX_PAGES, pages.attempts, "the cap holds")
+    }
+
+    /** Unlike reset(), it is no change of session: a login or challenge landing stays remembered. */
+    @Test
+    fun closePageKeepsALoginOrChallengeLanding() = runTest {
+        for ((landing, expected) in listOf(
+            "https://www.instagram.com/accounts/login/" to InstagramException.LoginRequired::class,
+            "https://www.instagram.com/challenge/" to InstagramException.ChallengeRequired::class,
+        )) {
+            val pages = Pages(FakeWebPage(landing = landing))
+            val transport = transport(pages)
+            assertTrue(expected.isInstance(call(transport, "api/v1/collections/list/").await().exceptionOrNull()), landing)
+
+            transport.closePage()
+            assertTrue(expected.isInstance(call(transport, "api/v1/collections/list/").await().exceptionOrNull()), landing)
+            assertEquals(1, pages.attempts, landing)
+        }
+    }
+
+    /** Nor does it forget a 429 a cancelled caller's load found (R104a): the Pacer must still hear it. */
+    @Test
+    fun closePageKeepsARateLimitedLoadOfACancelledCaller() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val pages = Pages(FakeWebPage(loadError = PageHttpError(429), loadGate = gate, destroyFailsTheLoad = false))
+        val transport = transport(pages)
+        val abandoned = launch { transport.get("api/v1/collections/list/") }
+        runCurrent()
+        abandoned.cancel()
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+
+        transport.closePage()
+        assertIs<InstagramException.RateLimited>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertEquals(1, pages.attempts)
+    }
+
+    /** A call in flight on the page that closes fails at once, as with reset(), not at its timeout. */
+    @Test
+    fun closePageFailsACallInFlightAtOnce() = runTest {
+        for (phase in listOf("waiting for the reply", "loading")) {
+            val pages = Pages(if (phase == "loading") FakeWebPage(loadGate = CompletableDeferred()) else FakeWebPage())
+            val transport = transport(pages)
+            val start = currentTime
+            val pending = call(transport, "api/v1/collections/list/")
+            runCurrent()
+            val page = pages.created.single()
+
+            transport.closePage()
+            runCurrent()
+            assertIs<InstagramException.Transient>(pending.await().exceptionOrNull(), phase)
+            assertEquals(start, currentTime, phase)
+            assertTrue(page.destroyed, phase)
+        }
+    }
+
     @Test
     fun allowNewAttemptsNeverCancelsTheIdleTimer() = runTest {
         val pages = Pages()

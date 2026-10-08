@@ -52,6 +52,13 @@ class LoginViewModel(
     /** True from [retry] until the next validation starts: the one thing that may validate after a challenge. */
     private var retryRequested = false
 
+    init {
+        // R106: a screen opened to fix the session (log in again, finish a challenge) first closes the hidden instagram.com
+        // page, so the site is not running for that account beside this one. A first login and the CSRF screen leave it alone.
+        // No request either way; closeHiddenPage swallows everything but a cancellation.
+        if (purpose == LoginPurpose.RELOGIN || purpose == LoginPurpose.CHALLENGE) viewModelScope.launch { session.closeHiddenPage() }
+    }
+
     /**
      * Called every second by the screen. Reading cookies is local and free; validating is an Instagram
      * request, so each session is checked at most once until the owner asks to [retry], and not at all

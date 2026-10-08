@@ -51,6 +51,11 @@ class InstagramTransportWiringTest {
     private suspend fun AppContainer.runEveryHook() {
         try {
             assertEquals(SessionState.LoggedOut, session.validate())
+            // R106: a stored expiry or challenge, and a login screen opened to fix one, close the page of a transport that exists.
+            session.loginRequired(session.epoch())
+            session.challengeRequired(null, session.epoch())
+            session.closeHiddenPage()
+            closeInstagramPage()
             session.logout()
             resetInstagramTransport()
             allowNewInstagramAttempts()

@@ -30,6 +30,13 @@ interface LoginSession {
     fun hasCsrfToken(): Boolean
 
     suspend fun validate(): SessionState
+
+    /**
+     * R106: the login screen opened to fix the session (RELOGIN, CHALLENGE). Closes the hidden instagram.com page now, so the
+     * site is not running for that account beside the visible login. No request, nothing stored; never throws but for a
+     * cancellation.
+     */
+    suspend fun closeHiddenPage()
 }
 
 class SessionRepository(
@@ -58,8 +65,17 @@ class SessionRepository(
      */
     private val beforeCheck: suspend () -> Unit = {},
     /**
-     * Debug builds only (the app passes `null` otherwise): one line when [beforeSessionChange] failed, naming the exception's
-     * class and nothing else (never its message).
+     * R106: the session needs the owner. The app passes the transport's `closePage()`, only if a request ever built the
+     * transport: the hidden page closes now instead of after its idle minutes, so the site stops running for an account that
+     * has just been found expired or challenged, and is not live beside the login screen opened to fix it. It runs after an
+     * Expired or a Challenge is stored ([loginRequired], [challengeRequired], a [validate] that finds one) and when that screen
+     * opens ([closeHiddenPage]). Unlike [beforeSessionChange] it forgets nothing the transport remembers: the session has not
+     * changed. A failure is swallowed (cancellation excepted), as for [beforeSessionChange].
+     */
+    private val closePage: suspend () -> Unit = {},
+    /**
+     * Debug builds only (the app passes `null` otherwise): one line when [beforeSessionChange] or [closePage] failed, naming the
+     * exception's class and nothing else (never its message).
      */
     private val debugLog: ((String) -> Unit)? = null,
 ) : SessionSignals, LoginSession {
@@ -122,6 +138,8 @@ class SessionRepository(
 
     override fun hasSessionCookies(): Boolean = sessionId() != null && userId() != null
 
+    override suspend fun closeHiddenPage() = closePageQuietly()
+
     override fun hasCsrfToken(): Boolean = cookies.cookieValue(INSTAGRAM, "csrftoken") != null
 
     /**
@@ -161,7 +179,7 @@ class SessionRepository(
                 // Valid is persisted at once, but Chromium commits cookies lazily: flush so a kill right after a
                 // WebView login cannot leave "Logged in as" with no sessionid behind it.
                 if (result is SessionState.Valid) cookies.flush()
-                store(result)
+                store(result).also { if (it is SessionState.Expired || it is SessionState.Challenge) closePageQuietly() }
             }
         }
     }
@@ -232,6 +250,7 @@ class SessionRepository(
         lock.withLock {
             if (epoch != sessionEpoch) return
             store(if (hasSessionCookies()) SessionState.Expired(state.first().handle) else SessionState.LoggedOut)
+            closePageQuietly()
         }
     }
 
@@ -239,6 +258,7 @@ class SessionRepository(
         lock.withLock {
             if (epoch != sessionEpoch) return
             store(SessionState.Challenge(challengeUrl, state.first().handle))
+            closePageQuietly()
         }
     }
 
@@ -289,6 +309,17 @@ class SessionRepository(
         } catch (e: Exception) {
             // Swallowed on purpose, but a debug build is told: the class only, never the message.
             debugLog?.invoke("transport reset failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** [closePage], without letting a failure of it stop what the caller is doing (see its documentation). */
+    private suspend fun closePageQuietly() {
+        try {
+            closePage()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            debugLog?.invoke("transport close failed: ${e.javaClass.simpleName}")
         }
     }
 

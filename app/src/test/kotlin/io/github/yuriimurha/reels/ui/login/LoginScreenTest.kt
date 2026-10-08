@@ -217,6 +217,8 @@ class LoginScreenTest {
 
         override fun hasCsrfToken(): Boolean = false
 
+        override suspend fun closeHiddenPage() = Unit
+
         override suspend fun validate(): SessionState {
             validations++
             return result()

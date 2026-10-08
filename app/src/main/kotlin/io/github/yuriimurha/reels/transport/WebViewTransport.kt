@@ -44,7 +44,8 @@ import kotlin.time.TimeSource
  * breaks, a transient backoff of up to 288 s with its jitter, a batch of thumbnail downloads) are normally shorter than 5 min;
  * that is not a promise, and a longer gap closes the page and the next call loads the site again. That clean end of a visit
  * gives back the page limit (a page dropped by a failure never has a timer and still counts), and never touches a remembered
- * login or challenge landing. The cost is one more home-page load per active period.
+ * login or challenge landing. The cost is one more home-page load per active period. [closePage] is the same close, made at
+ * once, for a session that needs the owner (R106).
  *
  * **A home page that is an HTTP error** fails the load: 429 is [InstagramException.RateLimited] (so the caller's cooldown
  * arms with no API request made), any other status [InstagramException.Transient]. The page is dropped either way.
@@ -72,7 +73,7 @@ import kotlin.time.TimeSource
  * **A cancelled caller** always ends with its own `CancellationException`, never with another exception (one thrown by a
  * cancelled coroutine fails its parent scope, the viewer's `collectLatest` say). Cancelled while the page LOADS (R104), it
  * does not drop the page: the load goes on under `NonCancellable`, still bounded by [loadTimeoutMs] from its start and still
- * ended at once by [reset] or a dead renderer, and its outcome is applied as for any caller (a failure drops the
+ * ended at once by [reset], [closePage] or a dead renderer, and its outcome is applied as for any caller (a failure drops the
  * page, a login or challenge landing is remembered, a good page is kept with its idle timer). Only then does the caller get
  * its cancellation. So swipes during a cold load cost one page between them, not one each; the price is that a cancelled
  * caller (and the Pacer's gate it holds) waits for the rest of the load, at most 30 s. A home page answered 429 for a caller
@@ -89,7 +90,7 @@ import kotlin.time.TimeSource
  * **Debug log** ([log], debug builds only): one line per call, `GET <path, digit runs of 3+ as <n>> -> <code> (<ms> ms)`;
  * `<code>` is `redirect`, `timeout` and so on when there is no status. A non-2xx reply is followed by its
  * [ErrorReplySummary] line. Never a body in a 2xx line, never a header (none is visible here). An idle close logs
- * `page closed (idle)`.
+ * `page closed (idle)`, [closePage] `page closed (owner needed)`.
  */
 class WebViewTransport(
     private val createPage: () -> WebPage,
@@ -148,6 +149,25 @@ class WebViewTransport(
      */
     suspend fun allowNewAttempts() {
         withContext(main) { pagesCreated = 0 }
+    }
+
+    /**
+     * R106: the idle close, now. The session needs the owner (an expiry or a challenge was stored, or the login screen opened
+     * to fix one), so the site stops running for that account and is not live beside the visible login. Like the idle close it
+     * gives back the page limit, but only when there is a page to close (never a refund without one, R89/R97), and it never
+     * forgets a login or challenge landing or a remembered 429: that is [reset]'s, when the session changes. Unlike it, a call
+     * in flight on the page (rare: the Pacer's gate is usually free when this runs) fails at once with `Transient`, as with
+     * [reset], instead of waiting out its timeout.
+     */
+    suspend fun closePage() {
+        withContext(main) {
+            cancelIdleTimer()
+            if (page == null) return@withContext
+            dropPage()
+            pagesCreated = 0
+            log?.invoke("page closed (owner needed)")
+            waiting?.let { it.reply.complete(Answer.Destroyed) }
+        }
     }
 
     private suspend fun call(path: String): RawReply {
