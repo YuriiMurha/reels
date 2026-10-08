@@ -76,8 +76,8 @@ import kotlin.time.TimeSource
  * out, a call that times out, and a page that throws all drop the page: a stuck page is never reused. A dead renderer
  * ([WebPage.onGone]) drops it and fails a call in flight at once. A network failure inside the page (`code == -1`) is
  * [InstagramException.Transient] and keeps it. A GraphQL call on a page that has no tokens to send it with (`code == -2`, no
- * request made) is [InstagramException.Transient] and drops the page; a name outside the script's own list (`code == -3`,
- * no request made either) is [InstagramException.Transient] and keeps it.
+ * request made) is [InstagramException.Transient] and drops the page; a name outside the script's own list or a doc id that
+ * is not digits only (`code == -3`, no request made either) is [InstagramException.Transient] and keeps it.
  *
  * **A cancelled caller** always ends with its own `CancellationException`, never with another exception (one thrown by a
  * cancelled coroutine fails its parent scope, the viewer's `collectLatest` say). Cancelled while the page LOADS (R104), it
@@ -142,11 +142,13 @@ class WebViewTransport(
 
     /**
      * The website's own GraphQL [query], sent by the page (`window.__igGraphQl`) as one POST with the page's own tokens, which
-     * never leave it. Only a query of [WebGraphQl.ALL] is sent (the page checks its own list too). Every rule of [get] holds:
-     * the busy flag, the landing check, the sticky verdicts, the page limit, the idle close, the remembered 429 and the abort.
+     * never leave it. Only a query of [WebGraphQl.ALL] with a doc id of the website's shape ([WebGraphQl.isDocId]: the server
+     * runs whatever persisted query the id names) is sent; the page checks both itself too. Every rule of [get] holds: the busy
+     * flag, the landing check, the sticky verdicts, the page limit, the idle close, the remembered 429 and the abort.
      */
     override suspend fun graphql(query: GraphQlQuery, docId: String, variables: String): RawReply {
         require(query in WebGraphQl.ALL) { "not an allowed query" }
+        require(WebGraphQl.isDocId(docId)) { "not a doc id" }
         return withContext(main) {
             logged("GRAPHQL ${query.friendlyName}") {
                 call { id ->
@@ -407,7 +409,8 @@ class WebViewTransport(
             dropPage()
             throw Failed("no tokens", InstagramException.Transient())
         }
-        // The page's own list of queries refused the name: nothing was sent, and the page is fine.
+        // The page's own checks refused the call (a name outside its list, a doc id that is not digits): nothing was sent, and the
+        // page is fine.
         message.code == REFUSED_QUERY -> throw Failed("refused query", InstagramException.Transient())
         // -1 is the page's fetch failing (offline, DNS, reset); anything else outside HTTP's range is no status at all.
         message.code !in 100..599 -> throw Failed("network error", InstagramException.Transient())
@@ -502,7 +505,7 @@ class WebViewTransport(
         /** What `ig_fetch.js` posts when the page has no `fb_dtsg`/`lsd` to send a GraphQL query with. */
         private const val NO_TOKENS = -2
 
-        /** What `ig_fetch.js` posts for a GraphQL name that is not in its own list. */
+        /** What `ig_fetch.js` posts for a GraphQL name that is not in its own list, or a doc id that is not digits only. */
         private const val REFUSED_QUERY = -3
 
         /** A letter or a digit first, no tab, carriage return or newline anywhere. */

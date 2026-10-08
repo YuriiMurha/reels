@@ -452,24 +452,26 @@ class AndroidWebPageTest {
         assertEquals("exactly one request reached the GraphQL path: $calls", 1, calls.size)
         val call = calls.single()
         assertEquals("POST", call.method)
+        val form = formOf(call)
+        assertEquals("the website's fields, in its order", WebGraphQl.FORM_FIELDS, form.keys.toList())
         assertEquals(
             mapOf(
-                "fb_dtsg" to tokens.dtsg,
-                "lsd" to tokens.lsd,
-                "fb_api_caller_class" to "RelayModern",
-                "fb_api_req_friendly_name" to "PolarisProfileSavedTabContentQuery",
-                "variables" to variables,
-                "server_timestamps" to "true",
-                "doc_id" to "123",
+                WebGraphQl.Field.DTSG to tokens.dtsg,
+                WebGraphQl.Field.LSD to tokens.lsd,
+                WebGraphQl.Field.CALLER_CLASS to WebGraphQl.CALLER_CLASS,
+                WebGraphQl.Field.FRIENDLY_NAME to "PolarisProfileSavedTabContentQuery",
+                WebGraphQl.Field.VARIABLES to variables,
+                WebGraphQl.Field.SERVER_TIMESTAMPS to "true",
+                WebGraphQl.Field.DOC_ID to "123",
             ),
-            formOf(call),
+            form,
         )
-        assertTrue(call.headers["Content-Type"].orEmpty().startsWith("application/x-www-form-urlencoded"))
-        assertEquals("PolarisProfileSavedTabContentQuery", call.headers["x-fb-friendly-name"])
-        assertEquals(tokens.lsd, call.headers["x-fb-lsd"])
-        assertEquals(WebHeaders.APP_ID, call.headers["x-ig-app-id"])
-        assertEquals(WebHeaders.ASBD_ID, call.headers["x-asbd-id"])
-        assertEquals(csrf, call.headers["x-csrftoken"])
+        assertTrue(call.headers[WebGraphQl.Header.CONTENT_TYPE].orEmpty().startsWith("application/x-www-form-urlencoded"))
+        assertEquals("PolarisProfileSavedTabContentQuery", call.headers[WebGraphQl.Header.FRIENDLY_NAME])
+        assertEquals(tokens.lsd, call.headers[WebGraphQl.Header.LSD])
+        assertEquals(WebHeaders.APP_ID, call.headers[WebGraphQl.Header.APP_ID])
+        assertEquals(WebHeaders.ASBD_ID, call.headers[WebGraphQl.Header.ASBD_ID])
+        assertEquals(csrf, call.headers[WebGraphQl.Header.CSRF_TOKEN])
         assertTrue("the page's cookie was sent", "csrftoken=$csrf" in call.headers["Cookie"].orEmpty())
         assertEquals(1, site.requestsTo("/").size)
 
@@ -550,6 +552,31 @@ class AndroidWebPageTest {
         // The page is kept: the next call uses it, with no second load of the site.
         assertEquals(REPLY_BODY, runBlocking { transport.get(API.removePrefix("/")) }.body)
         assertEquals(1, site.requestsTo("/").size)
+    }
+
+    /**
+     * The page's own doc-id check (fix round 1): the server runs whatever persisted query a doc id names, so an id that is not
+     * digits only (at most 30) is refused in the page with code -3 and nothing is sent. The transport never asks for one (its
+     * own check refuses it first), so the test changes the id on its way into the page.
+     */
+    @Test
+    fun aDocIdThatIsNotDigitsIsRefusedInThePage() {
+        val tokens = PageTokens()
+        // As they appear in the evaluated call: JSON string literals.
+        for (bad in listOf("\"12a\"", "\"\"", "\"" + "1".repeat(31) + "\"", "\"123\\n\"", "\" 123\"")) {
+            val site = site()
+            site.route("/") { html(tokens.homePage()) }
+            site.route(GRAPHQL) { json(REPLY_BODY) }
+            val heard = CopyOnWriteArrayList<String>()
+            val transport = transport(site, heard, rewrite = { it.replace(",\"123\",", ",$bad,") })
+
+            val result = runBlocking { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}") } }
+
+            assertTrue("$bad: expected Transient: $result", result.exceptionOrNull() is InstagramException.Transient)
+            assertTrue("$bad: the page refused it with -3: $heard", heard.single().contains("\"code\":-3,"))
+            assertEquals("$bad: nothing reached the GraphQL path", 0, site.requestsTo(GRAPHQL).size)
+            runBlocking { transport.reset() } // this round's page; tearDown resets only the last transport
+        }
     }
 
     /** Fake `fb_dtsg`/`lsd` values (built from parts, different on every run) and a home page that carries them as the site does. */

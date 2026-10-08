@@ -58,19 +58,20 @@
     }
     return dtsg && lsd ? { dtsg: dtsg, lsd: lsd } : null;
   }
+  // A doc id names the persisted query the server runs, so only the shape the website sends goes out: digits, at most 30.
   window.__igGraphQl = function (id, name, docId, variables) {
-    if (QUERIES.indexOf(name) < 0) {
+    if (QUERIES.indexOf(name) < 0 || !/^\d{1,30}$/.test(docId)) {
       window.igBridge.postMessage(JSON.stringify({ id: id, code: -3, contentType: null, body: null, redirected: false }));
       return;
     }
-    var t = tokens();
-    if (!t) {
+    var tok = tokens();
+    if (!tok) {
       window.igBridge.postMessage(JSON.stringify({ id: id, code: -2, contentType: null, body: null, redirected: false }));
       return;
     }
-    var body = new URLSearchParams({ fb_dtsg: t.dtsg, lsd: t.lsd, fb_api_caller_class: 'RelayModern',
+    var body = new URLSearchParams({ fb_dtsg: tok.dtsg, lsd: tok.lsd, fb_api_caller_class: 'RelayModern',
       fb_api_req_friendly_name: name, variables: variables, server_timestamps: 'true', doc_id: docId });
-    var headers = { 'content-type': 'application/x-www-form-urlencoded', 'x-fb-friendly-name': name, 'x-fb-lsd': t.lsd,
+    var headers = { 'content-type': 'application/x-www-form-urlencoded', 'x-fb-friendly-name': name, 'x-fb-lsd': tok.lsd,
       'x-ig-app-id': '1217981644879628', 'x-asbd-id': '359341', 'x-csrftoken': cookie('csrftoken') };
     var controller = new AbortController();
     aborts[id] = controller;

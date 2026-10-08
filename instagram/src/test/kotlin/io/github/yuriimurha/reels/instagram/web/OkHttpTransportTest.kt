@@ -154,4 +154,34 @@ class OkHttpTransportTest {
         assertEquals(200, reply.code)
         assertEquals(1, server.requestCount)
     }
+
+    /** R6: the form is the website's ([WebGraphQl.FORM_FIELDS], in order) less the page's two tokens, which this transport has not. */
+    @Test
+    fun graphqlSendsTheWebsitesFormFieldsWithoutTheTokens() = runTest {
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        transport().graphql(WebGraphQl.SAVED_COLLECTIONS, "27584326974521636", WebGraphQl.savedCollectionsVariables(null))
+        val request = server.takeRequest()
+        val fields = request.body!!.utf8().split('&').map { it.substringBefore('=') }
+        assertEquals(WebGraphQl.FORM_FIELDS - listOf(WebGraphQl.Field.DTSG, WebGraphQl.Field.LSD), fields)
+        assertTrue(request.headers["Content-Type"].orEmpty().startsWith("application/x-www-form-urlencoded"))
+        assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, request.headers[WebGraphQl.Header.FRIENDLY_NAME])
+    }
+
+    @Test
+    fun aDocIdThatIsNotDigitsIsRefusedBeforeAnyRequest() = runTest {
+        for (docId in listOf("", "12a", " 123", "123\n", "1".repeat(WebGraphQl.DOC_ID_MAX_DIGITS + 1), "١٢")) {
+            assertFailsWith<IllegalArgumentException>(docId) { transport().graphql(WebGraphQl.SAVED_COLLECTIONS, docId, "{}") }
+        }
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun aDocIdIsDigitsOnlyAndNotTooLong() {
+        assertTrue(WebGraphQl.isDocId("27584326974521636"))
+        assertTrue(WebGraphQl.isDocId("0"))
+        assertTrue(WebGraphQl.isDocId("9".repeat(WebGraphQl.DOC_ID_MAX_DIGITS)))
+        for (bad in listOf("", "12a", "-1", "1.5", "0x1F", " 1", "1 ", "1\n", "١", "9".repeat(WebGraphQl.DOC_ID_MAX_DIGITS + 1))) {
+            assertFalse(WebGraphQl.isDocId(bad), bad)
+        }
+    }
 }

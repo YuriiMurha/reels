@@ -13,7 +13,8 @@ interface InstagramTransport {
 
     /**
      * One POST of the website's own GraphQL [query] with [docId] and [variables] (JSON text). The same rules as [get]: one
-     * request, never retried, never redirected. Tokens are the transport's business and never leave it.
+     * request, never retried, never redirected. Tokens are the transport's business and never leave it. A [docId] that is not
+     * of the website's shape ([WebGraphQl.isDocId]) is refused with [IllegalArgumentException] before anything is sent.
      */
     suspend fun graphql(query: GraphQlQuery, docId: String, variables: String): RawReply
 }

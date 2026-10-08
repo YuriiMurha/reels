@@ -44,15 +44,16 @@ class OkHttpTransport(
      * WebView transport's page adds them itself), and the JVM tests that use it need none.
      */
     override suspend fun graphql(query: GraphQlQuery, docId: String, variables: String): RawReply {
+        require(WebGraphQl.isDocId(docId)) { "not a doc id" }
         val url = checkNotNull(base.resolve(WebGraphQl.PATH)) { "no GraphQL URL on the base" }
         val form = FormBody.Builder()
-            .add("fb_api_caller_class", "RelayModern")
-            .add("fb_api_req_friendly_name", query.friendlyName)
-            .add("variables", variables)
-            .add("server_timestamps", "true")
-            .add("doc_id", docId)
+            .add(WebGraphQl.Field.CALLER_CLASS, WebGraphQl.CALLER_CLASS)
+            .add(WebGraphQl.Field.FRIENDLY_NAME, query.friendlyName)
+            .add(WebGraphQl.Field.VARIABLES, variables)
+            .add(WebGraphQl.Field.SERVER_TIMESTAMPS, "true")
+            .add(WebGraphQl.Field.DOC_ID, docId)
             .build()
-        return send(Request.Builder().url(url).header("x-fb-friendly-name", query.friendlyName).post(form).build())
+        return send(Request.Builder().url(url).header(WebGraphQl.Header.FRIENDLY_NAME, query.friendlyName).post(form).build())
     }
 
     private suspend fun send(request: Request): RawReply {
