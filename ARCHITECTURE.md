@@ -118,6 +118,16 @@ Pure Kotlin/JVM.
   - `HttpClientFactory.create` builds the API client: no redirects, no connection retries, 15 s connect and 30 s read,
     redacted debug logging (Cookie, Set-Cookie, X-CSRFToken, Location and the `ig-set-*` headers), an outermost crash guard
     (an unchecked failure leaves as an `IOException` that names only its class), `noRetryAfterOn503`, and `SessionGuard`.
+  - Debug builds (a logger is passed; release passes null and gets neither logger) also log a redacted one-line summary of
+    every non-2xx Instagram reply (`ErrorReplyLogger`, a network interceptor placed before the header log, so the line
+    follows that response's headers): `<-- 401 reply: status=fail message="..." error_type="..." require_login=true
+    spam=false lock=false keys=[...]`, allowlisted fields only. Each string value goes through the Adapter lab's
+    `LabRules.isVisibleString` and is written `<redacted len N>` if it fails; key names go through `LabRules.isSafeName`
+    and the rest are only counted (`+N other`); a body that is not a JSON object logs only `non-JSON, <content-type>,
+    <length> bytes`. No URL, cookie, id, handle or raw body is ever printed, and a 2xx is never touched. It peeks at most
+    16 KiB (`Response.peekBody`), so the caller's body is whole, and un-gzips the peek itself (a network interceptor sees
+    the wire bytes; OkHttp un-zips only after them). This deliberately amends spec 4.4's "response bodies are never
+    logged" for debug builds only, and only for these fields. No request is added, so no pacing or concurrency changes.
   - `HttpClientFactory.createCdn` builds the CDN client (below).
 - **`SessionGuard`** is the API client's first (outermost) network interceptor. It takes the `sessionid` the request
   actually carries from its `Cookie` header (OkHttp loads that header before it connects, and network interceptors run

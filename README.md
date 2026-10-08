@@ -678,6 +678,17 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
   - "That session isn't valid yet. Finish logging in, then check again." (login screen): you aren't through Instagram's
     login yet, or the session was rejected. Finish, then **Check again**.
   - "Finished verifying on Instagram?" with **Check again** (login screen): tap it once the check in the page is done.
+- **A login check or Check now ends in a cooldown** ("Instagram is limiting requests", "Cooling down after a rate limit"):
+  run this on the Mac BEFORE you retry (a second rate limit within 24 hours means a 24-hour cooldown, and the phone's log
+  buffer rotates), then paste the line containing `reply:` into a Claude session. A debug build logs one redacted line per
+  error reply from Instagram (a few safe fields, never the page, a URL or a cookie), for example
+  `<-- 401 reply: status=fail message="..." require_login=true keys=[...]`:
+
+  ```bash
+  adb -d logcat -s InstagramHttp
+  ```
+
+  (Ctrl-C stops it.) A release build logs nothing.
 - **After tapping Paste sessionid → Use it:** "That doesn't look like a sessionid" (nothing was sent), "Instagram
   rejected that session; your current login is unchanged", or "Couldn't check that session".
 
