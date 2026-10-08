@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.cancellation.CancellationException
 
 /** What the login screen needs; split out so its ViewModel can be tested without Android. */
 interface LoginSession {
@@ -29,6 +30,13 @@ interface LoginSession {
     fun hasCsrfToken(): Boolean
 
     suspend fun validate(): SessionState
+
+    /**
+     * R106: the login screen opened to fix the session (RELOGIN, CHALLENGE). Closes the hidden instagram.com page now, so the
+     * site is not running for that account beside the visible login. No request, nothing stored; never throws but for a
+     * cancellation.
+     */
+    suspend fun closeHiddenPage()
 }
 
 class SessionRepository(
@@ -36,6 +44,40 @@ class SessionRepository(
     private val probe: SessionProbe,
     private val pacer: Pacer,
     private val settings: SettingsStore,
+    /**
+     * The WebView transport's page belongs to one session: it may sit on a login or challenge page it will not leave, or act
+     * for an account that is gone. This runs (the app passes the transport's `reset()`, only if a request ever built the
+     * transport) BEFORE the jar's session is replaced or forgotten (logout, a paste, and a paste's rollback), so the page is
+     * gone before the cookies change and cannot write them back. It also runs, inside the Pacer's gate, before a check that
+     * starts on a stored state that is not Valid: the owner had to act (log in again, finish a challenge) and is asking again,
+     * so the request goes out on a fresh page rather than the one that said "login" or "challenge" last time. Never while the
+     * stored state is Valid (a page doing its job is kept), and never before the Pacer has agreed to send something.
+     *
+     * One hook, called before the change, rather than a second one called after a new Valid is committed: a check that begins
+     * on a sticky login or challenge verdict can only end in that verdict, so it would never get to commit a Valid, and a page
+     * made after the commit could be used by a run that the commit has just let start. A failure here is swallowed
+     * (cancellation excepted): destroying a page must never stop a logout, or a paste's rollback.
+     */
+    private val beforeSessionChange: suspend () -> Unit = {},
+    /**
+     * A session check the owner asked for (Check now, the login screen's) is about to be sent: a new user action, so the
+     * transport counts its page limit afresh (`allowNewAttempts()`). Runs inside the Pacer's gate, right before the request.
+     */
+    private val beforeCheck: suspend () -> Unit = {},
+    /**
+     * R106: the session needs the owner. The app passes the transport's `closePage()`, only if a request ever built the
+     * transport: the hidden page closes now instead of after its idle minutes, so the site stops running for an account that
+     * has just been found expired or challenged, and is not live beside the login screen opened to fix it. It runs after an
+     * Expired or a Challenge is stored ([loginRequired], [challengeRequired], a [validate] that finds one) and when that screen
+     * opens ([closeHiddenPage]). Unlike [beforeSessionChange] it forgets nothing the transport remembers: the session has not
+     * changed. A failure is swallowed (cancellation excepted), as for [beforeSessionChange].
+     */
+    private val closePage: suspend () -> Unit = {},
+    /**
+     * Debug builds only (the app passes `null` otherwise): one line when [beforeSessionChange] or [closePage] failed, naming the
+     * exception's class and nothing else (never its message).
+     */
+    private val debugLog: ((String) -> Unit)? = null,
 ) : SessionSignals, LoginSession {
     /** The last known state, shown without a request (spec D7). */
     val state: Flow<SessionState> = settings.session.map { it.toState() }
@@ -96,6 +138,8 @@ class SessionRepository(
 
     override fun hasSessionCookies(): Boolean = sessionId() != null && userId() != null
 
+    override suspend fun closeHiddenPage() = closePageQuietly()
+
     override fun hasCsrfToken(): Boolean = cookies.cookieValue(INSTAGRAM, "csrftoken") != null
 
     /**
@@ -121,7 +165,11 @@ class SessionRepository(
             if (!hasSessionCookies()) return store(SessionState.LoggedOut)
             sessionEpoch to state.first().handle
         }
-        val result = probeSession(handle)
+        val result = probeSession(handle) {
+            beforeCheck()
+            // Read here, inside the gate, not before it: what is stored may have changed while this check waited its turn.
+            if (state.first() !is SessionState.Valid) destroyPage()
+        }
         return lock.withLock {
             // Again, for a login that landed while the request was out: the answer then belongs to a session that is gone.
             startEpochIfSessionChanged()
@@ -131,7 +179,7 @@ class SessionRepository(
                 // Valid is persisted at once, but Chromium commits cookies lazily: flush so a kill right after a
                 // WebView login cannot leave "Logged in as" with no sessionid behind it.
                 if (result is SessionState.Valid) cookies.flush()
-                store(result)
+                store(result).also { if (it is SessionState.Expired || it is SessionState.Challenge) closePageQuietly() }
             }
         }
     }
@@ -149,10 +197,14 @@ class SessionRepository(
             pacer.ensureAllowed()
             val previousSession = sessionId()
             val previousUser = userId()
+            destroyPage() // after the refusal above (nothing changes if the Pacer says no), before the first cookie is written
             sessionEpoch++
             writeSessionCookies(WebSessionCookies.sessionCookie(parsed.sessionId), WebSessionCookies.userCookie(parsed.userId))
             recordIssuedFor()
             suspend fun rollBack() = withContext(NonCancellable) {
+                // The page that checked the rejected id may be on a login page for good; the restored session must not meet it.
+                // A failure of the hook is swallowed by destroyPage: the previous cookies go back whatever the page does.
+                destroyPage()
                 writeSessionCookies(WebSessionCookies.sessionCookie(previousSession), WebSessionCookies.userCookie(previousUser))
                 sessionEpoch++
                 recordIssuedFor()
@@ -171,6 +223,7 @@ class SessionRepository(
     /** Forgets the session. The library is kept (spec 9.5). */
     suspend fun logout() {
         lock.withLock {
+            destroyPage() // first: a page that outlives the cookies could write them back
             sessionEpoch++
             cookies.clearAll()
             recordIssuedFor()
@@ -197,6 +250,7 @@ class SessionRepository(
         lock.withLock {
             if (epoch != sessionEpoch) return
             store(if (hasSessionCookies()) SessionState.Expired(state.first().handle) else SessionState.LoggedOut)
+            closePageQuietly()
         }
     }
 
@@ -204,6 +258,7 @@ class SessionRepository(
         lock.withLock {
             if (epoch != sessionEpoch) return
             store(SessionState.Challenge(challengeUrl, state.first().handle))
+            closePageQuietly()
         }
     }
 
@@ -223,7 +278,7 @@ class SessionRepository(
      * that same gate, so taking it here would leave each waiting for the other. It needs no lock: [sessionEpoch] is volatile
      * and the state is one DataStore read. The state is read first, the epoch second, the jar last: logout, paste and a new
      * login's check bump the epoch before they record anything else, so one that has begun is always seen. One request can still
-     * go out under the new account if the cookies change between this check and OkHttp reading them a moment later.
+     * go out under the new account if the cookies change between this check and the hidden page (Chromium) reading them a moment later.
      */
     override suspend fun runSession(epoch: Int): RunSession {
         val stored = state.first()
@@ -236,12 +291,36 @@ class SessionRepository(
 
     private fun jarStillHoldsTheEpochsAccount(): Boolean = userId() == recordedOrRecord(jarSession()).userId
 
-    private suspend fun probeSession(handle: String?): SessionState = try {
-        SessionState.Valid(pacer.interactive { probe.currentUser() }.username)
+    /** [beforeProbe] runs inside the Pacer's gate, right before the request: nothing else can be using the transport then. */
+    private suspend fun probeSession(handle: String?, beforeProbe: suspend () -> Unit = {}): SessionState = try {
+        SessionState.Valid(pacer.interactive { beforeProbe(); probe.currentUser() }.username)
     } catch (e: InstagramException.LoginRequired) {
         SessionState.Expired(handle)
     } catch (e: InstagramException.ChallengeRequired) {
         SessionState.Challenge(e.challengeUrl, handle)
+    }
+
+    /** [beforeSessionChange], without letting a failure of it stop what the caller is doing (see its documentation). */
+    private suspend fun destroyPage() {
+        try {
+            beforeSessionChange()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Swallowed on purpose, but a debug build is told: the class only, never the message.
+            debugLog?.invoke("transport reset failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** [closePage], without letting a failure of it stop what the caller is doing (see its documentation). */
+    private suspend fun closePageQuietly() {
+        try {
+            closePage()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            debugLog?.invoke("transport close failed: ${e.javaClass.simpleName}")
+        }
     }
 
     /** Under [lock]: the epoch just bumped was issued for whatever session the jar holds now. */

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -124,7 +125,12 @@ fun LoginScreen(
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         CookieManager.getInstance().setAcceptCookie(true)
-                        webViewClient = InstagramOnlyClient()
+                        webViewClient = InstagramOnlyClient(onRendererGone = { dead ->
+                            // Its renderer died: this view is unusable and the screen has nothing to show. Close, never crash.
+                            webView = null
+                            dead.destroy()
+                            onBack()
+                        })
                         loadUrl(startPage(purpose, startUrl))
                     }.also { webView = it }
                 },
@@ -168,9 +174,24 @@ internal fun allowedUrlOrNull(url: String?): String? = url?.takeIf { it.isNotBla
  * Keeps every page inside the WebView on Instagram's own domains, and never hands a link to another app (such as the
  * Instagram app on another account). Returning true means "handled here": the navigation simply doesn't happen.
  */
-internal class InstagramOnlyClient : WebViewClient() {
+// onRenderProcessGone IS overridden below. androidx.webkit's lint check also flags the `WebViewClient()` constructor call in the
+// supertype list of every subclass, override or not, so the one remaining warning is a false positive.
+@SuppressLint("MissingOnRenderProcessGone")
+internal class InstagramOnlyClient(
+    /** Told, on the main thread, that [WebView]'s renderer is gone; the view can no longer be used and must be destroyed. */
+    private val onRendererGone: (WebView) -> Unit,
+) : WebViewClient() {
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
         !isAllowedPage(request.url)
+
+    /**
+     * A renderer that crashes or is killed by the system (memory) takes the whole app down unless the client handles it, by
+     * returning true. The view is useless from then on, so the owner is told to close it, never left to crash.
+     */
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+        onRendererGone(view)
+        return true
+    }
 }
 
 @Composable

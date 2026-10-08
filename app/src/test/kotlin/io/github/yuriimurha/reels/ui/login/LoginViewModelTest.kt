@@ -328,6 +328,40 @@ class LoginViewModelTest {
         assertEquals(LoginViewModel.Status.Done(SessionState.Valid("tester")), viewModel.status.value)
     }
 
+    /**
+     * R106: a screen opened to fix the session (log in again, finish a challenge) closes the hidden instagram.com page when it
+     * opens, so the site is not running for that account beside the visible login. Opening still costs no request.
+     */
+    @Test
+    fun aReloginOrChallengeScreenClosesTheHiddenPageWhenItOpens() = runTest {
+        for (purpose in listOf(LoginPurpose.RELOGIN, LoginPurpose.CHALLENGE)) {
+            val session = FakeLoginSession().apply { fingerprint = "s1" }
+            val viewModel = LoginViewModel(session, purpose)
+            advanceUntilIdle()
+            assertEquals(1, session.pageCloses, "$purpose")
+            assertEquals(0, session.validations, "$purpose")
+
+            // Once, when it opens: the screen's polling closes nothing more.
+            repeat(3) {
+                viewModel.onCookiesMaybeReady()
+                advanceUntilIdle()
+            }
+            assertEquals(1, session.pageCloses, "$purpose")
+        }
+    }
+
+    /** A first login (no session to fix) and the CSRF screen after a paste leave the hidden page alone. */
+    @Test
+    fun aLoginOrCsrfScreenLeavesTheHiddenPageAlone() = runTest {
+        for (purpose in listOf(LoginPurpose.LOGIN, LoginPurpose.CSRF)) {
+            val session = FakeLoginSession().apply { fingerprint = "s1" }
+            val viewModel = LoginViewModel(session, purpose)
+            viewModel.onCookiesMaybeReady()
+            advanceUntilIdle()
+            assertEquals(0, session.pageCloses, "$purpose")
+        }
+    }
+
     @Test
     fun aCsrfScreenNeverValidatesAndWaitsForTheToken() = runTest {
         session.fingerprint = "s1"
@@ -368,8 +402,13 @@ class LoginViewModelTest {
         var result: () -> SessionState = { SessionState.Valid("tester") }
         var gate: CompletableDeferred<Unit>? = null
         var validations = 0
+        var pageCloses = 0
 
         override fun currentSessionFingerprint(): String? = fingerprint
+
+        override suspend fun closeHiddenPage() {
+            pageCloses++
+        }
 
         override fun hasSessionCookies(): Boolean = fingerprint != null
 

@@ -10,6 +10,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 
 class WebSessionProbeTest {
     private val server = MockWebServer()
@@ -24,13 +25,23 @@ class WebSessionProbeTest {
     @AfterTest
     fun stop() = server.close()
 
-    private fun probe() = WebSessionProbe(HttpClientFactory.create(cookies, "UA"), cookies, base = server.url("/"))
+    private fun probe() = WebSessionProbe({ OkHttpTransport(HttpClientFactory.create(cookies, "UA"), server.url("/")) }, cookies)
+
+    private fun serve(body: String, code: Int = 200) = server.enqueue(MockResponse.Builder().code(code).body(body).build())
 
     @Test
     fun returnsTheLoggedInAccount() = runTest {
-        server.enqueue(MockResponse.Builder().code(200).body("""{"user":{"pk":42,"username":"tester"},"status":"ok"}""").build())
-        assertEquals(Account("42", "tester"), probe().currentUser())
-        assertEquals("/api/v1/users/42/info/", server.takeRequest().url.encodedPath)
+        serve("""{"form_data":{"username":"user_1"},"status":"ok"}""")
+        assertEquals(Account("42", "user_1"), probe().currentUser())
+        val request = server.takeRequest().url
+        assertEquals("/api/v1/accounts/edit/web_form_data/", request.encodedPath)
+        assertNull(request.encodedQuery)
+    }
+
+    @Test
+    fun thePkIsTheCookiesUserIdWhateverTheBodySays() = runTest {
+        serve("""{"form_data":{"username":"user_1","pk":99},"pk":98,"status":"ok"}""")
+        assertEquals(Account("42", "user_1"), probe().currentUser())
     }
 
     @Test
@@ -41,17 +52,38 @@ class WebSessionProbeTest {
     }
 
     @Test
-    fun challengeRedirectIsNotFollowed() = runTest {
-        server.enqueue(MockResponse.Builder().code(302).addHeader("Location", "/challenge/?next=/").build())
-        assertFailsWith<InstagramException.ChallengeRequired> { probe().currentUser() }
+    fun aRedirectToTheLoginPageIsLoggedOut() = runTest {
+        server.enqueue(MockResponse.Builder().code(302).addHeader("Location", "/accounts/login/?next=/").build())
+        assertFailsWith<InstagramException.LoginRequired> { probe().currentUser() }
         assertEquals(1, server.requestCount)
     }
 
     @Test
-    fun missingUsernameNeedsRepair() = runTest {
-        server.enqueue(MockResponse.Builder().code(200).body("""{"user":{},"status":"ok"}""").build())
+    fun anyOtherRedirectIsNotFollowedAndIsAChallengeWithNoUrl() = runTest {
+        server.enqueue(MockResponse.Builder().code(302).addHeader("Location", "/challenge/?next=/").build())
+        val error = assertFailsWith<InstagramException.ChallengeRequired> { probe().currentUser() }
+        assertNull(error.challengeUrl, "the target of a redirect is unknown to a browser fetch, so it is never kept")
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun missingFormDataNeedsRepair() = runTest {
+        serve("""{"user":{"username":"user_1"},"status":"ok"}""")
         val error = assertFailsWith<InstagramException.ShapeChanged> { probe().currentUser() }
-        assertEquals("user.username", error.fieldPath)
+        assertEquals("form_data", error.fieldPath)
+    }
+
+    @Test
+    fun aFormDataThatIsNotAnObjectNeedsRepair() = runTest {
+        serve("""{"form_data":"x","status":"ok"}""")
+        assertEquals("form_data", assertFailsWith<InstagramException.ShapeChanged> { probe().currentUser() }.fieldPath)
+    }
+
+    @Test
+    fun missingUsernameNeedsRepair() = runTest {
+        serve("""{"form_data":{},"status":"ok"}""")
+        val error = assertFailsWith<InstagramException.ShapeChanged> { probe().currentUser() }
+        assertEquals("form_data.username", error.fieldPath)
     }
 
     @Test
@@ -59,7 +91,7 @@ class WebSessionProbeTest {
         val dead = MockWebServer().apply { start() }
         val url = dead.url("/")
         dead.close()
-        val unreachable = WebSessionProbe(HttpClientFactory.create(cookies, "UA"), cookies, base = url)
+        val unreachable = WebSessionProbe({ OkHttpTransport(HttpClientFactory.create(cookies, "UA"), url) }, cookies)
         assertFailsWith<InstagramException.Transient> { unreachable.currentUser() }
     }
 
@@ -74,8 +106,11 @@ class WebSessionProbeTest {
     }
 
     @Test
-    fun aNullPkFallsBackToTheCookieUserId() = runTest {
-        server.enqueue(MockResponse.Builder().code(200).body("""{"user":{"pk":null,"username":"tester"},"status":"ok"}""").build())
-        assertEquals(Account("42", "tester"), probe().currentUser())
+    fun theTransportIsNotAskedWithoutASession() = runTest {
+        var asked = 0
+        cookies.clearAll()
+        val probe = WebSessionProbe({ asked++; OkHttpTransport(HttpClientFactory.create(cookies, "UA"), server.url("/")) }, cookies)
+        assertFailsWith<InstagramException.LoginRequired> { probe.currentUser() }
+        assertEquals(0, asked)
     }
 }

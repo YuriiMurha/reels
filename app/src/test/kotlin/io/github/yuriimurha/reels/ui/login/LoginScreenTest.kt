@@ -2,6 +2,7 @@ package io.github.yuriimurha.reels.ui.login
 
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.CompositionLocalProvider
@@ -24,6 +25,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 @RunWith(AndroidJUnit4::class)
 class LoginScreenTest {
@@ -32,6 +34,7 @@ class LoginScreenTest {
 
     private val session = FakeLoginSession()
     private var done = 0
+    private var backs = 0
 
     private fun findWebView(view: View): WebView? = when {
         view is WebView -> view
@@ -51,7 +54,7 @@ class LoginScreenTest {
                     LoginScreen(
                         startUrl = startUrl,
                         onDone = { done++ },
-                        onBack = {},
+                        onBack = { backs++ },
                         purpose = purpose,
                         viewModel = viewModel,
                     )
@@ -174,6 +177,35 @@ class LoginScreenTest {
         assertEquals("https://www.instagram.com/accounts/login/", shadowOf(webView()).lastLoadedUrl)
     }
 
+    private fun rendererGone(crashed: Boolean) = object : RenderProcessGoneDetail() {
+        override fun didCrash(): Boolean = crashed
+
+        override fun rendererPriorityAtExit(): Int = 0
+    }
+
+    /**
+     * A WebView whose renderer is killed (a crash, or the system reclaiming memory) takes the whole app with it unless the
+     * client says it handled that. The login screen cannot go on without its page: it destroys the view and closes.
+     */
+    private fun aRendererThatDies(crashed: Boolean) {
+        session.fingerprint = null // nobody has logged in: the screen has nothing to check, so only the renderer closes it
+        show(LoginPurpose.LOGIN)
+        val view = webView()
+
+        val handled = view.webViewClient.onRenderProcessGone(view, rendererGone(crashed))
+
+        assertTrue(handled, "returning false kills the app")
+        assertEquals(1, backs, "the screen closes through its back callback")
+        assertTrue(shadowOf(view).wasDestroyCalled(), "the dead WebView is destroyed")
+        assertEquals(0, done, "closing is not a login")
+    }
+
+    @Test
+    fun aRendererThatCrashesIsHandledByClosingTheLoginScreenNotByKillingTheApp() = aRendererThatDies(crashed = true)
+
+    @Test
+    fun aRendererTheSystemKilledIsHandledTheSameWay() = aRendererThatDies(crashed = false)
+
     private class FakeLoginSession : LoginSession {
         var fingerprint: String? = "s1"
         var validations = 0
@@ -184,6 +216,8 @@ class LoginScreenTest {
         override fun hasSessionCookies(): Boolean = fingerprint != null
 
         override fun hasCsrfToken(): Boolean = false
+
+        override suspend fun closeHiddenPage() = Unit
 
         override suspend fun validate(): SessionState {
             validations++

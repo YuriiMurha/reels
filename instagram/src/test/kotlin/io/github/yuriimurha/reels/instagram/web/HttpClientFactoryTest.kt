@@ -292,7 +292,7 @@ class HttpClientFactoryTest {
     @Test
     fun theSessionProbeReportsACrashingClientAsTransient() = runTest {
         val good = InMemoryCookieStore().apply { setCookie(site, "ds_user_id=42") }
-        val probe = WebSessionProbe(HttpClientFactory.create(ThrowingCookieStore(), "UA"), good, base = server.url("/"))
+        val probe = WebSessionProbe({ OkHttpTransport(HttpClientFactory.create(ThrowingCookieStore(), "UA"), server.url("/")) }, good)
         assertFailsWith<InstagramException.Transient> { probe.currentUser() }
     }
 

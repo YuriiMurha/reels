@@ -189,10 +189,18 @@ On the Sync screen, under **Instagram session**:
 The app keeps the session only in Android's WebView cookie store: it writes no file of its own with it and never logs
 it. Android's WebView keeps that cookie store on the phone (app-private, and excluded from backup).
 
+Instagram's API requests (the session check, the lab, sync, a video's link renewal) are sent by a hidden Instagram page
+inside the app, with the same browser engine and cookie store as the login screen, not by the app's own network code. The
+first request after the app starts, and the first after 5 minutes without one, loads instagram.com once in that page; the
+site's own requests come with that load, as they do on any visit to Instagram, and they are not counted in "Requests in 24 h".
+Thumbnails and videos are not sent that way.
+
 ## 5. First real sync
 
 Do this once, on the phone, with the throwaway account. You need the Mac set up (section 1), the phone connected
-(section 2) and the account's login (and its 2FA device).
+(section 2) and the account's login (and its 2FA device). If you are installing an update that changed how the app talks
+to Instagram, do [the box after step 6](#after-an-update-that-changes-how-the-app-talks-to-instagram) right after step 2,
+instead of step 3 (the box covers the login), and only then steps 4 and 5.
 
 1. **Install the debug build** on the phone (skip if section 3 already did; the exports from step 1.4 must be done in
    this terminal):
@@ -223,6 +231,53 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
 6. **When Sync has succeeded** (no banner, and **History → Last sync** shows a time), look at the grid and the
    collections' counts. **Only then run a Full sync.** It is the only thing that removes items, so first prove that
    the plain walk works.
+
+### After an update that changes how the app talks to Instagram
+
+The first version sent its API requests with the app's own network code, and Instagram answered the first two with HTTP
+429: a refusal, which also starts a cooldown. Now every API request is sent by a hidden Instagram page inside the app,
+the way the website sends it. Until you have seen that work once, send exactly one request first. With the new debug build
+installed (step 1 above), the phone connected by USB and the exports of step 1.4 done in this terminal:
+
+1. **Wait for any cooldown to end.** While Sync shows "Cooling down after a rate limit: N min left" the app sends nothing.
+   Don't reinstall or clear the app's data to skip it.
+2. **Clear the phone's log**, before you open Sync, so the log holds every request from here on, whichever way you go
+   next. In a terminal on the Mac:
+
+   ```bash
+   adb -d logcat -c
+   ```
+
+3. **Send exactly one request.** Open **Sync** (Mock mode off) and read the session line:
+   - **"Logged in as @handle":** open **Developer → Adapter lab** and tap **Who am I**, only that, once, then wait for the
+     result. The screen should show `200` and `ok`.
+   - **Anything else** ("Not logged in", "Session expired", "Instagram wants verification"): the lab is greyed out, because
+     it works only for a valid session. Tap **Log in** (or **Log in again**; for a verification, **Resolve on Instagram**,
+     then **Check again**). Opening Log in checks the session already on the phone at once. If the screen closes by itself
+     showing "Logged in as", that was the request. If it shows a message, stop and paste the log before logging in.
+     Otherwise the check after you log in is the one request. Either way skip Who am I and go straight to step 4. A
+     login-screen check runs with two instagram.com pages live, the login screen's and the hidden one, and the hidden page
+     is loaded afresh for it (the stored state is not "Logged in"), so its home-page load comes with that one request.
+
+   Tap no other button that sends a request. Either way the first request after the app starts also loads instagram.com
+   once in the hidden page, and the site's own requests come with that load, as they do in any browser; they are not
+   counted in "Requests in 24 h".
+4. **Paste the `InstagramHttp` log lines into a Claude session**, with what the screen showed (the code and classification
+   under Who am I, or the session line after the login):
+
+   ```bash
+   adb -d logcat -d -s InstagramHttp
+   ```
+
+   (`-d` prints what the log holds and exits.) A good answer is one line like
+   `GET api/v1/accounts/edit/web_form_data/ -> 200 (412 ms)`. The lines are safe to paste: only the path, the code and the
+   time, never a cookie, a token or a header. For any other HTTP code a second line follows: `<-- <code> reply: ...`.
+5. **Only then** log in (if you have not), use the other lab buttons ([section 7](#7-adapter-lab-and-the-spike-handback)),
+   and tap **Sync**.
+
+If the answer is a 429 ("Instagram is limiting requests"), or the line says `-> load http 429` (Instagram refused the
+home page itself, before any API request), **wait**: the cooldown banner on Sync shows how long. Don't tap again to retry;
+a second 429 within 24 hours means a 24-hour cooldown. Paste the lines first.
 
 ### The limits, in numbers
 
@@ -411,36 +466,40 @@ adb -d logcat -c
 adb -d logcat -s InstagramHttp
 ```
 
-(Ctrl-C stops it.) Debug builds log one block per request to Instagram's API (a `GET https://www.instagram.com/api/v1/...`
-line and the answer), with every cookie and token replaced by `██`. One block is one request. Thumbnails and videos are
-not in this log.
+(Ctrl-C stops it.) Debug builds log one line per request to Instagram's API: `GET <path> -> <code> (<ms> ms)`, for example
+`GET api/v1/accounts/edit/web_form_data/ -> 200 (412 ms)`. A run of three or more digits in the path shows as `<n>`. A reply
+that is not 2xx adds a second line, a redacted summary (`<-- 429 reply: ...`). Where there is no HTTP code the line says what
+happened instead (`timeout`, `login page`, `challenge page`, `load http 429`, `load http 429 (remembered)` for a 429 home
+page that a cancelled request ran into, `cancelled`, ...). Other lines can appear: `page closed (idle)` (the hidden page was
+closed after 5 minutes without a request), `page closed (owner needed)` (closed at once because the session expired or
+needs verification, or the login screen opened to fix that), and `transport reset failed: <Class>` or `transport close
+failed: <Class>` (the page could not be closed; the class name only). No cookie, token or header is logged: the app never
+sees them. One `GET` line is one call: at most one API request; a line without an HTTP status sent none (it ended before
+the request, or the page's request failed). The browser may re-send a GET after a dropped
+connection, as it would for the website itself, and the app does not see that. The hidden page's own load of instagram.com,
+thumbnails and videos are not in this log. A release build logs nothing.
 
 ### M2: session
 
 - [ ] **Log in.** Install, open **Sync → Log in**, log into the throwaway account and finish any 2FA. **Look for:**
   the screen closes and Sync shows "Logged in as @handle"; logcat shows exactly **one**
-  `GET .../api/v1/users/<id>/info/` with `Cookie: ██` and a `200`. **Report:** a pass, or the text of the message
+  `GET api/v1/accounts/edit/web_form_data/ -> 200` (then the time in ms). **Report:** a pass, or the text of the message
   under the buttons and the login screen's bar (for a shape problem it reads "Unexpected Instagram response at"
-  followed by a path such as `user` or `http.404`; note the path), and the request lines.
+  followed by a path such as `form_data` or `http.404`; note the path), and the request lines.
 - [ ] **No request at start.** Swipe the app away and reopen it. **Look for:** it still says "Logged in as @handle",
   and logcat shows **no** new request. **Report:** a pass, or the request lines that appeared.
-- [ ] **Check now, twice quickly.** **Look for:** exactly one request. **Report:** how many request blocks logcat shows.
+- [ ] **Check now, twice quickly.** **Look for:** exactly one request. **Report:** how many `GET` lines logcat shows.
 - [ ] **Log out and in again.** **Look for:** "Not logged in" after **Log out**, and **Log in** works again.
   **Report:** a pass, or the message you saw.
 - [ ] **Optional: paste.** Log out, then **Paste sessionid** from a mobile browser on this phone. **Look for:** "Logged
   in as @handle". **Report:** a pass, or the red line under the paste box ("That doesn't look like a sessionid",
   "Instagram rejected that session; your current login is unchanged", "Couldn't check that session").
-- [ ] **Header notes for the next milestone.** **Report:** the `X-IG-App-ID` value you saw, whether the
-  `X-Requested-With` header appeared, the language of any error message, any request logged twice, and whether the
-  `sessionid` changed in a checkpoint; "didn't see it" is an answer. How to look:
-  - On the Mac, open `chrome://inspect/#devices` in Chrome **before** you tap Log in. The login screen is the only
-    place the app shows a WebView, and it disappears when the screen closes, so inspect it while it is open: tap
-    **Log in**, click **inspect** under the app's WebView, open the **Network** tab, and reload the page. On any
-    `/api/v1/` request, read the `X-IG-App-ID` header. The app currently sends `936619743392459`, the desktop-web
-    value; mobile web often uses `1217981644879628`.
-  - On the same requests, does an `X-Requested-With: io.github.yuriimurha.reels` header appear?
+- [ ] **Notes for the next milestone.** **Report:** the language of any error message, any request logged twice, and
+  whether the `sessionid` changed in a checkpoint; "didn't see it" is an answer. (The `X-IG-App-ID` is settled: the hidden
+  page sends the mobile website's `1217981644879628`. The WebView's own `X-Requested-With: io.github.yuriimurha.reels` header
+  was seen on the emulator on every request the WebView makes itself, and the app cannot turn it off.) How to look:
   - If an error message appears, is it in your phone's language?
-  - Does any request show up twice in logcat?
+  - Does any tap show up twice in logcat (two `GET` lines for one request)?
   - If you hit a checkpoint: did the `sessionid` change during it?
 
 ### M3: Adapter lab and the seven spike questions
@@ -449,8 +508,8 @@ not in this log.
   Claude session answers the seven questions from them; the lines below say where each answer is (the shape on
   screen, or the same key in the exported file) and what only you can supply.
   - [ ] **1. Endpoints and headers.** Each button's HTTP code and classification should read `200` and `ok`. **Needs
-    you:** the `X-IG-App-ID` the mobile site sends (the M2 note above). **Report:** the code and classification of
-    the five buttons, and the header value, or "not found".
+    you:** nothing more (the `X-IG-App-ID` the mobile site sends is known: `1217981644879628`). **Report:** the code and
+    classification of the five buttons.
   - [ ] **2. `saved_collection_ids`.** In **All Saved (page 1)**, under `items` → `[0]` → `media`: is there a
     `saved_collection_ids` array, and is it filled for an item you know sits in a collection? **Report:** yes, no, or
     present-but-empty. If yes, a Claude session flips `SAVED_COLLECTION_IDS_CONFIRMED` (in
@@ -478,8 +537,8 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 
 - [ ] **QUICK sync.** Tap **Sync** on the empty real library. **Look for:** the phase moves through "Checking
   session", "Listing collections" and "Syncing All Saved", then each collection; logcat shows one request every
-  4–12 s and a longer pause (60–180 s) after every 15–30; **Requests in 24 h** rises by about the number of request
-  blocks in logcat; the run ends with no banner (or pauses at "Run budget reached, tap Resume": tap
+  4–12 s and a longer pause (60–180 s) after every 15–30; **Requests in 24 h** rises by about the number of `GET`
+  lines in logcat; the run ends with no banner (or pauses at "Run budget reached, tap Resume": tap
   **Resume**); the grid has thumbnails. **Report:** the Sync screen's counters at the end (Collections, New items,
   Items seen, Thumbnails cached, Failures, Requests, Requests in 24 h), how long it took, and any banner.
 - [ ] **Cancel and resume.** During a run tap **Cancel**, then **Resume**. **Look for:** it carries on from where it
@@ -514,22 +573,22 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 - [ ] **Plays.** Open a reel. **Look for:** picture and sound start within a few seconds, it loops, a tap pauses, and
   **Mute** / **Unmute** sticks across reels and a restart. **Report:** a pass, or the reel and what happened.
 - [ ] **Link renewal.** With logcat running, open a reel shortly after a sync (its link is fresh), then open one a day
-  or more later. **Look for:** no `.../api/v1/media/<id>/info/` request for the fresh one; exactly **one** for the old
+  or more later. **Look for:** no `GET api/v1/media/<n>/info/` line for the fresh one; exactly **one** for the old
   one, then it plays. The next reel's link may be renewed in advance, once, after the current one plays. **Report:**
   the request lines and when the reel was synced.
 - [ ] **Offline playback from the cache.** Watch a reel through at least one loop, then switch on airplane mode and
   open it again. **Look for:** it plays. Open a reel you have never watched: it shows a message over its thumbnail
   with **Open on Instagram** under it. **Report:** the message text.
 - [ ] **403 and 410 recovery.** It can't be forced. If a reel fails right after you open it, **look for:** one
-  `.../api/v1/media/<id>/info/` request (the renewal) and then playback, or "Can't play this video" if the renewed
+  `GET api/v1/media/<n>/info/` line (the renewal) and then playback, or "Can't play this video" if the renewed
   link fails too. **Report:** the request lines and what the screen showed.
 - [ ] **A 403 on one reel's link renewal,** only if it happens. The app reads an HTTP 403 from Instagram as "the session
   is gone", and can't tell it from a 403 about that one reel (a private or removed one, say). So after a 403 on a
-  `.../api/v1/media/<id>/info/` request, **Instagram session** reads "Session expired", the viewer says "Instagram
+  `GET api/v1/media/<n>/info/` request, **Instagram session** reads "Session expired", the viewer says "Instagram
   session needs attention (Sync screen)", and a sync that is running stops ("Session expired"). If you see that while
   everything else worked, tap **Check now** before you log in again. **Look for:** whether Check now says "Logged in as
   @handle" (then the session was fine and the 403 was about that reel; **Resume** a stopped sync). **Report:** the
-  logcat lines of that request (its id and the `403`), what Check now said, and the reel's link from **Open on
+  logcat lines of that request (the `403` and the `<-- 403 reply:` line after it), what Check now said, and the reel's link from **Open on
   Instagram**.
 - [ ] **Smoothness on a `TextureView`.** The viewer draws on a `TextureView`, because the default surface often failed
   to show the picture of a page you swiped back to (audio played under the thumbnail). Swipe through at least 20
@@ -671,8 +730,8 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
   - "Instagram session is not logged in", "Instagram requires verification", "Instagram is limiting requests",
     "Temporary network or server problem": what it says. Wait or fix it, then **Check now**.
   - "Unexpected Instagram response at `<path>`": Instagram's answer to the session check isn't what the app expects
-    (`user` and `user.username` are the two fields it reads; `http.404` means the endpoint is wrong). Paste it in a
-    Claude session with the `chrome://inspect` note from the M2 checklist.
+    (`form_data` and `form_data.username` are the two fields it reads; `http.404` means the endpoint is wrong). Paste it in
+    a Claude session with the `InstagramHttp` lines (see the next point).
   - "Cooling down after a rate limit" or "The 24-hour request budget is used up": the app sent nothing. See the
     cooldown and budget rules in section 5.
   - "That session isn't valid yet. Finish logging in, then check again." (login screen): you aren't through Instagram's
@@ -680,8 +739,9 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
   - "Finished verifying on Instagram?" with **Check again** (login screen): tap it once the check in the page is done.
 - **A login check or Check now ends in a cooldown** ("Instagram is limiting requests", "Cooling down after a rate limit"):
   run this on the Mac BEFORE you retry (a second rate limit within 24 hours means a 24-hour cooldown, and the phone's log
-  buffer rotates), then paste the line containing `reply:` into a Claude session. A debug build logs one redacted line per
-  error reply from Instagram (a few safe fields, never the page, a URL or a cookie), for example
+  buffer rotates), then paste the `GET` line and the line containing `reply:` next to it into a Claude session (a refused
+  home page, `-> load http 429`, has only the `GET` line). A debug build logs one redacted line per error reply from
+  Instagram (a few safe fields, never the page, a URL or a cookie), for example
   `<-- 401 reply: status=fail message="..." require_login=true keys=[...]`:
 
   ```bash

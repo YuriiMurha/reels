@@ -25,6 +25,8 @@ class VideoWiringGuardTest {
             assertTrue(expected in arguments, "the real resolver must be built with $expected: $arguments")
         }
         assertTrue("Pacer(" !in arguments, "the resolver must not build a Pacer of its own: $arguments")
+        // T8: it reaches Instagram only through the backend's client (and so the Pacer's gate), never the transport itself.
+        assertTrue(Regex("""\b[iI]nstagramTransport\b""").find(arguments) == null, "the resolver must not get the transport: $arguments")
     }
 
     /** R76: the link refresh may only run under a valid session; the container's readiness check reads the stored session state. */
@@ -59,7 +61,7 @@ class VideoWiringGuardTest {
     /** A video request carries no cookies (spec 8.3): nothing on the video path may touch the jar or Instagram's API client. */
     @Test
     fun theVideoPathNeverTouchesACookieJar() {
-        val forbidden = Regex("""CookieHandler|CookieManager|CookieStore|cookieStore|CookieJar|instagramHttp|setDefaultRequestProperties|"Cookie"""")
+        val forbidden = Regex("""CookieHandler|CookieManager|CookieStore|cookieStore|CookieJar|instagramHttp|instagramTransport|InstagramTransport|WebViewTransport|setDefaultRequestProperties|"Cookie"""")
         for (path in listOf("data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt", "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt")) {
             val hit = forbidden.find(main(path))
             assertTrue(hit == null, "$path must not use a cookie jar or the API client: ${hit?.value}")

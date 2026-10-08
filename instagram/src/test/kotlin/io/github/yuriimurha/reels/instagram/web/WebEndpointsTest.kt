@@ -44,6 +44,20 @@ class WebEndpointsTest {
         }
     }
 
+    /** The hidden page's landing rule (the transport asks this before every call). */
+    @Test
+    fun aPagesPathSaysWhetherTheOwnerMustLogInOrVerify() {
+        for (path in listOf("/accounts/login/", "/accounts/login", "/accounts/login/two_factor/")) {
+            assertEquals(WebEndpoints.Landing.LOGIN, WebEndpoints.landingOf(path), path)
+        }
+        for (path in listOf("/challenge/", "/challenge/action/AXabc/", "/accounts/suspended/")) {
+            assertEquals(WebEndpoints.Landing.CHALLENGE, WebEndpoints.landingOf(path), path)
+        }
+        for (path in listOf("/", "", "/explore/", "/accounts/onetap/", "/accounts/edit/", "/api/v1/accounts/login/", "/reel/challenge/")) {
+            assertNull(WebEndpoints.landingOf(path), path)
+        }
+    }
+
     @Test
     fun onlyHttpsWithAHostIsAllowed() {
         assertFalse(WebEndpoints.isLoginPage("http", "www.instagram.com"))
@@ -64,12 +78,32 @@ class WebEndpointsTest {
         assertEquals("[\"ALL_MEDIA_AUTO_COLLECTION\",\"MEDIA\",\"AUDIO_AUTO_COLLECTION\"]", list.queryParameter("collection_types"))
     }
 
+    @Test
+    fun theLoginCheckIsTheEditFormEndpoint() {
+        val url = WebEndpoints.currentUser()
+        assertEquals("/api/v1/accounts/edit/web_form_data/", url.encodedPath)
+        assertNull(url.encodedQuery)
+        assertEquals("https://www.instagram.com/api/v1/accounts/edit/web_form_data/", url.toString())
+    }
+
+    @Test
+    fun relativeIsTheEncodedPathAndQueryWithoutALeadingSlash() {
+        val b = WebEndpoints.BASE
+        assertEquals("api/v1/accounts/edit/web_form_data/", WebEndpoints.relative(WebEndpoints.currentUser()))
+        assertEquals("api/v1/feed/saved/posts/", WebEndpoints.relative(WebEndpoints.savedPosts(b, null)))
+        assertEquals("api/v1/feed/saved/posts/?max_id=a%2Bb%2Fc%3D", WebEndpoints.relative(WebEndpoints.savedPosts(b, "a+b/c=")))
+        // Whatever the encoding, resolving the relative form against the base gives the same URL back.
+        val list = WebEndpoints.collections(b, "c 1")
+        assertEquals(list, b.resolve(WebEndpoints.relative(list)))
+        assertTrue(WebEndpoints.relative(list).startsWith("api/v1/collections/list/?collection_types="))
+    }
+
     /** P6: one host per client, so OkHttp never coalesces connections and never re-sends after a 421. */
     @Test
     fun everyApiEndpointStaysOnTheBaseHost() {
         val b = WebEndpoints.BASE
         listOf(
-            WebEndpoints.currentUser(b, "42"), WebEndpoints.collections(b, "x"), WebEndpoints.savedPosts(b, "x"),
+            WebEndpoints.currentUser(), WebEndpoints.collections(b, "x"), WebEndpoints.savedPosts(b, "x"),
             WebEndpoints.collectionPosts(b, "1", "x"), WebEndpoints.mediaInfo(b, "1"),
         ).forEach { assertEquals("www.instagram.com", it.host); assertEquals("https", it.scheme) }
     }

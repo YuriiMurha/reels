@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.rules.TestRule
@@ -42,14 +43,25 @@ internal fun isEmulator(
         hardware.lowercase() in setOf("ranchu", "goldfish") ||
         "sdk" in product.lowercase().split('_')
 
+internal const val TRANSPORT_BUILT_IN_MOCK_MODE =
+    "Mock mode built the WebView transport (the hidden instagram.com page). The fake library must never touch it."
+
 /**
  * Fails (not skips) when this process runs on the real library. `usesFake` is read once per process from the stored
  * choice, so this is exactly what the app is doing right now. A test must never flip the switch: that restarts the process.
+ * Also fails when anything in Mock mode has built the WebView transport, which is what would reach Instagram.
  */
 internal fun requireMockMode() {
     val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as ReelsApp
     assertTrue("This is a release build; the smoke tests need the debug build with Mock mode.", BuildConfig.DEBUG)
     assertTrue(MOCK_MODE_OFF, app.container.usesFake)
+    requireNoTransport()
+}
+
+/** Mock mode never creates the WebView transport (so never the hidden page): checked before and after every smoke test. */
+internal fun requireNoTransport() {
+    val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as ReelsApp
+    assertFalse(TRANSPORT_BUILT_IN_MOCK_MODE, app.container.instagramTransportCreated)
 }
 
 /** Skips on a physical device, fails when Mock mode is off. Both before anything is launched or tapped. */

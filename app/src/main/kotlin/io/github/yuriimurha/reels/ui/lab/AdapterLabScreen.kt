@@ -53,6 +53,7 @@ fun AdapterLabScreen(
                 sessionState = container.session.state,
                 signals = container.session,
                 labDir = labDir,
+                beforeCall = container::allowNewInstagramAttempts,
             )
         }
     },

@@ -6,6 +6,9 @@ import kotlin.random.Random
 
 private val BACKOFF_MS = longArrayOf(30_000, 60_000, 120_000, 240_000)
 
+/** The longest single wait [retryTransient] makes: the last backoff with its full +20 % jitter (288 s). */
+val LONGEST_TRANSIENT_WAIT_MS: Long = BACKOFF_MS.last() * 6 / 5
+
 /**
  * Retries [block] after [InstagramException.Transient] with 30 s, 60 s, 120 s, 240 s waits (each ±20 %),
  * then rethrows (spec 6.4). Any other failure propagates immediately. Wrap each attempt in the Pacer so

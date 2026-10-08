@@ -108,6 +108,8 @@ dependencies {
     implementation(libs.coil.compose)
     // Installs the baseline profiles (the libraries' own and baseline-prof.txt) on a sideloaded build, which Play would otherwise do (P9).
     implementation(libs.androidx.profileinstaller)
+    // WebViewCompat.addWebMessageListener for the WebView transport (AndroidWebPage).
+    implementation(libs.androidx.webkit)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 
@@ -130,6 +132,8 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.rules)
     androidTestImplementation(libs.androidx.test.espresso.core)
+    // A local server for the hidden-page tests (AndroidWebPageTest): they never reach Instagram.
+    androidTestImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
 }

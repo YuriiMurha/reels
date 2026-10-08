@@ -8,26 +8,41 @@ this file describes only what exists.
 
 The code for M0 to M6 is complete and unit-tested, with fakes and MockWebServer only. No agent has logged in to
 Instagram or sent it a request, and the emulator only ever ran the debug build in Mock mode or the release build logged
-out (once also on the fake backend, through a temporary local edit). What is still unconfirmed needs the owner's phone
-(the README's checklist, `TODO.md`):
+out (once also on the fake backend, through a temporary local edit), plus the hidden page's own tests, which load only
+local servers. What is still unconfirmed needs the owner's phone (the README's checklist, `TODO.md`):
 
+- **The WebView transport.** The first two API requests the app made on the owner's phone, sent by OkHttp before this
+  change, were answered HTTP 429. Every API call now runs inside a hidden instagram.com page ([Transport](#transport)),
+  which has never met Instagram. First on the phone: the hidden page loads and one request answers 200, Who am I if
+  Logged in, otherwise the login check (R102) (README section 5, "After an update that changes how the app talks to
+  Instagram").
 - **M2:** the WebView login itself.
 - **M3:** the endpoints, headers and JSON shapes. They are candidates from instaloader and instagrapi, pinned by
-  synthetic fixtures, until the Adapter lab shows the real responses.
+  synthetic fixtures, until the Adapter lab shows the real responses. The login check's endpoint
+  (`accounts/edit/web_form_data/`) and the mobile web app id (`1217981644879628`, from a capture of the mobile site) are
+  as new as the transport.
 - **M4:** a real Sync and Full sync, the budgets, the cooldown display and the challenge stop.
 - **M5:** playing real reels, link renewal and the cache.
-- **M6:** the release build's real client, CDN fetcher and WebView login under R8.
+- **M6:** the release build's hidden-page transport, real client, CDN fetcher and WebView login under R8.
 
 A debug build starts in Mock mode (the fake library); a release build always uses the real one.
 
 ## How it fits together
 
-- `:instagram` (pure Kotlin/JVM) is the only place that knows Instagram: endpoints, headers, pagination, JSON fields.
-  `:app` reaches it through the `InstagramClient` contract; it builds no Instagram URL or header and parses no Instagram
-  JSON (a grep of `app/src/main` for the domains is empty).
+- `:instagram` (pure Kotlin/JVM) is the only place that knows Instagram: endpoints, header constants, pagination, JSON
+  fields. `:app` reaches it through the `InstagramClient` contract; it builds no Instagram URL and parses no Instagram
+  JSON, and the hidden page's landing rule (which paths mean "log in" or "verify") is `WebEndpoints.landingOf`. Two small
+  things in `:app` do repeat Instagram's names, as named exceptions: `ig_fetch.js` (the hidden page's script: the three
+  constant header values, which `WebViewTransportTest` pins to `WebHeaders`, and the names it needs to build the site's own
+  request, the header names, the `csrftoken` cookie and the `www-claim-v2` storage key, pinned by the same test) and
+  `AndroidWebPage`'s default origin (the one origin its message bridge accepts; `AndroidWebPageGuardTest` pins it to the
+  scheme and host of `WebEndpoints.HOME_URL`, and `BackendWiringGuardTest` that the container passes no other). Outside
+  comments, a grep of `app/src/main` for the domains finds only that origin.
 - `AppContainer` hand-wires `:app`, one per process. It picks a backend (fake or real) once per process, and the library
   database, thumbnails, client, fetcher and video resolver follow that choice.
-- Every Instagram API request, from a sync, a session check, the viewer or the lab, goes through the one `Pacer`.
+- Every Instagram API request, from a sync, a session check, the viewer or the lab, goes through the one `Pacer` and then
+  through the one `WebViewTransport` ([Transport](#transport)): one `fetch` in a hidden instagram.com page per call.
+  Thumbnails and videos do not: they use cookieless clients.
 - Sync runs in a WorkManager foreground worker and writes Room; the screens read Room.
 
 ## Components
@@ -35,7 +50,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Component | Where | What it does |
 |---|---|---|
 | Build | `settings.gradle.kts`, `gradle/libs.versions.toml`, `app/build.gradle.kts`, `app/proguard-rules.pro`, `app/src/main/baseline-prof.txt` | Two modules, one version catalog. Minified release build with a baseline profile and optional own signing key. [Details](#build-and-release). |
-| `:instagram` | `instagram/` | Pure Kotlin/JVM: the adapter contract, the real web client, parsers, error classification, the fake client. [Details](#instagram). |
+| `:instagram` | `instagram/` | Pure Kotlin/JVM: the adapter contract, the transport seam, the real web client, parsers, error classification, the fake client. [Details](#instagram). |
 | Adapter lab (core) | `instagram/.../lab/` | One request per call; a redacted shape and a scrubbed copy of the answer (spec 6.3). [Details](#adapter-lab-core). |
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
 | Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`, `*.p12`, `*.pfx`; compared in lower case), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
@@ -44,10 +59,11 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
 | Video | `app/.../data/media/`, `ui/viewer/` | On-demand playback with a `pk`-keyed cache (spec 8). [Details](#video). |
 | Pacer | `app/.../sync/pacing/` | The single gate for Instagram API calls. [Details](#pacer). |
+| Transport | `app/.../transport/`, `app/src/main/assets/ig_fetch.js` | Sends every Instagram API call as a same-origin `fetch` inside a hidden instagram.com WebView page. [Details](#transport). |
 | Settings | `app/.../data/settings/SettingsStore.kt` | DataStore preferences: `muted`; the persisted cooldown (`cooldown_until`, `last_rate_limit_at`); the session state (`session_kind`, `session_handle`, `session_challenge_url`, encoded by the session package; the session itself is only in the cookie jar); and the Instagram account each library belongs to (R84: `library_account_pk_real`, `library_account_pk_fake`, read and written through `sync/LibraryAccount.kt`'s `StoredLibraryAccount`; a corrupt file loses it, and the next run then adopts its own account). A settings file that cannot be read is replaced by `corruptionFallback` (ruling R54), not by empty preferences: `cooldown_until = now + 1 h` (the Pacer's `Cooldowns.SHORT_MS`) and `last_rate_limit_at = now`, so a corruption never silently ends an active cooldown and a rate limit in the next 24 h escalates straight to the 24 h tier; the session keys stay empty, which reads as LoggedOut until validation runs. Budgets persist in `api_request` (`RoomRequestLog`). |
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
-| Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. [Details](#wiring). |
+| Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 times per user action (counted again after an idle close). [Details](#wiring). |
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks` (an `ACTION_VIEW` intent, so whichever app handles the link). Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
@@ -88,8 +104,9 @@ A debug build starts in Mock mode (the fake library); a release build always use
     through the custom `WorkerFactory`, Room writes, FTS), Home cards and a collection grid (Coil, route decoding), the
     viewer playing the bundled clip (Media3 through `VideoCache`), the mute toggle (DataStore, kept across a cold restart),
     a swipe to the next reel, Search and Back. No `FATAL`, `ClassNotFound` or `NoSuchMethod`, so no further keep rule.
-  - **Not exercised under R8** (it needs Instagram, which no agent contacts): the real client (OkHttp and the JSON
-    parsing in `:instagram`), the CDN fetcher and the WebView login.
+  - **Not exercised under R8** (it needs Instagram, which no agent contacts): the real client (the hidden-page transport
+    with its `ig_fetch.js` asset and `androidx.webkit` message listener, and the JSON parsing in `:instagram`), the CDN
+    fetcher (OkHttp) and the WebView login.
 - **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, README "Automated smoke tests"):
   `SmokeTest` drives the debug app through its real UI on the emulator, in Mock mode: Home, Sync (logged-out session, the
   Developer section, a fake Sync to the end), grid, viewer, video playback and Search, with a screenshot per step in the
@@ -112,35 +129,59 @@ Pure Kotlin/JVM.
   `Transient`, `ShapeChanged(fieldPath)`); `Permalinks`; and `FakeInstagramClient` over a deterministic `FakeLibrary`
   with scripted failures. `mediaInfo` returns `RemoteMedia?`: null means Instagram no longer has the item (P8).
 - **Web layer.**
-  - A CookieStore bridge (OkHttp to the shared cookie jar, Set-Cookie written back) and WebView-identity headers
-    (`WebHeaders`: the WebView's user agent, `X-IG-App-ID` 936619743392459, `X-Requested-With: XMLHttpRequest`, Accept,
-    Referer, and `X-CSRFToken` from the cookie when it is header-safe).
-  - `HttpClientFactory.create` builds the API client: no redirects, no connection retries, 15 s connect and 30 s read,
-    redacted debug logging (Cookie, Set-Cookie, X-CSRFToken, Location and the `ig-set-*` headers), an outermost crash guard
-    (an unchecked failure leaves as an `IOException` that names only its class), `noRetryAfterOn503`, and `SessionGuard`.
-  - Debug builds (a logger is passed; release passes null and gets neither logger) also log a redacted one-line summary of
-    every non-2xx Instagram reply (`ErrorReplyLogger`, a network interceptor placed before the header log, so the line
-    follows that response's headers): `<-- 401 reply: status=fail message="..." error_type="..." require_login=true
-    spam=false lock=false keys=[...]`, allowlisted fields only. Each string value goes through the Adapter lab's
-    `LabRules.isVisibleString` and is written `<redacted len N>` if it fails; key names go through `LabRules.isSafeName`
-    and the rest are only counted (`+N other`); a body that is not a JSON object logs only `non-JSON, <content-type>,
-    <length> bytes`. No URL, cookie, id, handle or raw body is ever printed, and a 2xx is never touched. It peeks at most
-    16 KiB (`Response.peekBody`), so the caller's body is whole, and un-gzips the peek itself (a network interceptor sees
-    the wire bytes; OkHttp un-zips only after them). This deliberately amends spec 4.4's "response bodies are never
-    logged" for debug builds only, and only for these fields. No request is added, so no pacing or concurrency changes.
+  - **The transport seam.** `InstagramTransport.get(pathAndQuery)` makes exactly one GET per call and never retries or
+    follows a redirect. The path is relative to `https://www.instagram.com/` (no leading slash) and built only by
+    `WebEndpoints`. It answers a `RawReply(code, contentType, body, redirected)`: `body` is null when it could not be
+    read, `redirected` is true for a redirect that was not followed (a browser `fetch` hides where it led), and
+    `toString()` never prints the body. `WebInstagramClient`, `WebSessionProbe` and `AdapterLab` take a transport (as a
+    lambda, asked for on the first call that needs one), not an HTTP client. Production has one, `WebViewTransport`
+    (see [Transport](#transport)).
+  - **`classifyReply` is the one rule that turns a reply into a failure,** whatever transport got it: a redirect is
+    `ChallengeRequired(null)`; a null body is `Transient` on a 2xx or 5xx and uses the header-only rules (`classifyUnreadable`)
+    on a 3xx or 4xx; anything else goes through `ErrorClassifier.classify(code, null, contentType, body)`. A body that passes it must still be a JSON object for the
+    parsers, or it is `ShapeChanged("$")`.
+  - **Header constants.** `WebHeaders.APP_ID` is `1217981644879628` (the mobile website's id, from a capture) and
+    `WebHeaders.ASBD_ID` is `359341`. The hidden page's script sends them with `x-requested-with: XMLHttpRequest`,
+    `x-csrftoken` and `x-ig-www-claim` (both read inside the page); the browser adds everything else (user agent, client
+    hints, Sec-Fetch, Referer, cookies).
+  - **The OkHttp API client is JVM-test code now.** `OkHttpTransport` over `HttpClientFactory.create(cookies, userAgent,
+    logger)` is how the MockWebServer suites of the client, the probe and the lab run. Nothing in `:app`'s `src/main`
+    uses it, and `BackendWiringGuardTest` fails if something starts to. It keeps everything it had, each still pinned by
+    its own tests: no redirects, no connection retries, 15 s connect and 30 s read; the cookie bridge (`CookieStoreJar`:
+    OkHttp to the shared cookie store, Set-Cookie written back); `WebHeaders.interceptor` (the WebView user agent, the two
+    ids, `X-Requested-With`, Accept, Referer, and `X-CSRFToken` from the cookie when it is header-safe); redacted debug
+    logging (Cookie, Set-Cookie, X-CSRFToken, Location and the `ig-set-*` headers); an outermost crash guard (an unchecked
+    failure leaves as an `IOException` that names only its class); `noRetryAfterOn503`; `SessionGuard`; and
+    `ErrorReplyLogger`. **Why none of it was removed:** `SessionGuard`, `CookieStoreJar` and `ErrorReplyLogger` are used
+    only inside `HttpClientFactory.create`, and that factory is what the MockWebServer suites build their client with
+    (`WebInstagramClientTest`, `WebSessionProbeTest`, `AdapterLabTest`, `WebJsonTest`, `OkHttpTransportTest`), and what
+    `HttpClientFactoryTest`, `ErrorReplyLoggerTest` and `SessionGuardTest` assert (`CookieStoreJarTest` tests the jar
+    directly). Deleting them would mean rebuilding that test client and dropping those tests, which is not a clean
+    deletion; a later change can port the suites to a fake transport and remove the whole client (`TODO.md`).
+  - **Debug logging of error replies** (`ErrorReplySummary`, the one line for a non-2xx reply, whichever transport got it).
+    `WebViewTransport` writes it after its `GET` line (see [Transport](#transport)); `ErrorReplyLogger` writes it for the
+    test client, as a network interceptor placed before the header log. The line is a redacted one-line summary:
+    `<-- 401 reply: status=fail message="..." error_type="..." require_login=true spam=false lock=false keys=[...]`,
+    allowlisted fields only. Each string value goes through the Adapter lab's `LabRules.isVisibleString` and is written
+    `<redacted len N>` if it fails; key names go through `LabRules.isSafeName` and the rest are only counted (`+N other`); a
+    body that is not a JSON object logs only `non-JSON, <content-type>, <length> bytes`. No URL, cookie, id, handle or raw
+    body is ever printed, and a 2xx is never touched. `ErrorReplyLogger` peeks at most 16 KiB (`Response.peekBody`), so the
+    caller's body is whole, and un-gzips the peek itself (a network interceptor sees the wire bytes; OkHttp un-zips only
+    after them). This deliberately amends spec 4.4's "response bodies are never logged" for debug builds only, and only
+    for these fields. No request is added, so no pacing or concurrency changes.
   - `HttpClientFactory.createCdn` builds the CDN client (below).
-- **`SessionGuard`** is the API client's first (outermost) network interceptor. It takes the `sessionid` the request
-  actually carries from its `Cookie` header (OkHttp loads that header before it connects, and network interceptors run
-  after the connection is up, so reading the jar at that point would miss a logout during the handshake), and compares it
-  with the jar's `sessionid` when the answer is back. If they differ (a logout, a paste or another login during the
-  flight) it returns the response with every `Set-Cookie` header removed, just before OkHttp's cookie bridge would store
-  them. This narrows the race, it does not close it: a change between the guard's read and the bridge's store, a few
-  instructions later, is not seen. The CDN client has no jar and needs none. Both reads, "sent" (the request's header) and
-  "now" (the jar through `CookieStore.cookieValue`), go through ONE parser, `internal fun cookieValueIn(header, name)` in
-  `CookieStore.kt`, so the comparison can't drift: pairs split at `;` and trimmed, a pair matches only with the exact
-  case-sensitive prefix `name=`, the value is everything after the first `=`, an empty value is null, and the first matching
-  pair decides. `CookieValueInTest` pins those cases and, as source pins, that neither call site parses a header itself.
-  (`CookieStoreJar.loadForRequest` enumerates every cookie for OkHttp and keeps its own, more forgiving split.)
+- **`SessionGuard`** (test client only: no longer on any API path, because Chromium stores the page's cookies itself and the
+  page is destroyed before the session changes, see [Transport](#transport)) is the OkHttp client's first network
+  interceptor. It takes the `sessionid` the request actually carries from its `Cookie` header (OkHttp loads that header
+  before it connects, so reading the jar after the handshake would miss a logout during it) and compares it with the jar's
+  `sessionid` when the answer is back; if they differ it returns the response with every `Set-Cookie` header removed, just
+  before OkHttp's cookie bridge would store them. This narrows the race, it does not close it. The CDN client has no jar and
+  needs none. Both reads, "sent" (the request's header) and "now" (the jar through `CookieStore.cookieValue`), go through ONE
+  parser, `internal fun cookieValueIn(header, name)` in `CookieStore.kt`, so the comparison can't drift: pairs split at `;`
+  and trimmed, a pair matches only with the exact case-sensitive prefix `name=`, the value is everything after the first `=`,
+  an empty value is null, and the first matching pair decides. `CookieValueInTest` pins those cases and, as source pins,
+  that neither call site parses a header itself. (`CookieStoreJar.loadForRequest` enumerates every cookie for OkHttp and
+  keeps its own, more forgiving split.)
 - **The CDN client** (`HttpClientFactory.createCdn`) is cookieless (no jar at all, only the WebView user agent reduced to
   printable ASCII, so the header can't throw; 15 s connect, 30 s read) and every download is ONE request on the wire.
   `retryOnConnectionFailure(false)` alone does not give that in OkHttp 5.5: it neither stops the follow-up after a 503 with
@@ -153,7 +194,7 @@ Pure Kotlin/JVM.
   application ones: only a network interceptor sees a 503 or a 421 before OkHttp's own follow-up logic can re-send it, and
   the MockWebServer test of the 421 cannot tell the difference (its 421 is not on a coalesced connection).
 - **Where Instagram strings live.** `WebEndpoints` owns every Instagram URL and host the app needs (the home and login
-  pages, the API base, the login host allowlist and its dot-boundary matcher `isLoginPage`) and `WebSessionCookies` the
+  pages, the API base and each endpoint, the login host allowlist and its dot-boundary matcher `isLoginPage`) and `WebSessionCookies` the
   exact Set-Cookie values and origin for a pasted session and its rollback, so `:app` spells no Instagram URL or cookie
   attribute out.
 - **`ErrorClassifier`** maps one response to a typed failure, in this precedence:
@@ -166,12 +207,18 @@ Pure Kotlin/JVM.
     `ShapeChanged("status")`.
 
   A challenge URL is kept only when it is https on `instagram.com` or a subdomain. A 3xx or 4xx whose body can't be read is
-  classified from its headers alone (`classifyUnreadable`, the one rule `getJsonObject` and the lab share): a cut 429 is
-  still `RateLimited`, a cut 403 `LoginRequired`, a cut redirect to `/challenge/` `ChallengeRequired`, and a plain cut 4xx
-  becomes `ShapeChanged("http.<code>.unreadable")`, which `mediaInfo` does not read as "not found" (the lost body may have
-  held a challenge or a rate limit).
-- **`WebSessionProbe`** answers `currentUser()` via `api/v1/users/{ds_user_id}/info/`; the id comes from the `ds_user_id`
-  cookie and must be digits, else no session.
+  classified from its headers alone (`classifyUnreadable`, called by `classifyReply` for the client, the probe and the lab
+  alike): a cut 429 is still `RateLimited`, a cut 403 `LoginRequired`, a cut redirect to `/challenge/` `ChallengeRequired`,
+  and a plain cut 4xx becomes `ShapeChanged("http.<code>.unreadable")`, which `mediaInfo` does not read as "not found" (the
+  lost body may have held a challenge or a rate limit). The redirect rules need a `Location`, which only the OkHttp test
+  transport sees. A page's `fetch(..., {redirect: 'manual'})` reports every redirect as opaque, so with the WebView
+  transport every redirect is `RawReply(redirected = true)`, and `classifyReply` makes it `ChallengeRequired(null)`; only a
+  page that is itself ON `/accounts/login` is `LoginRequired` (the transport checks where the page is, below).
+- **`WebSessionProbe`** answers `currentUser()` via `api/v1/accounts/edit/web_form_data/`, the account edit form the website
+  loads for the logged-in user, and reads `form_data.username` (a missing `form_data` or `form_data.username` is
+  `ShapeChanged` with that path). The URL carries no id: the pk is the `ds_user_id` cookie, which must be digits, else no
+  session, so a logged-out probe sends nothing and builds no transport. (It replaced `api/v1/users/{id}/info/`, the OkHttp
+  login check that Instagram answered with 429.)
 - **`WebParsers`** turn the collections, saved-posts and media-info JSON into `Page<RemoteCollection>`,
   `Page<RemoteMedia>` and `RemoteMedia?`.
   - Unknown keys are ignored. A missing required field throws `ShapeChanged` with its path (`items[1].media.user`).
@@ -188,20 +235,21 @@ Pure Kotlin/JVM.
   carousel uses its first child's candidates) and reads the CDN link expiry from the hex `oe` parameter.
 - **`WebInstagramClient`** is the real `InstagramClient`. `WebEndpoints` builds the four candidate URLs (P4:
   `collections/list/` with the three `collection_types`, `feed/saved/posts/`, `feed/collection/{id}/posts/`,
-  `media/{pk}/info/`; the cursor is `max_id`), `getJsonObject` fetches them through the shared cookie jar, `WebParsers`
+  `media/{pk}/info/`; the cursor is `max_id`), the transport fetches them (`classifyReply`, then the JSON object), `WebParsers`
   parses them, and `currentUser` is the `WebSessionProbe`.
   - It makes exactly one request per call and never retries (the caller paces every call through the Pacer, so it adds no
-    request rate or concurrency). The `OkHttpClient` is built lazily on the first call (the user agent comes from the
-    WebView provider), so constructing the client sends nothing.
+    request rate or concurrency). The transport is asked for lazily on the first call that needs it, so constructing the
+    client sends nothing and builds no page.
   - A collection or media id goes into a URL path, so anything but 1 to 30 digits is a `ShapeChanged` before any request.
-  - **P6:** every endpoint builder stays on the base host (`www.instagram.com`) and a test pins it, so one client talks to
-    one host, OkHttp never coalesces HTTP/2 connections and never re-sends after a 421.
+  - **P6:** every endpoint builder stays on the base host (`www.instagram.com`) and a test pins it. It was written to keep
+    OkHttp from coalescing HTTP/2 connections and re-sending after a 421; with the hidden page it keeps every call
+    same-origin (the transport also refuses a path that could name another host).
   - **P3:** `reportsSavedCollectionIds` defaults to `SAVED_COLLECTION_IDS_CONFIRMED = false` (strategy B: walk every
     collection, more requests but always correct) until the Adapter lab shows `saved_collection_ids` on saved items.
   - **P8:** `mediaInfo` returns null for HTTP 400 and 404 (the `ShapeChanged("http.400")` and `http.404` that
     `ErrorClassifier` gives a 4xx without a challenge, login or rate-limit marker) and for an empty `items`. A challenge,
     login or rate limit in the same 400 body still throws, and a null never deletes anything (the viewer shows "not
-    available"). `mediaInfo` builds its URL before it touches the lazy client, so an invalid pk never builds one.
+    available"). `mediaInfo` builds its URL before it touches the lazy transport, so an invalid pk never builds one.
 - The JSON shapes are pinned by synthetic fixtures in `src/test/resources/fixtures/web/`.
 
 ## Adapter lab core
@@ -212,12 +260,13 @@ endpoint to learn the real response shapes (spec 6.3).
 - **One request, no retry.** `AdapterLab.run(call, arg)` sends exactly ONE GET for a `LabCall` (current user,
   collections, All Saved, one collection, one media). The URL comes from the `WebEndpoints` builders (the user id from the
   `ds_user_id` cookie, digits only), so no session, a missing id or a non-digit id throws before any request and before
-  the lazy client is built. The lab adds no request path or rate: the caller (the app) must pace each `run` through the
+  the lazy transport is built. The lab adds no request path or rate: the caller (the app) must pace each `run` through the
   Pacer.
-- **Any status is an answer.** `getRaw` returns the status, `Location`, `Content-Type` and body of any HTTP status
-  without throwing. A connect failure, or a body that can't be read on a 2xx or 5xx, is a `Transient`; a body that can't
-  be read on a 3xx or 4xx is a response marked `bodyUnreadable`, classified from its headers alone (see
-  `ErrorClassifier` above), whose shape reads `(unreadable body)` and which has no scrubbed copy.
+- **Any status is an answer.** `run` takes the transport's `RawReply` and classifies it with `classifyReply` (the one rule,
+  see above); an HTTP error status is an answer, not an exception, and so is a redirect (its shape reads
+  `(redirect, not followed)`: a page `fetch` hides where it led). A failure to get any reply, or a body that can't be read
+  on a 2xx or 5xx, is a `Transient`; a body that can't be read on a 3xx or 4xx is classified from its status alone, its
+  shape reads `(unreadable body)`, and it has no scrubbed copy.
 - **The result** is a `LabResult`: the classification (`ok`, or the simple name of the exception), the typed error (an
   answer, not an exception), a redacted shape, a scrubbed copy and the ids that chain the next call. The raw body never
   leaves memory: it is a local that is classified, parsed, shaped and scrubbed, then dropped, and is never stored,
@@ -248,6 +297,213 @@ endpoint to learn the real response shapes (spec 6.3).
   value of letters and underscores in any case (`johndoe`, `JohnDoe`, `jane_doe`) under ANY visible-value key (`message` and
   `feedback_title` included, not only the enum-like ones such as `status`), can't be told from schema and is kept; so does
   a lowercase sentence under `message`. Read a scrubbed file before committing it.
+
+## Transport
+
+`app/.../transport/`, `app/src/main/assets/ig_fetch.js`, built in `di/AppContainer.kt`. Every Instagram API call is a
+same-origin `fetch()` that Chromium makes inside a hidden `https://www.instagram.com/` page, so the request carries the
+browser's own TLS and HTTP/2 fingerprint, headers, client hints and cookies. It replaced the OkHttp API client, whose first
+two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webview-transport-design.md`). The CDN path
+(thumbnails, video) is unchanged.
+
+- **Three parts.**
+  - `WebViewTransport` is the `InstagramTransport`: when a page exists, what it may do, the time limits, the debug log.
+    It is plain Kotlin over `WebPage`, so `WebViewTransportTest` runs it against a fake page.
+  - `WebPage` is the seam under it: `load`, `currentUrl`, `evaluate`, `onMessage`, `onGone`, `destroy`, and `PageHttpError`
+    for a document answered with an HTTP error.
+  - `AndroidWebPage` is the real page: a `WebView` made from the application context and never attached to a window.
+    JavaScript and DOM storage are on; `addJavascriptInterface` is used nowhere in `src/main`
+    (`JavascriptInterfaceGuardTest`). Its cookies are the app-wide WebView ones, the jar the login screen fills. A
+    navigation to anything but Instagram's, Facebook's or Meta's domains (`WebEndpoints.isLoginPage`) is refused
+    (`shouldOverrideUrlLoading`). Everything is main-thread only: `get` and `reset` switch to the main dispatcher, so the
+    sync worker's coroutine suspends until the reply.
+- **One call.** `get(path)` refuses a path that does not start with a letter or a digit, or that holds a tab, CR or LF
+  (so it can never name another host), then:
+  1. makes the page exist: the first call (and the first after a reset or an idle close) creates it and loads
+     `WebEndpoints.HOME_URL`, bounded at 30 s;
+  2. checks where the page is (below);
+  3. injects `ig_fetch.js` (its own guard makes that a no-op when `window.__igFetch` is still there; a navigation may
+     have wiped it) and calls `window.__igFetch(<id>, <path as a JSON string>)`;
+  4. waits up to 30 s for the page's message with that id.
+
+  Exactly one `fetch` per call, so the Pacer's one gate, its gaps and its budgets mean what they meant before.
+- **The page's script** (`ig_fetch.js`) is one function: `fetch('/' + path)` with `method: 'GET'`,
+  `credentials: 'same-origin'`, `redirect: 'manual'` and the headers `x-ig-app-id: 1217981644879628`,
+  `x-asbd-id: 359341`, `x-requested-with: XMLHttpRequest`, `x-csrftoken` (from `document.cookie`) and `x-ig-www-claim` (the
+  site's own `sessionStorage` value, else `0`). It posts `{id, code, contentType, body, redirected}` back: an opaque redirect
+  is posted as `redirected = true` with `code: 0`, a failed `fetch` (offline, DNS, reset) is code -1, a body that can't be read is null.
+  The CSRF token and the claim never leave the page. Each fetch gets its own `AbortController`, kept by id until the fetch
+  settles, and `window.__igAbort(id)` (defined once, behind the same guard as `__igFetch`) aborts it (R105); an aborted fetch
+  posts code -1 for its id, which nobody waits for any more.
+- **The message channel** is `WebViewCompat.addWebMessageListener`, installed before the first load as `window.igBridge`
+  for the origin `https://www.instagram.com` only. A message reaches the transport only when the platform credits it to the
+  MAIN frame, from exactly that origin, and only as a STRING; `AndroidWebPageGuardTest` pins the rule set and the three
+  conditions (each removal, a rule widened to `*`, and a hand-over in an `else` or after the `if` fails it). The transport
+  then accepts a message only from the current page, only when it parses, and only for the id it waits for. On the emulator
+  a frame of another origin got no `window.igBridge` at all (the origin rule keeps it undefined there), while a frame of the
+  SAME origin did: its forged reply through its own `window.igBridge` is dropped by the main-frame check, but one through
+  `parent.igBridge` or `top.igBridge` is credited to the main frame and accepted (pinned by
+  `aSameOriginFrameCanSpeakThroughTheParentsBridge`). **The trust boundary is therefore the instagram.com origin, not the
+  main frame (R109):** the main-frame check only stops a same-origin subframe's own bridge, and any instagram.com script can
+  forge a reply or replace `__igFetch`. That is accepted, because it equals trusting Instagram's replies, which the app does
+  anyway; no nonce (R89). A WebView that cannot post messages (`WEB_MESSAGE_LISTENER` unsupported), or cannot be created at
+  all, makes `AndroidWebPage` refuse to construct, never falling back to `addJavascriptInterface`; the call fails
+  `Transient`.
+- **Where the page is** is checked before EVERY call, not only after the load: the site can move itself (`pushState`, a
+  client-side redirect). A path under `/accounts/login` is `LoginRequired`, under `/challenge` or `/accounts/suspended`
+  `ChallengeRequired(null)` (never with a URL); the rule is `:instagram`'s `WebEndpoints.landingOf`. Another host, scheme or port, an unreadable URL, or no URL (the renderer
+  is gone) is `Transient`. Login and challenge are remembered: every later call fails the same way, with no page created
+  and nothing evaluated, until `reset()` (the account needs the owner, so a retry would only ask again). The other
+  verdicts are not a judgement on the account: the page is dropped and the next call starts over. Nothing is evaluated on
+  a page that failed the check.
+- **A home page that is an HTTP error** fails the load (`onReceivedHttpError`, main frame, status 400 or more): 429 is
+  `RateLimited`, so the caller's cooldown arms with no API request made; any other status is `Transient`. The page is
+  dropped either way. A main-frame load error and a dead renderer fail it too.
+- **Time and failure.** The load is bounded at 30 s and each call at 30 s; neither blocks a thread (a `CompletableDeferred`
+  under `withTimeoutOrNull`, which leaves a caller's own deadline alone), and expiry is `Transient`. A load that fails or
+  times out, a call that times out and a page that throws all drop the page: a stuck page is never reused. A network
+  failure inside the page (code -1) is `Transient` and keeps it. A dead renderer (`onRenderProcessGone`) drops the page and
+  fails a call in flight at once. At most one call is in flight, the load included: a second one is refused `Transient` and
+  touches nothing (the Pacer already serialises real calls, so this only guards misuse).
+- **A cancelled caller** (the viewer's `collectLatest` at a swipe, a sync's Cancel, a caller's own deadline) always ends
+  with its own `CancellationException`, never another exception: one thrown by a cancelled coroutine fails its parent scope
+  and can take the app down.
+  - Cancelled while the page LOADS (R104), it does not drop the page. The load goes on under `NonCancellable`, still bounded
+    at 30 s from its start and still ended at once by `reset()` or a dead renderer, and its outcome is applied as for any
+    caller: a failure drops the page (and counts), a login or challenge landing is remembered, a good page is kept with its
+    idle timer. Then the caller gets its cancellation. So swipes during a cold load (or the load after an idle close) cost
+    one page between them; before, each dropped its page, and three swipes used up the cap and every link refresh after them
+    failed "page limit" until a sync or a check. The price: a cancelled caller, and the Pacer's gate it holds, waits for the
+    rest of the load, at most 30 s and normally seconds. The cap is never given back without a page (R89, R97).
+  - A home page answered 429 for a caller that is gone (R104a) is remembered once: the NEXT call fails `RateLimited` at
+    once, creating no page and evaluating nothing, so the Pacer still arms its cooldown there. `reset()` forgets it.
+  - Cancelled while it WAITS for a reply (R105), the call keeps the page and, if that page is still the current one,
+    evaluates `window.__igAbort(<id>)`, so the request ends at once, as an OkHttp call's did when cancelled. Without it the
+    fetch ran on in the page while the Pacer (which marks a request ended when its caller returns) let the next call send
+    its own. The abort is best effort: its failure is swallowed and the caller still gets its cancellation. The late
+    message (code -1, or a reply that won the race) carries an old id and is ignored.
+- **The page cap (R89, R91).** At most 3 pages are created per user action, however they end (a creation that throws
+  counts too; an idle close gives the cap back): the site is not loaded over and over. Past that every call is `Transient`, with no page, until the next
+  action. A user action is a sync run or a Resume (`SyncEngine.beforeRun`, set only for `Backend.Real`), a session check
+  the owner asked for (`SessionRepository.validate`, inside the Pacer's gate, right before the request: Check now and the
+  login screen's), or a lab tap that is really sent (`AdapterLabViewModel.beforeCall`, inside the gate). Each calls
+  `allowNewAttempts()`, which does only that: it gives back the cap, and never destroys the page, never fails a call in
+  flight and never forgets a login or challenge verdict (only `reset()` does). The viewer's link refresh does not call it.
+- **The idle close (R93, R97).** The page is a live single-page app: while it exists, the site's own scripts keep sending
+  background requests, and Android can keep the process cached for hours. So when a call ends, whatever its outcome, and a
+  page exists, a timer starts on the main dispatcher; if no call begins within `IDLE_MS` (300 000 ms, 5 minutes) the page
+  is closed. A call's start, `reset()`, `closePage()` and a dead renderer cancel the timer; `allowNewAttempts()` does not. 5 minutes is
+  longer than the longest the Pacer leaves between two calls (a break of up to 180 s and a gap of up to 12 s, 192 s) and than
+  its longest transient backoff (240 s, 288 s with its +20 % jitter), so a sync run normally keeps one page, because the
+  gaps between its API calls are normally shorter. That is not a promise
+  (thumbnail downloads sit between API calls too): a longer gap closes the page and the next call loads the site again.
+  An idle close is the clean end of a visit, so it gives back the page cap; a page dropped by a failure never has a timer
+  and still counts; a remembered login or challenge verdict is untouched. "Once per app run" in the spec's 3.2 and 4 is
+  therefore "once per active period".
+- **The owner-needed close (R106).** `closePage()` is the idle close made immediate, for a session that needs the owner: it
+  cancels the timer, drops the page and gives back the cap (only when there is a page: never a refund without one), and
+  never forgets a login or challenge verdict or a remembered 429 (the session has not changed; that is `reset()`'s). A call
+  in flight on the page fails `Transient` at once, as with `reset()`. `SessionRepository` calls it (through its `closePage`
+  hook, `AppContainer.closeInstagramPage()`, which only acts on a transport that exists) right after it stores an Expired or
+  a Challenge: from `loginRequired` and `challengeRequired` (a sync run, the viewer, the lab) and from a `validate()` that finds
+  one (Check now, the login screen). And the login screen calls it (`LoginSession.closeHiddenPage()`) when it opens with the
+  RELOGIN or CHALLENGE purpose, never LOGIN or CSRF. So the site stops running for an account that was just found expired or
+  challenged, instead of for up to 5 more minutes, and is not live beside the visible login that fixes it. The cost is one
+  more home-page load on the next call. A failure is swallowed (cancellation excepted) and logged in a debug build as
+  `transport close failed: <Class>`.
+- **Traffic, and the pacing rule.** API request rates and concurrency are unchanged: one `fetch` per call through the one
+  Conservative Pacer, and "Requests in 24 h" counts those calls only. A cancelled call is aborted, so request starts stay at
+  least the Pacer's gap apart and no two of the app's API requests are open at once (R105). What is new is unpaced traffic the Pacer does not
+  see: the home-page load and the site's own background requests while the page exists, which are what any visit to
+  instagram.com sends. They are bounded by the page's life: 3 page loads per user action at most (counted again after an
+  idle close), and the page closes at most 5 minutes after the last call (before the idle close, the background traffic
+  would have run for as long as the process). The cost of the idle close is one more home-page load per active period (a
+  run, a check or a lab session that begins after 5 idle minutes). A login-screen check runs with two instagram.com pages
+  live, the visible login WebView and the hidden page, and since the stored state is not Valid then, R92 resets the hidden
+  page first, so that check always comes with a fresh home-page load. One more thing the Pacer does not see: Chromium may
+  re-send a GET on a dropped connection, the same way it would for the website itself (spec 4, accepted). The app makes one
+  call and the Pacer counts one request, so a re-send is a request the app neither sees nor counts.
+- **X-Requested-With (R100).** The WebViews keep sending their automatic `X-Requested-With: io.github.yuriimurha.reels`:
+  on the emulator it went on every request the WebView made itself (the home page, images, frames, the favicon), while the
+  API `fetch` carried only the script's own `x-requested-with: XMLHttpRequest` (a single value). It cannot be turned off:
+  `androidx.webkit` 1.17.1's allow-list setter (`setRequestedWithHeaderOriginAllowList`) is deprecated and does nothing,
+  its feature is unsupported on the emulator's WebView 145, and overriding the header on the main-frame `loadUrl` alone
+  would leave the sub-resources with it and make the fingerprint inconsistent. A known marker, accepted: the login screen's
+  WebView already sends it.
+- **The destroy hooks.** The page belongs to one session: it may sit on a login or challenge page it will not leave, or act
+  for an account that is gone. `WebViewTransport.reset()` destroys the page (failing a call in flight with `Transient`),
+  forgets a login or challenge verdict and gives back the page cap. `AppContainer` keeps the transport as a `Lazy` and its
+  three hooks, `resetInstagramTransport()`, `allowNewInstagramAttempts()` and `closeInstagramPage()` (R106, above), act only
+  when `isInitialized()`: nothing that merely changes or asks about the session may build it. Mock mode's engine never
+  touches it, and a cold logout, a cold Delete library, a stored expiry or challenge and a login screen opened to fix one
+  build nothing (`InstagramTransportWiringTest`); Check now and a lab tap with a logged-in jar in Mock mode
+  may build it, as they could use the network before. Building the transport builds no WebView either: the page is made
+  by the first call. `reset()` runs (`beforeSessionChange`):
+  - in `SessionRepository.logout`, first, before the cookies are cleared, so a page that outlives them cannot write them
+    back;
+  - in `pasteSessionId`, after the Pacer has agreed and before the first cookie is written, and again (under
+    `NonCancellable`) before a rejected, failed or cancelled paste puts the previous cookies back, because the page that
+    checked the rejected id may sit on a login page for good;
+  - in `LibraryRepository.deleteLibrary`, first;
+  - in `SessionRepository.validate`, INSIDE the Pacer's gate right before the request, when the stored state read there is
+    not Valid (R92). The owner had to act (log in again, finish a challenge) and is asking again, so the request goes out
+    on a fresh page rather than the one that said "login" or "challenge" last time. Never while the stored state is Valid
+    (a page doing its job is kept), never before the Pacer has agreed to send, and inside the gate so it cannot kill
+    another request's call. It is a reset before the probe, not after a new Valid is committed, because a check that begins
+    on a sticky verdict can only end in it and would never get to commit a Valid.
+
+  A failing hook never stops a logout, a rollback or a delete (cancellation excepted). In a debug build it logs
+  `transport reset failed: <Class>` (the exception's simple name, never its message) through the sink below;
+  `SessionRepository` and `LibraryRepository` take it as `debugLog`.
+- **Logging (spec 3.4).** Debug builds log one line per API call under the tag `InstagramHttp`:
+  `GET <path, digit runs of 3 or more as <n>> -> <code> (<ms> ms)`, for example `GET api/v1/accounts/edit/web_form_data/ ->
+  200 (412 ms)`. `<code>` is the HTTP status, `redirect`, or what happened when there is none: `timeout`, `login page`,
+  `challenge page`, `unexpected page`, `load http <status>`, `load http 429 (remembered)` (R104a), `load failed`,
+  `load timeout`, `page limit`, `busy`, `no page`,
+  `page destroyed`, `page error`, `network error`, `cancelled`, or `error` (the default, for a failure that is none of
+  these). A non-2xx reply is followed by its `ErrorReplySummary` line
+  (`<-- 429 reply: ...`, see [`:instagram`](#instagram)). Never a body in a 2xx line and never a header (the app sees none,
+  so none is logged). The idle close logs `page closed (idle)`, `closePage()` `page closed (owner needed)`. A release build logs nothing: `AppContainer.debugLog` is
+  null there. This replaces the OkHttp header log (`--> GET https://...` blocks with redacted cookies) for API calls, and
+  amends spec 4.4.
+- **`SessionGuard` and the OkHttp cookie bridge are no longer on the API path.** Chromium stores the page's cookies in the
+  jar itself, and the hooks above replace the Set-Cookie guard. When the app itself changes the session's cookies (a logout,
+  a paste, a paste's rollback, Delete library), `reset()` destroys the page first, so it cannot write the old ones back. A
+  WebView login is the owner's, not the app's: a login screen opened to fix the session (RELOGIN, CHALLENGE) closes the page
+  as it opens (R106), a first login (LOGIN, from LoggedOut) normally finds none (a logout destroyed it, and nothing sends
+  without a valid session), and a login-screen check that starts from a stored state that is not Valid resets the page inside
+  the Pacer's gate before its request (R92). `:app`'s `src/main` uses none of `SessionGuard`, `CookieStoreJar`,
+  `OkHttpTransport` and `HttpClientFactory.create`. They still live in `:instagram`'s `src/main`, used only by JVM tests
+  (see there for why they were not deleted), and `BackendWiringGuardTest` fails if `:app`'s production code starts using
+  one. The CDN client has no jar and never had them.
+- **Tests.** `WebViewTransportTest` (JVM, a fake page and virtual time) covers the call, the landing checks, the timeouts,
+  the page cap, the idle timer, cancelled callers (R104, R104a, R105, through a real Conservative Pacer for the remembered
+  429), the logging, and what the script may send and post (the header constants match `WebHeaders`; the CSRF token and the
+  claim go into the request's headers only; one same-origin GET to `/` + the path, each fetch option once; every message is
+  `{id, code, contentType, body, redirected}` with the reply's own content type and text or null; a self-check of
+  mutants, `body: document.cookie` and a duplicate `redirect` among them, shows the pin fails each). `AndroidWebPageTest`
+  exists twice: under `src/test` (Robolectric, which has no WebView provider or JavaScript) that a WebView that cannot post
+  messages refuses to construct, and the page's `PageClient` (a top-level class for that reason) driven by hand: a dead
+  renderer is handled (`true`) and reported, a main-frame HTTP error of 400 or more fails the load with its status, a
+  subframe's does not. Under `src/androidTest` (emulator only: it skips on a physical device with the smoke suite's
+  `isEmulator()` check) it runs the real page, the real `ig_fetch.js` and the transport against LOCAL MockWebServers at
+  `http://127.0.0.1:<port>`, which is also the allowed origin passed in for the test. It checks that one `get` reaches the
+  server exactly once with the site headers and the page's cookie, that a redirect is reported and not followed, that
+  forged messages from another origin's frame and from a same-origin subframe's own bridge are dropped (and that one through
+  `parent.`/`top.igBridge` gets through, R109), that the transport works from a `Dispatchers.Default` coroutine, that a
+  cancelled call aborts its fetch (the page posts code -1 for it while the server still holds the reply) and the next call
+  goes through, that a 429 home page is `RateLimited` with no API request, that a reset ends a load or a call at once, that
+  a reply that never comes times out at the call's bound and the page is dropped, that the claim header is the site's own
+  stored claim, that a page that moved itself (`pushState`) still requests the API path, and that a dropped connection is
+  `Transient` at once with the page kept. Loopback cleartext needed no configuration on the API 37 emulator (the platform
+  allows it for `127.0.0.1` and `localhost`), so no network security config exists; `CleartextGuardTest` pins that no
+  release source set permits cleartext or names a config, that a debug-only one could permit loopback only, and that no
+  release or debug source set overrides `onReceivedSslError`.
+  `AndroidWebPageGuardTest` and `JavascriptInterfaceGuardTest` are source pins; `BackendWiringGuardTest` pins that
+  `WebViewTransport` is the only `InstagramTransport`, that the client, the probe and the lab are built once, by the
+  container, with `{ instagramTransport }`, and that `AndroidWebPage` is built once, there; `InstagramTransportWiringTest`
+  (Robolectric) runs every hook on a container with no session and asks `instagramTransportCreated`; and the smoke suite's
+  `requireNoTransport()` fails a Mock mode run, before and after each test, if the transport was ever built.
 
 ## Pacer
 
@@ -284,6 +540,10 @@ endpoint to learn the real response shapes (spec 6.3).
   last request's start, and the seed is clamped to now: a future-dated entry (clock set back, emulator snapshot restore)
   is treated as "now", so it can't stall the gate. The truncation, the seeding and the clamp all lower the request rate;
   none raises it.
+- **What the Pacer counts.** One API call, one `fetch` ([Transport](#transport)). It does not see the hidden page's own
+  traffic (the home-page load and the site's background requests while the page exists); that is bounded by the page's
+  life, not paced. Nor does it see a re-send: Chromium may re-send a GET on a dropped connection, as it would for the
+  website itself (spec 4, accepted).
 
 ## Sync engine
 
@@ -369,6 +629,11 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
   lab or Check now meets a challenge or an expiry mid-run, a paste replaces the session mid-run, or WorkManager re-runs
   work by itself after a process death under a session that is no longer valid (it then sends zero requests). The
   default (the fake backend) lets every request through. It only removes requests.
+  - **And again when the request returns (R107).** The gate is asked before a request is sent, and a paste, a logout or a
+    login as another account can land while it is out. So `call` asks `sessionUsable(epoch)` once more when the request (with
+    its transient retries) has returned, before anything of its answer is written: a page that came back under a session
+    that is gone is dropped and the run stops as above. For the first `currentUser()` this also means a library is never
+    given the account of a session that changed while the check was out (R84). A read, never a request.
 - `SortKeys` gives newest-first keys.
 
 ### Run outcomes
@@ -439,7 +704,7 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   - `cachedDataSourceFactory` is what the player reads through: `CacheDataSource` over `DefaultDataSource` (so Mock mode's
     `android.resource` clip still opens) over `DefaultHttpDataSource` with the WebView user agent (read once, only for the
     real library) and NO cookies: nothing installs a `CookieHandler` and the video path never touches the cookie store or
-    `instagramHttp` (pinned by `VideoWiringGuardTest`; `VideoDataSourceTest` runs the stack against MockWebServer: a new
+    the Instagram transport (`instagramTransport`, `WebViewTransport`; pinned by `VideoWiringGuardTest`; `VideoDataSourceTest` runs the stack against MockWebServer: a new
     link under the same pk is served from disk with no second request, and no `Cookie` header is sent).
   - Redirects are followed: `DefaultHttpDataSource` has no switch to refuse them (`setAllowCrossProtocolRedirects(false)`,
     its default, only refuses an http/https change), so a CDN redirect costs one more request, cookieless, to the host it
@@ -505,9 +770,12 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
 - **The library's account.** `libraryAccount` is `StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake))`, one per
   library (R84); the engine checks it and `library` gets `forgetAccount = { libraryAccount.forget() }`, so Delete library
   forgets the account of the library it deleted (`BackendSelectionTest` runs both modes).
-- **Lazy HTTP clients.** `instagramHttp` and `cdnHttp` (whose user agent comes from `WebSettings.getDefaultUserAgent`, a
-  WebView provider load) are built by the first request that needs them, so constructing the container or the backend loads
-  no WebView (tests pin this).
+- **Lazy transport and CDN client.** The Instagram transport (`instagramTransportLazy`, a `Lazy<WebViewTransport>` that the
+  container's two hooks ask `isInitialized()`, see [Transport](#transport)) and `cdnHttp` (whose user agent comes from
+  `WebSettings.getDefaultUserAgent`, a WebView provider load) are built by the first request that needs them, so
+  constructing the container or the backend loads no WebView, and the transport's page is made only by its first call
+  (tests pin this). The real client, the session probe and the Adapter lab each get `{ instagramTransport }` and are built
+  only here; `AndroidWebPage` is built once, only here.
 - **`HttpMediaFetcher`** downloads from the CDN with its own client (`HttpMediaFetcher.client` delegates to
   `HttpClientFactory.createCdn`, see [`:instagram`](#instagram)). It refuses a blank, unparseable or non-https URL with no
   request (null; the `requireHttps = false` parameter exists only so MockWebServer works, and a test pins that the default
@@ -515,10 +783,11 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   rate limit, so no cooldown, but the engine stops the CDN for the rest of the run) and any other status, a 3xx included, to
   an `IOException` that names only the code (CDN links are signed, so a URL is never in a message). It reads the body on
   OkHttp's own thread, so cancelling the coroutine cancels the call.
-- **Source pins.** `BackendWiringGuardTest` keeps `Backend.Real`'s fetcher on `cdnHttp`, never on `instagramHttp` (whose jar
-  holds the session), and the Sync screen on `container.backend.pacer` (plus `realPacer = if (container.backend is Backend.Fake)
-  container.instagramPacer else null`), and keeps the Mock switch's `cancelSync` on
-  `cancelAndAwait()` (the test WorkManager cannot tell it from `cancel()`). `ContainerSyncWiringTest` runs the real
+- **Source pins.** `BackendWiringGuardTest` keeps `Backend.Real`'s fetcher on `cdnHttp`, never on the Instagram transport (the
+  page that holds the session); keeps `OkHttpTransport`, `HttpClientFactory.create(` and `instagramHttp` out of `src/main`;
+  lets `WebViewTransport` be the only `InstagramTransport`; keeps the Sync screen on `container.backend.pacer` (plus
+  `realPacer = if (container.backend is Backend.Fake) container.instagramPacer else null`); and keeps the Mock switch's
+  `cancelSync` on `cancelAndAwait()` (the test WorkManager cannot tell it from `cancel()`). `ContainerSyncWiringTest` runs the real
   container on WorkManager's test build with a worker that waits: a queued run carries `kindOf(usesFake)` (`"fake"` in Mock
   mode, `"real"` otherwise, so a wrong boolean fails it), and the Mock switch's `cancelSync` leaves the queued work
   CANCELLED (a no-op `cancelSync` fails it). `FastPolicyGuardTest` keeps `PacingPolicy.Fast` confined to `Backend.kt` and
@@ -561,15 +830,16 @@ Mock mode switch.
   HTTP code, the classification and the shape in a monospace, sideways-scrolling, selectable `Text`, then the path of the
   scrubbed copy.
 - **View model.** `AdapterLabViewModel` talks to the lab through the `LabRunner` interface (`AdapterLabRunner` is the thin
-  pass-through over `AdapterLab`, built by `AppContainer.adapterLab`, which does not build the HTTP client: that is built on
+  pass-through over `AdapterLab`, built by `AppContainer.adapterLab`, which does not build the transport: that is built on
   the first call that reaches the network).
 - **Pacing.** Each tap is one `pacer.interactive { }` on the single `AppContainer.instagramPacer`, so it is one request, with
   the interactive lane's 2 s minimum gap, the shared 600-per-24-hour budget and the persisted cooldown; a second tap while one
   is out is ignored, and nothing retries. The stored session must be Valid, checked before the tap queues and again as the
   Pacer's `precondition` from inside the gate (R85, as R79 for the viewer): a challenge or an expiry stored while the tap
   waited sends nothing, logs nothing and adds no message (the screen already says "Log in on the Sync screen to use the
-  lab."). The lab adds owner-triggered requests on that existing lane and raises no rate or
-  concurrency. A returned `RateLimited` is stored in a local first and then thrown inside the Pacer block, because the Pacer
+  lab."). A tap that is really sent first tells the transport that a new user action begins (`beforeCall`, inside the gate:
+  the page cap counts afresh, see [Transport](#transport)); a refused tap runs nothing. The lab adds owner-triggered requests
+  on that existing lane and raises no rate or concurrency. A returned `RateLimited` is stored in a local first and then thrown inside the Pacer block, because the Pacer
   arms the cooldown only when the block throws it; the ViewModel catches it outside and still shows the shape. A
   `PacerRefusal` (cooldown, budget) shows its fixed message and sends no request.
 - **Session.** A `ChallengeRequired` or `LoginRequired` answer calls `SessionRepository.challengeRequired(url, epoch)` or
@@ -591,8 +861,9 @@ Mock mode switch.
 
 `app/.../session/`.
 
-- The session lives only in the WebView's `CookieManager` (`AndroidCookieStore`), shared with OkHttp. The cookie origin and
-  the Set-Cookie strings it writes come from `:instagram` (`WebSessionCookies`).
+- The session lives only in the WebView's `CookieManager` (`AndroidCookieStore`), shared with the login screen and the hidden
+  page: the page's `fetch` sends and stores its cookies in that jar itself, and the app copies a cookie into no request.
+  The cookie origin and the Set-Cookie strings the store writes come from `:instagram` (`WebSessionCookies`).
 - `SessionRepository` validates via one paced interactive request, stores only state + handle in DataStore, accepts pasted
   sessionids (parsed locally, no request for garbage), logs out by clearing cookies.
 - **A paste is transactional:** it first asks the Pacer for permission (no cookie is written during a cooldown or at the
@@ -634,8 +905,15 @@ Mock mode switch.
     cookies are read a moment after the gate). R84's account check only guards a run's first `currentUser`.
   - `sessionOk` (sent after a run's successful `currentUser`) restores `Valid(handle)` over a stale Expired or Challenge
     banner; it writes nothing when the state is already `Valid` for that handle, flushes the jar before storing `Valid` (as
-    `validate` does), and is ignored when the jar holds no session cookies. `SessionGuard` (see [`:instagram`](#instagram))
-    keeps a stale response's Set-Cookie out of the jar, apart from the tiny window noted there.
+    `validate` does), and is ignored when the jar holds no session cookies.
+- **The transport's page follows the session.** The hidden page is destroyed (`reset()`) before the app changes the jar's
+  session (logout, a paste, a paste's rollback) and before a check that starts on a stored state that is not Valid;
+  `validate()` also tells the transport that a new user action begins. Delete library does the same destroy. It is closed
+  (`closePage()`, R106, which keeps the transport's verdicts) right after an Expired or a Challenge is stored
+  (`loginRequired`, `challengeRequired`, a `validate()` that finds one) and when the login screen opens to fix the session
+  (RELOGIN, CHALLENGE, through `closeHiddenPage()`), so a WebView login that fixes it never runs beside a live page. These
+  hooks replace what `SessionGuard` did for OkHttp (a stale response writing the old session's cookies back). Details, and
+  why they are injected and only act on a transport that exists: [Transport](#transport).
 - **Gating.** `SyncViewModel(requiresSession = container.backend is Backend.Real)`; `sessionReady = !requiresSession ||
   state is Valid` (a state still loading counts as not ready, but says nothing: no banner until the state is known), and
   `syncUiState(..., sessionReady, sessionLoading)` turns Sync, Full sync and Resume off and, when no other banner applies,
@@ -677,10 +955,10 @@ Mock mode switch.
     again" re-validates on request.
   - RELOGIN ("Log in again" in the Expired state): LOGIN, except that the fingerprint of the stale session in the jar is
     seeded as already checked, because it is known to be dead, so opening costs no request and only a session the owner logs
-    in with afterwards is validated, once.
+    in with afterwards is validated, once. Opening closes the hidden page (R106, `LoginSession.closeHiddenPage()`).
   - CHALLENGE: opened for the session Instagram already flagged. Opening costs no request, and a start page without a usable
     URL is Instagram's home, which redirects to the checkpoint; a Challenge result without a URL loads Instagram's home, and
-    a page that is already showing is not reloaded.
+    a page that is already showing is not reloaded. Opening closes the hidden page, as for RELOGIN.
   - CSRF (after an accepted paste): no request at all, polls for a csrftoken locally and closes when it arrives or after 30 s.
 - **After a Challenge result** (LOGIN, RELOGIN or CHALLENGE) automatic validation stops for the rest of the screen's life,
   because Instagram may re-issue the sessionid during a checkpoint flow and each new fingerprint would otherwise be a paced
@@ -700,6 +978,10 @@ Mock mode switch.
   account and leaves the current login alone. A second tap during a paste, and a second Check now while one is out, is
   ignored (each is an Instagram request). Only adapter and Pacer messages reach the screen ("Unexpected Instagram response
   at `<path>`", "Cooling down after a rate limit", ...); anything else gets a generic line.
+- **A dead renderer closes the screen.** The login WebView's client (`InstagramOnlyClient`) overrides
+  `onRenderProcessGone`: a renderer that crashes or is killed for memory no longer takes the app down. The view is
+  destroyed and the screen closed through its existing back callback. The hidden page does the same for its own renderer
+  ([Transport](#transport)).
 - Debug builds enable WebView remote debugging (`chrome://inspect`) under `if (BuildConfig.DEBUG)`, pinned by a source test.
 
 ## Decided so far
@@ -707,9 +989,10 @@ Mock mode switch.
 | Decision | Choice | Why |
 |---|---|---|
 | Where it runs | Everything on the Android phone: login, sync, storage, playback. No companion service. | The phone is where reels get watched. A Mac-hosted service would need LAN HTTPS and the Mac switched on. |
-| Stack | Native Kotlin + Jetpack Compose | WebView login sharing one cookie jar with the HTTP client, WorkManager background sync, Media3 playback. |
+| Stack | Native Kotlin + Jetpack Compose | WebView login sharing one cookie jar with the API calls (which run in a WebView page), WorkManager background sync, Media3 playback. |
 | Auth | In-app WebView login to instagram.com; the app reads cookies from Android's `CookieManager`. Pasted `sessionid` as a fallback. | No password in app code, 2FA and checkpoints handled by Instagram's own UI, one consistent device identity. |
 | Instagram access | Private web endpoints, isolated in the `:instagram` JVM module | No official API exposes saved items, and the endpoints change without notice. |
+| API transport | Every API call is a same-origin `fetch()` in a hidden instagram.com WebView page (`WebViewTransport`); the OkHttp client stays only for the cookieless CDN and as the JVM-test transport | OkHttp's first two requests got HTTP 429, and copying headers cannot copy Chromium's TLS and HTTP/2 fingerprint. The page's cookies, client hints and Sec-Fetch headers are the browser's own. |
 | Video | Streamed on demand with per-item link refresh; LRU cache keyed by media `pk` | Gigabytes saved, and no bulk-download pattern. |
 | Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds | Detecting removals needs a full walk, so it stays an explicit, paced action. |
 | Sync trigger | Manual only, executed by WorkManager | The fewest requests; runs survive leaving the app and resume. |
@@ -722,3 +1005,5 @@ Mock mode switch.
 - Username/password login with 2FA handling → not needed; the WebView login covers it.
 - Optional bulk video download during sync → on-demand streaming with a cache.
 - Session validated on every app start → validated at the start of each sync and after login.
+- OkHttp API client with the WebView's cookies and copied headers → same-origin `fetch()` in a hidden instagram.com page
+  (after the 429, 2026-10-08).

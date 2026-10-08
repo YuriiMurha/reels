@@ -82,12 +82,13 @@ class SyncEngineTest {
         sessionSignals: SessionSignals = signals,
         eviction: MediaEviction = MediaEviction { },
         sessionUsable: suspend (Int) -> RunSession = { RunSession.USABLE },
+        beforeRun: suspend () -> Unit = {},
     ): SyncEngine {
         clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
-            eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account,
+            eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account, beforeRun = beforeRun,
         )
     }
 
@@ -1056,9 +1057,53 @@ class SyncEngineTest {
         assertEquals(listOf("ok:test_account@5"), signals.events)
     }
 
-    /** The gate is asked with the epoch the run captured at its start, before every request, the session check included. */
+    /**
+     * R107 (C4): the gate is asked BEFORE a request; a paste (or a logout, or a login as another account) can land while the
+     * request is out. Its answer belongs to a session that is gone, so it is not written: the session is asked again when the
+     * request returns, before any write, and the run stops as for an epoch change.
+     */
     @Test
-    fun theGateIsAskedBeforeEveryRequestWithTheRunsEpoch() = runTest {
+    fun aPageThatCameBackAfterTheSessionChangedIsNotWritten() = runTest {
+        val client = smallClient()
+        val sameEpoch: suspend (Int) -> RunSession = { epoch -> if (epoch == signals.current) RunSession.USABLE else RunSession.NOT_USABLE }
+        client.failures = FakeFailures { call ->
+            if (call == 3) signals.current = 6 // the owner pasted another session while page 1 was out
+            null
+        }
+
+        val run = runSync(engine(client, sessionUsable = sameEpoch), SyncMode.QUICK)
+
+        assertEquals(3, client.calls.size)
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals("Session expired", run.lastError)
+        assertEquals(emptyList(), pks(ALL_SAVED_ID), "page 1 came back under the old session and was not written")
+        assertEquals(0, run.newItems)
+    }
+
+    /** R107, and the R84 gap it closes: the account a session check names is not remembered when the session changed under it. */
+    @Test
+    fun aSessionCheckThatCameBackAfterTheSessionChangedRemembersNoAccount() = runTest {
+        val client = smallClient()
+        val sameEpoch: suspend (Int) -> RunSession = { epoch -> if (epoch == signals.current) RunSession.USABLE else RunSession.NOT_USABLE }
+        client.failures = FakeFailures { call ->
+            if (call == 1) signals.current = 6 // a login as another account while the run's currentUser was out
+            null
+        }
+
+        val run = runSync(engine(client, sessionUsable = sameEpoch), SyncMode.QUICK)
+
+        assertEquals(1, client.calls.size)
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertNull(account.pk(), "the library was not given the account of a session that is gone")
+        assertEquals(emptyList(), signals.events, "and no session OK for it")
+    }
+
+    /**
+     * The session is asked with the epoch the run captured at its start, before every request (inside the gate), the session
+     * check included, and again when the request returns, before anything of its answer is written (R107).
+     */
+    @Test
+    fun theGateIsAskedBeforeAndAfterEveryRequestWithTheRunsEpoch() = runTest {
         val client = smallClient()
         val asked = mutableListOf<Pair<Int, Int>>() // (requests made so far, epoch asked with)
         client.failures = FakeFailures { call ->
@@ -1068,7 +1113,11 @@ class SyncEngineTest {
 
         runSync(engine(client, sessionUsable = { epoch -> asked += client.calls.size to epoch; RunSession.USABLE }), SyncMode.QUICK)
 
-        assertEquals(client.calls.indices.map { it to 5 }, asked, "one check per request, each before it, always with epoch 5")
+        assertEquals(
+            client.calls.indices.flatMap { listOf(it to 5, it + 1 to 5) },
+            asked,
+            "two checks per request, one before it and one after it, always with epoch 5",
+        )
     }
 
     /** I-1 (c): WorkManager re-runs work by itself after a process death. Under a challenged session it must send nothing at all. */
@@ -1104,6 +1153,46 @@ class SyncEngineTest {
         assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
         assertEquals("Session expired", run.lastError)
         assertEquals(emptyList(), signals.events)
+    }
+
+    // ---- R91: every run is a new user action for the WebView transport ----
+
+    @Test
+    fun everyRunStartsByAllowingNewTransportAttemptsBeforeItsFirstRequest() = runTest {
+        val client = smallClient()
+        val requestsWhenTold = mutableListOf<Int>()
+        val engine = engine(client, beforeRun = { requestsWhenTold += client.calls.size })
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
+        assertTrue(client.calls.size > 1, "precondition: the run made several requests")
+        assertEquals(listOf(0), requestsWhenTold, "told once per run, before anything was sent")
+
+        // A Resume (or the next run) is a new action again: told once more, before that run's first request.
+        val callsAfterTheFirstRun = client.calls.size
+        runSync(engine, SyncMode.QUICK)
+        assertEquals(listOf(0, callsAfterTheFirstRun), requestsWhenTold, "once for each run, not once per request")
+    }
+
+    @Test
+    fun aRunThatStopsAtOnceWasToldToo() = runTest {
+        val client = smallClient()
+        var told = 0
+        val run = runSync(engine(client, sessionUsable = { RunSession.NOT_USABLE }, beforeRun = { told++ }), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals(1, told)
+        assertEquals(emptyList(), client.calls)
+    }
+
+    /** The hook is the transport's, called on the main thread: whatever it throws, the run row must not stay RUNNING. */
+    @Test
+    fun aHookThatFailsPausesTheRunInsteadOfLeavingItRunning() = runTest {
+        val client = smallClient()
+        val run = runSync(engine(client, beforeRun = { throw IllegalStateException("no main looper") }), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.PAUSED, run.status)
+        assertEquals("Unexpected error: IllegalStateException", run.lastError)
+        assertEquals(emptyList(), client.calls, "nothing is sent")
     }
 
     /** The fake backend has no session: the container builds its engine without a gate, and the default lets everything through. */

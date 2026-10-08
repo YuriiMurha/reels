@@ -77,8 +77,8 @@ class BackendSelectionTest {
         assertTrue(backend is Backend.Real, "Mock mode off means the real backend")
         assertSame(container.instagramPacer, backend.pacer, "real traffic has ONE pacer: the process's Conservative instagramPacer")
 
-        // The clients are lazy: building the container and the backend must not load a WebView (the user agent comes from it).
-        assertFalse(lazyIsInitialised(container, "instagramHttp"), "the API client was built before any request")
+        // The transport and the CDN client are lazy: building the container and the backend must not load a WebView.
+        assertFalse(container.instagramTransportCreated, "the transport was built before any request")
         assertFalse(lazyIsInitialised(container, "cdnHttp"), "the CDN client was built before any download")
     }
 

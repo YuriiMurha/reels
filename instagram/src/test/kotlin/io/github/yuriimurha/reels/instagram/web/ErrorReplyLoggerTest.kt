@@ -329,7 +329,7 @@ class ErrorReplyLoggerTest {
 
     @Test
     fun everyFieldItCanShowIsOneThatTheLabAlreadyTreatsAsReadable() {
-        val shown = ErrorReplyLogger.STRING_FIELDS + ErrorReplyLogger.BOOLEAN_FIELDS
+        val shown = ErrorReplySummary.STRING_FIELDS + ErrorReplySummary.BOOLEAN_FIELDS
         assertEquals(6, shown.size)
         val missing = shown.filter { it !in LabRules.VISIBLE_VALUE_KEYS }
         assertTrue(missing.isEmpty(), "not in LabRules.VISIBLE_VALUE_KEYS: $missing")
