@@ -125,4 +125,39 @@ class SyncUiStateTest {
             syncUiState(run(SyncStatus.PAUSED, "24-hour budget reached"), pacer(), now, sessionReady = false, sessionLoading = true).banner,
         )
     }
+
+    // ---- H2: the REAL Pacer's line, shown in Mock mode ----
+
+    @Test
+    fun theRealPacersLineCountsTheRequestsOfTheLast24Hours() {
+        assertEquals("Instagram requests in 24 h: 10 / 600", realPacerLine(pacer(), now))
+    }
+
+    @Test
+    fun theRealPacersLineSaysRequestsArePausedDuringACooldown() {
+        assertEquals("Instagram requests paused: 2 min left (cooldown)", realPacerLine(pacer(cooldownUntil = now + 90_000), now))
+    }
+
+    @Test
+    fun theRealPacersMinutesRoundUpLikeTheCooldownBanner() {
+        assertEquals("Instagram requests paused: 1 min left (cooldown)", realPacerLine(pacer(cooldownUntil = now + 60_000), now))
+        assertEquals("Instagram requests paused: 2 min left (cooldown)", realPacerLine(pacer(cooldownUntil = now + 60_001), now))
+        assertEquals("Instagram requests paused: 1 min left (cooldown)", realPacerLine(pacer(cooldownUntil = now + 1), now))
+    }
+
+    @Test
+    fun aCooldownThatHasEndedFallsBackToTheCount() {
+        assertEquals("Instagram requests in 24 h: 10 / 600", realPacerLine(pacer(cooldownUntil = now), now))
+        assertEquals("Instagram requests in 24 h: 10 / 600", realPacerLine(pacer(cooldownUntil = now - 1), now))
+    }
+
+    @Test
+    fun theRealPacersLineUsesThePacersOwnBudgetNotAConstant() {
+        assertEquals("Instagram requests in 24 h: 3 / 50", realPacerLine(PacerStatus(3, 50, 25, null), now))
+    }
+
+    @Test
+    fun noRealPacersLineBeforeItsStatusHasBeenRead() {
+        assertNull(realPacerLine(null, now))
+    }
 }

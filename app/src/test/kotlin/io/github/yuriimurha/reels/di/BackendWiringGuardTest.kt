@@ -90,6 +90,21 @@ class BackendWiringGuardTest {
     }
 
     /**
+     * H2: Mock mode's Sync screen shows the REAL Pacer's cooldown and 24 h count as one extra line, because Check now, the lab
+     * and the video resolver use `instagramPacer` there. With the real backend the screen's own pacer already is that one, so
+     * nothing extra is passed (and the lines would be shown twice). Read-only `status()` calls: no request.
+     */
+    @Test
+    fun theSyncScreenAddsTheRealPacerExactlyWhenTheBackendIsFake() {
+        val arguments = callArguments(main("ui/sync/SyncScreen.kt"), "SyncViewModel(").single()
+        assertTrue(
+            Regex("""realPacer\s*=\s*if\s*\(\s*container\.backend\s+is\s+Backend\.Fake\s*\)\s*container\.instagramPacer\s+else\s+null\b""")
+                .containsMatchIn(arguments),
+            "the Sync screen must pass realPacer = if (container.backend is Backend.Fake) container.instagramPacer else null: $arguments",
+        )
+    }
+
+    /**
      * Mock mode (the fake library) syncs without a session; the real backend must not start without a valid one. The
      * ViewModel's behaviour is tested with the flag passed in; this pins that the screen derives it from the backend.
      */

@@ -18,11 +18,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -66,6 +68,13 @@ class SyncViewModel(
     private val requiresSession: Boolean,
     /** The Developer section's Mock mode switch (debug builds); null offers none. */
     private val mockSwitch: MockModeSwitch? = null,
+    /**
+     * Mock mode only: the process's real Pacer (`instagramPacer`). [pacer] is then the fake library's, but Check now, the Adapter
+     * lab and the video resolver still send real requests through this one, so its cooldown and 24 h count are shown too
+     * ([realPacerNote]). Read with `status()` only: no request, nothing recorded. Null for the real backend, whose [pacer] is
+     * already that one.
+     */
+    private val realPacer: Pacer? = null,
     private val now: () -> Long = System::currentTimeMillis,
     /** Where the Mock mode switch works: it waits for WorkManager and writes a file. */
     private val io: CoroutineDispatcher = Dispatchers.IO,
@@ -79,18 +88,23 @@ class SyncViewModel(
     /** The Pacer's status and the moment it was read. */
     private data class Tick(val status: PacerStatus, val at: Long)
 
-    /**
-     * Budgets and cooldown, refreshed every second while the screen is visible. Local reads only. The time travels
-     * with the status because during a cooldown the status itself never changes, and a StateFlow drops repeats.
-     */
-    private val tick: StateFlow<Tick?> = flow {
+    /** Local reads only, every second. The time travels with the status because a StateFlow drops repeats. */
+    private fun ticks(of: Pacer): Flow<Tick> = flow {
         while (true) {
-            emit(Tick(pacer.status(), now()))
+            emit(Tick(of.status(), now()))
             delay(1_000)
         }
-    }.stateIn(viewModelScope, sharing, null)
+    }
+
+    /** Budgets and cooldown, refreshed every second while the screen is visible. */
+    private val tick: StateFlow<Tick?> = ticks(pacer).stateIn(viewModelScope, sharing, null)
 
     val pacerStatus: StateFlow<PacerStatus?> = tick.map { it?.status }.stateIn(viewModelScope, sharing, null)
+
+    /** Mock mode: one line about the real Pacer (see [realPacerLine]), refreshed like [tick]. Always null with the real backend. */
+    val realPacerNote: StateFlow<String?> =
+        (realPacer?.let { real -> ticks(real).map { realPacerLine(it.status, it.at) } } ?: flowOf(null))
+            .stateIn(viewModelScope, sharing, null)
 
     /** The stored session state; null until it has been read (the screen offers no session button before that). */
     val sessionState: StateFlow<SessionState?> = session.state.stateIn(viewModelScope, sharing, null)

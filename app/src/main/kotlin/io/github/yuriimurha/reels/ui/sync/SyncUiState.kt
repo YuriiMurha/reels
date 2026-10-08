@@ -54,3 +54,16 @@ fun syncUiState(
         banner = banner,
     )
 }
+
+/**
+ * Mock mode's extra line under the session status: the REAL Pacer's state, because Check now, the Adapter lab and the video
+ * resolver send real requests through it even while the library is the fake one (whose own Pacer drives everything else on
+ * the screen). A cooldown that is still running replaces the count. Null until the status has been read. The minutes round
+ * up, like the cooldown banner's.
+ */
+fun realPacerLine(status: PacerStatus?, now: Long): String? {
+    status ?: return null
+    val coolingUntil = status.cooldownUntil?.takeIf { it > now }
+        ?: return "Instagram requests in 24 h: ${status.requestsLast24h} / ${status.dailyBudget}"
+    return "Instagram requests paused: ${(coolingUntil - now + 59_999) / 60_000} min left (cooldown)"
+}

@@ -51,7 +51,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks` (an `ACTION_VIEW` intent, so whichever app handles the link). Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
-| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session. Log out cancels a running sync before it forgets the session. Debug builds add the Developer section ([Lab screen](#lab-screen)). |
+| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session, and its session section adds one line for the real Pacer's cooldown or 24 h count (see Session). Log out cancels a running sync before it forgets the session. Debug builds add the Developer section ([Lab screen](#lab-screen)). |
 | Lab screen | `app/.../ui/lab/`, `ui/sync/DeveloperSection.kt` | The debug-only front end of the Adapter lab, and the Mock mode switch. [Details](#lab-screen). |
 | Session | `app/.../session/` | The session lives only in the WebView's cookie store. [Details](#session). |
 | Login | `app/.../ui/login/`, `ui/sync/SessionSection.kt` | Instagram's own login page in a WebView. [Details](#login). |
@@ -465,7 +465,8 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   `Real` (`WebInstagramClient`, `HttpMediaFetcher`, and the process's ONE Conservative `instagramPacer`). `Real` takes the
   pacer as a constructor argument and `BackendSelectionTest` pins `backend.pacer === instagramPacer`, so real traffic can
   never get a second pacer; the Sync screen shows `backend.pacer`, which for `Real` is that one (in Mock mode it is the
-  fake's, so a real cooldown armed by a session check or a lab call isn't shown there).
+  fake's, so it also passes `instagramPacer` to `SyncViewModel(realPacer = ...)` and the Session section shows the real
+  Pacer's state as one extra line under the status: see Session, below).
 - **Mock mode.** `BackendChoice` (SharedPreferences file `backend`, key `use_fake`) decides which: release builds never use
   the fake library, debug builds default to it, and `AppContainer.usesFake` reads it ONCE per process, so the library, the
   thumbnails and the backend can't disagree within a run.
@@ -495,7 +496,8 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   an `IOException` that names only the code (CDN links are signed, so a URL is never in a message). It reads the body on
   OkHttp's own thread, so cancelling the coroutine cancels the call.
 - **Source pins.** `BackendWiringGuardTest` keeps `Backend.Real`'s fetcher on `cdnHttp`, never on `instagramHttp` (whose jar
-  holds the session), and the Sync screen on `container.backend.pacer`, and keeps the Mock switch's `cancelSync` on
+  holds the session), and the Sync screen on `container.backend.pacer` (plus `realPacer = if (container.backend is Backend.Fake)
+  container.instagramPacer else null`), and keeps the Mock switch's `cancelSync` on
   `cancelAndAwait()` (the test WorkManager cannot tell it from `cancel()`). `ContainerSyncWiringTest` runs the real
   container on WorkManager's test build with a worker that waits: a queued run carries `kindOf(usesFake)` (`"fake"` in Mock
   mode, `"real"` otherwise, so a wrong boolean fails it), and the Mock switch's `cancelSync` leaves the queued work
@@ -609,6 +611,14 @@ Mock mode switch.
   `syncUiState(..., sessionReady, sessionLoading)` turns Sync, Full sync and Resume off and, when no other banner applies,
   says "Log in to Instagram to sync". `SyncViewModel.start` itself returns unless `ui.value.canStart`, so nothing that
   reaches it can begin a sync the screen did not offer. Mock mode (the fake backend) needs no session.
+- **The real Pacer in Mock mode.** With the fake backend the screen's own pacer (counters, cooldown banner, Sync's enabled
+  state) is the fake library's, but Check now, the Adapter lab and the video resolver use `instagramPacer`, so
+  `SyncViewModel(realPacer = ...)` (the container's `instagramPacer` in Mock mode, null with the real backend) ticks every
+  second like the main one and feeds `realPacerNote`; `SessionSection(pacerNote = ...)` shows it as one small line directly
+  under the status: "Instagram requests paused: N min left (cooldown)" while the real cooldown runs, else "Instagram requests
+  in 24 h: X / 600" (`realPacerLine`, minutes rounded up like the banner). `status()` only reads the log and the cooldown:
+  it makes no request, records nothing, and never gates the fake library's Sync. With the real backend nothing is added, the
+  existing lines already show that Pacer. It adds no request, rate or concurrency.
 - **Logout.** Log out first cancels a running sync (`controller.cancel()`), then forgets the session; the whole sequence runs
   under `NonCancellable` (the screen going away cannot drop a logout) and a failure to cancel the run is swallowed, so
   logging out always forgets the session.

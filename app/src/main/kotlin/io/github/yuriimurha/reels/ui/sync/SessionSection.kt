@@ -26,6 +26,7 @@ import io.github.yuriimurha.reels.session.SessionState
  * The session controls (spec 9.5). [state] is null while the stored state is still being read: nothing can be offered
  * yet, because a stale guess (LoggedOut) would let an early tap open Log in for a session that is actually challenged.
  * Log out is offered in every state but LoggedOut: an expired or challenged session still has cookies on the phone.
+ * [pacerNote] is one more line directly under the status, for the real Pacer's state in Mock mode (null: none).
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -38,41 +39,38 @@ fun SessionSection(
     onLogout: () -> Unit,
     onCheck: () -> Unit,
     onPaste: () -> Unit,
+    pacerNote: String? = null,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Instagram session", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
         when (state) {
             null -> Text("Checking session\u2026", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            SessionState.LoggedOut -> {
-                Text("Not logged in")
-                Buttons {
-                    Button(onClick = onLogin) { Text("Log in") }
-                    TextButton(onClick = onPaste) { Text("Paste sessionid") }
-                }
+            SessionState.LoggedOut -> Text("Not logged in")
+            is SessionState.Valid -> Text("Logged in as @${state.handle}")
+            is SessionState.Expired -> Text("Session expired" + (state.handle?.let { " (@$it)" } ?: ""))
+            is SessionState.Challenge -> Text("Instagram wants verification")
+        }
+        pacerNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        when (state) {
+            null -> Unit
+            SessionState.LoggedOut -> Buttons {
+                Button(onClick = onLogin) { Text("Log in") }
+                TextButton(onClick = onPaste) { Text("Paste sessionid") }
             }
-            is SessionState.Valid -> {
-                Text("Logged in as @${state.handle}")
-                Buttons {
-                    OutlinedButton(onClick = onCheck) { Text("Check now") }
-                    TextButton(onClick = onLogout) { Text("Log out") }
-                }
+            is SessionState.Valid -> Buttons {
+                OutlinedButton(onClick = onCheck) { Text("Check now") }
+                TextButton(onClick = onLogout) { Text("Log out") }
             }
-            is SessionState.Expired -> {
-                Text("Session expired" + (state.handle?.let { " (@$it)" } ?: ""))
-                Buttons {
-                    Button(onClick = onRelogin) { Text("Log in again") }
-                    TextButton(onClick = onPaste) { Text("Paste sessionid") }
-                    TextButton(onClick = onLogout) { Text("Log out") }
-                }
+            is SessionState.Expired -> Buttons {
+                Button(onClick = onRelogin) { Text("Log in again") }
+                TextButton(onClick = onPaste) { Text("Paste sessionid") }
+                TextButton(onClick = onLogout) { Text("Log out") }
             }
-            is SessionState.Challenge -> {
-                Text("Instagram wants verification")
-                Buttons {
-                    Button(onClick = { onResolveChallenge(state.challengeUrl) }) { Text("Resolve on Instagram") }
-                    TextButton(onClick = onCheck) { Text("Check now") }
-                    TextButton(onClick = onPaste) { Text("Paste sessionid") }
-                    TextButton(onClick = onLogout) { Text("Log out") }
-                }
+            is SessionState.Challenge -> Buttons {
+                Button(onClick = { onResolveChallenge(state.challengeUrl) }) { Text("Resolve on Instagram") }
+                TextButton(onClick = onCheck) { Text("Check now") }
+                TextButton(onClick = onPaste) { Text("Paste sessionid") }
+                TextButton(onClick = onLogout) { Text("Log out") }
             }
         }
         message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }

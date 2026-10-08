@@ -71,6 +71,8 @@ fun SyncScreen(
                 container.session,
                 requiresSession = container.backend is Backend.Real,
                 mockSwitch = container.mockModeSwitch { ProcessRestart.restart(appContext) }.takeIf { BuildConfig.DEBUG },
+                // Mock mode: Check now, the lab and the video resolver still use the real Pacer, so its state is shown too.
+                realPacer = if (container.backend is Backend.Fake) container.instagramPacer else null,
             )
         }
     },
@@ -86,6 +88,7 @@ fun SyncScreen(
     val sessionMessage by viewModel.sessionMessage.collectAsStateWithLifecycle()
     val pasteError by viewModel.pasteError.collectAsStateWithLifecycle()
     val mockSwitchEnabled by viewModel.mockSwitchEnabled.collectAsStateWithLifecycle()
+    val realPacerNote by viewModel.realPacerNote.collectAsStateWithLifecycle()
     var pasting by remember { mutableStateOf(false) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -130,6 +133,7 @@ fun SyncScreen(
                     onLogout = viewModel::logout,
                     onCheck = viewModel::checkSession,
                     onPaste = { viewModel.clearPasteError(); pasting = true },
+                    pacerNote = realPacerNote,
                 )
             },
             developerSection = {

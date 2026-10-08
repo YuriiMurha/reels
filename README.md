@@ -135,9 +135,11 @@ and never contacts Instagram. A release build has no such switch and always uses
 - **Nothing is lost by switching back and forth.** The fake library and the real one are kept separately (fake:
   `reels.db`, real: `library.db`; their thumbnails and cached videos too). Shared between them are only the Instagram
   login and the request log behind the 600-per-24-hour budget, with its cooldown: session checks and lab calls count
-  against it even in Mock mode. In Mock mode the Sync screen shows the fake library's counters and cooldown, so a real
-  cooldown armed by a session check or a lab call is not shown there until you switch Mock mode off (the app still
-  refuses the requests).
+  against it even in Mock mode. In Mock mode the Sync screen's own counters and cooldown are the fake library's, so under
+  the session status it adds one line for the real ones: **Instagram requests in 24 h: X / 600**, or, while a real cooldown
+  (from a session check or a lab call) is running, **Instagram requests paused: N min left (cooldown)**. It is only read
+  from the app's own request log and never sends anything. With Mock mode off the line is not there: the existing
+  counters already are the real ones.
 
 ### Automated smoke tests (emulator only)
 
