@@ -93,6 +93,12 @@ class AdapterLabViewModel(
     private val signals: SessionSignals,
     private val labDir: File,
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * Runs inside the Pacer's gate, right before each call that is really sent (after the session was checked there again): a
+     * tap is a new user action, so the WebView transport counts its page limit afresh (`allowNewAttempts()`, R91). A tap that
+     * is refused sends nothing and runs nothing.
+     */
+    private val beforeCall: suspend () -> Unit = {},
 ) : ViewModel() {
     private val local = MutableStateFlow(LabUiState())
 
@@ -141,6 +147,7 @@ class AdapterLabViewModel(
                     if (sessionState.first() !is SessionState.Valid || signals.runSession(epoch) != RunSession.USABLE) throw SessionNotValid()
                 },
             ) {
+                beforeCall()
                 val result = lab.run(call, arg)
                 // Keep the answer first: the Pacer arms the cooldown only when the block THROWS RateLimited, and the
                 // screen must still get the shape of that 429.

@@ -82,12 +82,13 @@ class SyncEngineTest {
         sessionSignals: SessionSignals = signals,
         eviction: MediaEviction = MediaEviction { },
         sessionUsable: suspend (Int) -> RunSession = { RunSession.USABLE },
+        beforeRun: suspend () -> Unit = {},
     ): SyncEngine {
         clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
-            eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account,
+            eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account, beforeRun = beforeRun,
         )
     }
 
@@ -1104,6 +1105,46 @@ class SyncEngineTest {
         assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
         assertEquals("Session expired", run.lastError)
         assertEquals(emptyList(), signals.events)
+    }
+
+    // ---- R91: every run is a new user action for the WebView transport ----
+
+    @Test
+    fun everyRunStartsByAllowingNewTransportAttemptsBeforeItsFirstRequest() = runTest {
+        val client = smallClient()
+        val requestsWhenTold = mutableListOf<Int>()
+        val engine = engine(client, beforeRun = { requestsWhenTold += client.calls.size })
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
+        assertTrue(client.calls.size > 1, "precondition: the run made several requests")
+        assertEquals(listOf(0), requestsWhenTold, "told once per run, before anything was sent")
+
+        // A Resume (or the next run) is a new action again: told once more, before that run's first request.
+        val callsAfterTheFirstRun = client.calls.size
+        runSync(engine, SyncMode.QUICK)
+        assertEquals(listOf(0, callsAfterTheFirstRun), requestsWhenTold, "once for each run, not once per request")
+    }
+
+    @Test
+    fun aRunThatStopsAtOnceWasToldToo() = runTest {
+        val client = smallClient()
+        var told = 0
+        val run = runSync(engine(client, sessionUsable = { RunSession.NOT_USABLE }, beforeRun = { told++ }), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals(1, told)
+        assertEquals(emptyList(), client.calls)
+    }
+
+    /** The hook is the transport's, called on the main thread: whatever it throws, the run row must not stay RUNNING. */
+    @Test
+    fun aHookThatFailsPausesTheRunInsteadOfLeavingItRunning() = runTest {
+        val client = smallClient()
+        val run = runSync(engine(client, beforeRun = { throw IllegalStateException("no main looper") }), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.PAUSED, run.status)
+        assertEquals("Unexpected error: IllegalStateException", run.lastError)
+        assertEquals(emptyList(), client.calls, "nothing is sent")
     }
 
     /** The fake backend has no session: the container builds its engine without a gate, and the default lets everything through. */

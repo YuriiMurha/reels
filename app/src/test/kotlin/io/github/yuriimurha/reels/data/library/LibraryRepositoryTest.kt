@@ -213,6 +213,42 @@ class LibraryRepositoryTest {
         assertEquals(1, cleared, "and the cached videos")
     }
 
+    /**
+     * Delete library is how the owner switches accounts: the WebView transport's page (and what it remembers about a login or a
+     * challenge) belongs to the old session, so it is told first, before anything is wiped.
+     */
+    @Test
+    fun deleteLibraryDestroysThePageFirst() = runTest {
+        givenLibrary()
+        val cardsWhenTold = mutableListOf<Int>()
+        lateinit var repository: LibraryRepository
+        repository = LibraryRepository(db, thumbs, beforeSessionChange = { cardsWhenTold += repository.collectionCards().first().size })
+
+        repository.deleteLibrary()
+
+        assertEquals(1, cardsWhenTold.size, "told exactly once")
+        assertTrue(cardsWhenTold.single() > 0, "told while the library was still there: first")
+    }
+
+    @Test
+    fun aPageThatCannotBeDestroyedNeverStopsDeleteLibrary() = runTest {
+        givenLibrary()
+        val repository = LibraryRepository(db, thumbs, beforeSessionChange = { throw IllegalStateException("the WebView is gone") })
+
+        assertEquals(LibraryDeletion.COMPLETE, repository.deleteLibrary())
+
+        assertEquals(emptyList(), repository.collectionCards().first())
+    }
+
+    @Test
+    fun aCancelledHookStillPropagatesTheCancellation() = runTest {
+        givenLibrary()
+        val repository = LibraryRepository(db, thumbs, beforeSessionChange = { throw kotlin.coroutines.cancellation.CancellationException("cancelled") })
+
+        kotlin.test.assertFailsWith<kotlin.coroutines.cancellation.CancellationException> { repository.deleteLibrary() }
+        assertTrue(repository.collectionCards().first().isNotEmpty(), "nothing was deleted")
+    }
+
     @Test
     fun aCompleteDeleteSaysSo() = runTest {
         givenLibrary()

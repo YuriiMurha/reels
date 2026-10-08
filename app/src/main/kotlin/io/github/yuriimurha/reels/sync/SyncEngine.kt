@@ -56,6 +56,12 @@ class SyncEngine(
     private val sessionUsable: suspend (epoch: Int) -> RunSession = { RunSession.USABLE },
     /** R84: the account this library belongs to. A run under another account stops before it writes anything. */
     private val libraryAccount: LibraryAccount,
+    /**
+     * Runs at the very start of every [run], before its first request (R91). The real backend passes the WebView transport's
+     * `allowNewAttempts()`: a run, or a Resume, is a new user action and may create the transport's three pages of its own. The
+     * fake backend has no transport: the default does nothing.
+     */
+    private val beforeRun: suspend () -> Unit = {},
 ) {
     companion object {
         /** P7: a FULL reconcile removing at least this many items AND more than half of those that existed before the run is refused. */
@@ -86,7 +92,8 @@ class SyncEngine(
         try {
             // The session this run starts under. Every signal below carries it, so one that outlives a logout or a paste is
             // ignored. Asked INSIDE the try: a session layer that cannot answer (no WebView provider while it is being updated)
-            // ends the run PAUSED like any other unexpected error, instead of leaving the row RUNNING.
+            // ends the run PAUSED like any other unexpected error, instead of leaving the row RUNNING. So is beforeRun.
+            beforeRun()
             epoch = signals.epoch()
             progress.epoch = epoch
             progress.phase("Checking session")

@@ -20,8 +20,7 @@ import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
 import io.github.yuriimurha.reels.instagram.web.CookieStore
-import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
-import io.github.yuriimurha.reels.instagram.web.OkHttpTransport
+import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.instagram.web.WebInstagramClient
 import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
 import io.github.yuriimurha.reels.session.AndroidCookieStore
@@ -40,6 +39,8 @@ import io.github.yuriimurha.reels.sync.pacing.DataStoreCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import io.github.yuriimurha.reels.sync.pacing.RoomRequestLog
+import io.github.yuriimurha.reels.transport.AndroidWebPage
+import io.github.yuriimurha.reels.transport.WebViewTransport
 import kotlinx.coroutines.flow.first
 import okhttp3.OkHttpClient
 import java.io.File
@@ -75,7 +76,12 @@ class AppContainer(context: Context) {
     val libraryAccount: LibraryAccount by lazy { StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake)) }
 
     val library: LibraryRepository by lazy {
-        LibraryRepository(db, thumbnails, clearVideoCache = { videoCache.clear() }, forgetAccount = { libraryAccount.forget() })
+        LibraryRepository(
+            db, thumbnails,
+            clearVideoCache = { videoCache.clear() },
+            forgetAccount = { libraryAccount.forget() },
+            beforeSessionChange = ::resetInstagramTransport,
+        )
     }
 
     /** Queued work names a run id only, so it also carries which library it belongs to (R67). */
@@ -118,17 +124,42 @@ class AppContainer(context: Context) {
         Pacer(PacingPolicy.Conservative, RoomRequestLog(requestLogDb.apiRequestDao()), DataStoreCooldownStore(settings))
     }
 
-    private val instagramHttp: OkHttpClient by lazy {
-        HttpClientFactory.create(
-            cookies = cookieStore,
-            userAgent = WebSettings.getDefaultUserAgent(context),
-            logger = if (BuildConfig.DEBUG) { line -> Log.d("InstagramHttp", line) } else null,
+    /**
+     * Every Instagram API call goes through this one transport: a same-origin `fetch` inside a hidden instagram.com page, so
+     * Chromium sends it with its own TLS stack, headers and cookies. A [Lazy] kept as such, not a `by lazy` property, so the
+     * hooks below can ask [Lazy.isInitialized]: building it builds no WebView (the page is made by the first call), but nothing
+     * that merely changes the session may even build it. Mock mode, a cold logout and a cold Delete library never touch it.
+     */
+    private val instagramTransportLazy: Lazy<WebViewTransport> = lazy {
+        WebViewTransport(
+            createPage = { AndroidWebPage(context) },
+            homeUrl = WebEndpoints.HOME_URL,
+            script = context.assets.open("ig_fetch.js").bufferedReader().use { it.readText() },
+            log = if (BuildConfig.DEBUG) { line -> Log.d("InstagramHttp", line) } else null,
         )
     }
 
+    val instagramTransport: WebViewTransport get() = instagramTransportLazy.value
+
+    /** True once something has needed the transport. The hooks below never make it true. */
+    val instagramTransportCreated: Boolean get() = instagramTransportLazy.isInitialized()
+
     /**
-     * The CDN's own client (P6): no cookie jar, never shared with the API client. Lazy like [instagramHttp], because its
-     * user agent comes from the WebView provider, which must not load just because the container was built.
+     * The session changes (logout, a paste, Delete library, a check after the owner had to act): destroys the transport's page and
+     * forgets what it remembers, but only if there is a transport. With none, there is nothing to destroy and nothing may be built.
+     */
+    suspend fun resetInstagramTransport() {
+        if (instagramTransportLazy.isInitialized()) instagramTransportLazy.value.reset()
+    }
+
+    /** A new user action (a sync run, a check, a lab tap) begins: the transport's page limit counts afresh. Never builds it either. */
+    suspend fun allowNewInstagramAttempts() {
+        if (instagramTransportLazy.isInitialized()) instagramTransportLazy.value.allowNewAttempts()
+    }
+
+    /**
+     * The CDN's own client (P6): no cookie jar, never shared with the Instagram transport. Lazy, because its user agent comes
+     * from the WebView provider, which must not load just because the container was built.
      */
     private val cdnHttp: OkHttpClient by lazy { HttpMediaFetcher.client(WebSettings.getDefaultUserAgent(context)) }
 
@@ -137,7 +168,7 @@ class AppContainer(context: Context) {
         if (usesFake) {
             Backend.Fake()
         } else {
-            Backend.Real(WebInstagramClient({ OkHttpTransport(instagramHttp) }, cookieStore), HttpMediaFetcher({ cdnHttp }), instagramPacer)
+            Backend.Real(WebInstagramClient({ instagramTransport }, cookieStore), HttpMediaFetcher({ cdnHttp }), instagramPacer)
         }
     }
 
@@ -145,19 +176,22 @@ class AppContainer(context: Context) {
     fun mockModeSwitch(restart: () -> Unit) =
         MockModeSwitch(usesFake, backendChoice, cancelSync = { syncScheduler.cancelAndAwait() }, restart = restart)
 
-    /** The debug Adapter lab. Built without the HTTP client: that is only built when a lab call reaches the network. */
-    val adapterLab: AdapterLab by lazy { AdapterLab({ OkHttpTransport(instagramHttp) }, cookieStore) }
+    /** The debug Adapter lab. Built without the transport: that is only built when a lab call reaches the network. */
+    val adapterLab: AdapterLab by lazy { AdapterLab({ instagramTransport }, cookieStore) }
 
     /**
-     * Building this loads no WebView: the HTTP client (whose user agent comes from the WebView provider) is only built
-     * when the first request needs the probe, and the cookie store reaches CookieManager per call, not at construction.
+     * Building this loads no WebView: the transport (and its page) is only built when the first request needs the probe, and
+     * the cookie store reaches CookieManager per call, not at construction. The session changing, or a check the owner asked
+     * for, tells the transport (if there is one) through [resetInstagramTransport] and [allowNewInstagramAttempts].
      */
     val session: SessionRepository by lazy {
         SessionRepository(
             cookies = cookieStore,
-            probe = LazySessionProbe { WebSessionProbe({ OkHttpTransport(instagramHttp) }, cookieStore) },
+            probe = LazySessionProbe { WebSessionProbe({ instagramTransport }, cookieStore) },
             pacer = instagramPacer,
             settings = settings,
+            beforeSessionChange = ::resetInstagramTransport,
+            beforeCheck = ::allowNewInstagramAttempts,
         )
     }
 
@@ -166,16 +200,20 @@ class AppContainer(context: Context) {
         // and about the session gate every request passes (R82).
         val signals: SessionSignals
         val sessionUsable: suspend (epoch: Int) -> RunSession
+        val beforeRun: suspend () -> Unit
         when (backend) {
             is Backend.Fake -> {
                 signals = SessionSignals.None
                 sessionUsable = { RunSession.USABLE } // the fake library has no session
+                beforeRun = { } // and no transport: Mock mode never touches it
             }
             is Backend.Real -> {
                 signals = session
                 // Valid under the run's own epoch, read without SessionRepository's lock: a paste holds that lock while it
                 // waits for the Pacer's gate, and this runs inside the gate, so taking the lock would deadlock.
                 sessionUsable = session::runSession
+                // A run, or a Resume, is a new user action for the transport's page limit (R91).
+                beforeRun = ::allowNewInstagramAttempts
             }
         }
         return SyncEngine(
@@ -183,6 +221,7 @@ class AppContainer(context: Context) {
             eviction = MediaEviction { pks -> pks.forEach { videoCache.remove(it) } },
             sessionUsable = sessionUsable,
             libraryAccount = libraryAccount,
+            beforeRun = beforeRun,
         )
     }
 }

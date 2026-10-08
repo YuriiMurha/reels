@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.cancellation.CancellationException
 
 /** What the login screen needs; split out so its ViewModel can be tested without Android. */
 interface LoginSession {
@@ -36,6 +37,26 @@ class SessionRepository(
     private val probe: SessionProbe,
     private val pacer: Pacer,
     private val settings: SettingsStore,
+    /**
+     * The WebView transport's page belongs to one session: it may sit on a login or challenge page it will not leave, or act
+     * for an account that is gone. This runs (the app passes the transport's `reset()`, only if a request ever built the
+     * transport) BEFORE the jar's session is replaced or forgotten (logout, a paste, and a paste's rollback), so the page is
+     * gone before the cookies change and cannot write them back. It also runs, inside the Pacer's gate, before a check that
+     * starts on a stored state that is not Valid: the owner had to act (log in again, finish a challenge) and is asking again,
+     * so the request goes out on a fresh page rather than the one that said "login" or "challenge" last time. Never while the
+     * stored state is Valid (a page doing its job is kept), and never before the Pacer has agreed to send something.
+     *
+     * One hook, called before the change, rather than a second one called after a new Valid is committed: a check that begins
+     * on a sticky login or challenge verdict can only end in that verdict, so it would never get to commit a Valid, and a page
+     * made after the commit could be used by a run that the commit has just let start. A failure here is swallowed
+     * (cancellation excepted): destroying a page must never stop a logout, or a paste's rollback.
+     */
+    private val beforeSessionChange: suspend () -> Unit = {},
+    /**
+     * A session check the owner asked for (Check now, the login screen's) is about to be sent: a new user action, so the
+     * transport counts its page limit afresh (`allowNewAttempts()`). Runs inside the Pacer's gate, right before the request.
+     */
+    private val beforeCheck: suspend () -> Unit = {},
 ) : SessionSignals, LoginSession {
     /** The last known state, shown without a request (spec D7). */
     val state: Flow<SessionState> = settings.session.map { it.toState() }
@@ -121,7 +142,11 @@ class SessionRepository(
             if (!hasSessionCookies()) return store(SessionState.LoggedOut)
             sessionEpoch to state.first().handle
         }
-        val result = probeSession(handle)
+        val result = probeSession(handle) {
+            beforeCheck()
+            // Read here, inside the gate, not before it: what is stored may have changed while this check waited its turn.
+            if (state.first() !is SessionState.Valid) destroyPage()
+        }
         return lock.withLock {
             // Again, for a login that landed while the request was out: the answer then belongs to a session that is gone.
             startEpochIfSessionChanged()
@@ -149,10 +174,14 @@ class SessionRepository(
             pacer.ensureAllowed()
             val previousSession = sessionId()
             val previousUser = userId()
+            destroyPage() // after the refusal above (nothing changes if the Pacer says no), before the first cookie is written
             sessionEpoch++
             writeSessionCookies(WebSessionCookies.sessionCookie(parsed.sessionId), WebSessionCookies.userCookie(parsed.userId))
             recordIssuedFor()
             suspend fun rollBack() = withContext(NonCancellable) {
+                // The page that checked the rejected id may be on a login page for good; the restored session must not meet it.
+                // A failure of the hook is swallowed by destroyPage: the previous cookies go back whatever the page does.
+                destroyPage()
                 writeSessionCookies(WebSessionCookies.sessionCookie(previousSession), WebSessionCookies.userCookie(previousUser))
                 sessionEpoch++
                 recordIssuedFor()
@@ -171,6 +200,7 @@ class SessionRepository(
     /** Forgets the session. The library is kept (spec 9.5). */
     suspend fun logout() {
         lock.withLock {
+            destroyPage() // first: a page that outlives the cookies could write them back
             sessionEpoch++
             cookies.clearAll()
             recordIssuedFor()
@@ -236,12 +266,24 @@ class SessionRepository(
 
     private fun jarStillHoldsTheEpochsAccount(): Boolean = userId() == recordedOrRecord(jarSession()).userId
 
-    private suspend fun probeSession(handle: String?): SessionState = try {
-        SessionState.Valid(pacer.interactive { probe.currentUser() }.username)
+    /** [beforeProbe] runs inside the Pacer's gate, right before the request: nothing else can be using the transport then. */
+    private suspend fun probeSession(handle: String?, beforeProbe: suspend () -> Unit = {}): SessionState = try {
+        SessionState.Valid(pacer.interactive { beforeProbe(); probe.currentUser() }.username)
     } catch (e: InstagramException.LoginRequired) {
         SessionState.Expired(handle)
     } catch (e: InstagramException.ChallengeRequired) {
         SessionState.Challenge(e.challengeUrl, handle)
+    }
+
+    /** [beforeSessionChange], without letting a failure of it stop what the caller is doing (see its documentation). */
+    private suspend fun destroyPage() {
+        try {
+            beforeSessionChange()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Intentionally ignored.
+        }
     }
 
     /** Under [lock]: the epoch just bumped was issued for whatever session the jar holds now. */

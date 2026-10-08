@@ -19,25 +19,90 @@ class BackendWiringGuardTest {
         return code(file.readText())
     }
 
+    /** Every Kotlin file of `:app`'s `src/main`, comments blanked, by its path under the package root. */
+    private fun allMain(): Map<String, String> {
+        val root = File("src/main/kotlin/io/github/yuriimurha/reels")
+        assertTrue(root.isDirectory, "unit tests must run from the app module directory")
+        return root.walkTopDown().filter { it.isFile && it.extension == "kt" }
+            .associate { it.invariantSeparatorsPath.substringAfter("reels/") to code(it.readText()) }
+    }
+
     /**
-     * Instagram's cookies live in the API client's jar. If the CDN fetcher were handed `instagramHttp`, every thumbnail
-     * request would carry them to a CDN host, and the CDN's re-send rules (R66) would not apply.
+     * Instagram's cookies live in the browser's jar. The CDN fetcher is handed `cdnHttp` and never the transport, so a
+     * thumbnail request can never go through the Instagram page or carry its cookies, and the CDN's re-send rules (R66) apply.
      */
     @Test
-    fun theRealFetcherUsesTheCdnClientNeverTheApiClient() {
+    fun theRealFetcherUsesTheCdnClientNeverTheInstagramTransport() {
         val container = main("di/AppContainer.kt")
 
         val fetchers = callArguments(container, "HttpMediaFetcher(")
         assertEquals(1, fetchers.size, "expected exactly one HttpMediaFetcher in AppContainer: $fetchers")
-        assertTrue("cdnHttp" in fetchers.single() && "instagramHttp" !in fetchers.single(), "the fetcher's client: ${fetchers.single()}")
-
-        val apiClients = callArguments(container, "WebInstagramClient(")
-        assertEquals(1, apiClients.size)
-        assertTrue("instagramHttp" in apiClients.single() && "cdnHttp" !in apiClients.single(), "the API client's client: ${apiClients.single()}")
+        assertTrue("cdnHttp" in fetchers.single() && "instagramTransport" !in fetchers.single(), "the fetcher's client: ${fetchers.single()}")
 
         val definition = container.lines().single { Regex("""val cdnHttp\b""").containsMatchIn(it) }
         assertTrue("HttpMediaFetcher.client(" in definition || "HttpClientFactory.createCdn(" in definition, "cdnHttp is built by: $definition")
-        assertFalse("HttpClientFactory.create(" in definition, "cdnHttp must not be the cookie-carrying API client: $definition")
+    }
+
+    /** The Real client, the session probe and the Adapter lab all send through the one WebView transport (R91's page, not OkHttp). */
+    @Test
+    fun theRealClientTheProbeAndTheLabAllGetTheWebViewTransport() {
+        val container = main("di/AppContainer.kt")
+        for (call in listOf("WebInstagramClient(", "WebSessionProbe(", "AdapterLab(")) {
+            val arguments = callArguments(container, call)
+            assertEquals(1, arguments.size, "expected exactly one $call in AppContainer: $arguments")
+            assertTrue(
+                Regex("""^\s*\{\s*instagramTransport\s*}""").containsMatchIn(arguments.single()) && "cdnHttp" !in arguments.single(),
+                "$call must get { instagramTransport }: ${arguments.single()}",
+            )
+        }
+    }
+
+    /** No OkHttp API path is left in production: the API client factory and the JVM-test transport are `:instagram`'s, for tests. */
+    @Test
+    fun noOkHttpPathToInstagramsApiRemainsInProduction() {
+        val sources = allMain()
+        assertTrue(sources.size > 50, "the scan found ${sources.size} files")
+        val forbidden = listOf(
+            "OkHttpTransport" to Regex("""\bOkHttpTransport\b"""),
+            "HttpClientFactory.create(" to Regex("""\bHttpClientFactory\s*\.\s*create\s*\("""),
+            "instagramHttp" to Regex("""\binstagramHttp\b"""),
+        )
+        for ((path, text) in sources) {
+            for ((what, pattern) in forbidden) {
+                assertFalse(pattern.containsMatchIn(text), "$path must not use $what (only createCdn is allowed in production)")
+            }
+        }
+    }
+
+    /** The WebView behind the transport is made in one place, so Mock mode and the guards above can reason about when it exists. */
+    @Test
+    fun androidWebPageIsConstructedOnlyByTheContainer() {
+        val construction = Regex("""(?<!class )(?<!\w)AndroidWebPage\s*\(|::\s*AndroidWebPage\b""")
+        val users = allMain().filterValues { construction.containsMatchIn(it) }.keys
+        assertEquals(setOf("di/AppContainer.kt"), users)
+        assertEquals(1, construction.findAll(allMain().getValue("di/AppContainer.kt")).count(), "exactly one page factory")
+    }
+
+    /**
+     * Every hook that tells the transport about the session goes through the container's two guarded functions, which only act
+     * on a transport that already exists: logout, a paste and Delete library never build a WebView, and neither does Mock mode.
+     */
+    @Test
+    fun theSessionHooksGoThroughTheGuardedContainerFunctions() {
+        val container = main("di/AppContainer.kt")
+        val session = callArguments(container, "SessionRepository(").single()
+        assertTrue(Regex("""beforeSessionChange\s*=\s*::resetInstagramTransport\b""").containsMatchIn(session), "the session's reset: $session")
+        assertTrue(Regex("""beforeCheck\s*=\s*::allowNewInstagramAttempts\b""").containsMatchIn(session), "the session's check hook: $session")
+        val library = callArguments(container, "LibraryRepository(").single()
+        assertTrue(Regex("""beforeSessionChange\s*=\s*::resetInstagramTransport\b""").containsMatchIn(library), "Delete library's reset: $library")
+        val lab = callArguments(main("ui/lab/AdapterLabScreen.kt"), "AdapterLabViewModel(").single()
+        assertTrue(Regex("""beforeCall\s*=\s*container::allowNewInstagramAttempts\b""").containsMatchIn(lab), "the lab's hook: $lab")
+
+        for (guarded in listOf("fun resetInstagramTransport", "fun allowNewInstagramAttempts")) {
+            val body = container.substringAfter(guarded).substringBefore("\n    }")
+            assertTrue("instagramTransportLazy.isInitialized()" in body, "$guarded must only act on a transport that exists: $body")
+        }
+        assertTrue(Regex("""instagramTransportLazy:\s*Lazy<WebViewTransport>\s*=\s*lazy\s*\{""").containsMatchIn(container), "the transport stays a Lazy that can be asked")
     }
 
     /**
@@ -65,8 +130,12 @@ class BackendWiringGuardTest {
         assertTrue(Regex("""sessionUsable\s*=\s*sessionUsable\b""").containsMatchIn(engines.single()), "the engine's gate: ${engines.single()}")
         val real = Regex("""is Backend\.Real\s*->\s*\{([^}]*)}""").find(container)?.groupValues?.get(1)
         assertTrue(real != null && Regex("""sessionUsable\s*=\s*session::runSession\b""").containsMatchIn(real), "Backend.Real's gate: $real")
+        // Each run is a new user action for the transport's page limit: the real engine says so, the fake one has no transport.
+        assertTrue(real != null && Regex("""beforeRun\s*=\s*::allowNewInstagramAttempts\b""").containsMatchIn(real), "Backend.Real's run hook: $real")
+        assertTrue(Regex("""beforeRun\s*=\s*beforeRun\b""").containsMatchIn(engines.single()), "the engine's run hook: ${engines.single()}")
         val fake = Regex("""is Backend\.Fake\s*->\s*\{([^}]*\{[^}]*}[^}]*)}""").find(container)?.groupValues?.get(1)
         assertTrue(fake != null && Regex("""sessionUsable\s*=\s*\{\s*RunSession\.USABLE\s*}""").containsMatchIn(fake), "Backend.Fake's gate: $fake")
+        assertTrue(fake != null && "allowNewInstagramAttempts" !in fake, "Mock mode's engine must not touch the transport: $fake")
     }
 
     /** R84: the engine checks the account against the container's one per-library store, the same one Delete library clears. */

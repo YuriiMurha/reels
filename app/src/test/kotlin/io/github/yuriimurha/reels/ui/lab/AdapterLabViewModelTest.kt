@@ -80,6 +80,7 @@ class AdapterLabViewModelTest {
         dir: File = labDir,
         signals: SessionSignals = this@AdapterLabViewModelTest.signals,
         pacer: Pacer = newPacer(),
+        beforeCall: suspend () -> Unit = {},
     ): AdapterLabViewModel {
         val viewModel = AdapterLabViewModel(
             lab = runner,
@@ -88,6 +89,7 @@ class AdapterLabViewModelTest {
             signals = signals,
             labDir = dir,
             io = StandardTestDispatcher(testScheduler),
+            beforeCall = beforeCall,
         )
         backgroundScope.launch { viewModel.ui.collect {} }
         advanceUntilIdle()
@@ -150,6 +152,58 @@ class AdapterLabViewModelTest {
         assertNull(cooldowns.activeUntil())
         assertEquals("ShapeChanged", viewModel.ui.value.shown?.classification)
         assertEquals("Who am I: Unexpected Instagram response at http.404", viewModel.ui.value.message)
+    }
+
+    // ---- R91: each tap that is really sent is a new user action for the WebView transport ----
+
+    @Test
+    fun eachTapAllowsNewTransportAttemptsRightBeforeItsRequest() = runTest {
+        val order = mutableListOf<String>()
+        val sent = runner.next
+        runner.next = { call, arg -> order += "send"; sent(call, arg) }
+        val viewModel = viewModel(beforeCall = { order += "allow" })
+
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        viewModel.tap(LabCall.COLLECTIONS)
+        advanceUntilIdle()
+
+        assertEquals(listOf("allow", "send", "allow", "send"), order)
+    }
+
+    @Test
+    fun aTapThatIsRefusedAllowsNothing() = runTest {
+        val allowed = mutableListOf<String>()
+        cooldowns.onRateLimited(START)
+        val viewModel = viewModel(beforeCall = { allowed += "allow" })
+
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        sessionState.value = SessionState.Expired("tester")
+        advanceUntilIdle()
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+
+        assertEquals(emptyList(), runner.calls, "precondition: nothing was sent")
+        assertEquals(emptyList(), allowed, "a cooling-down Pacer and a session that is not Valid both stop the tap first")
+    }
+
+    @Test
+    fun aQueuedTapWhoseSessionWentAwayAllowsNothing() = runTest {
+        val allowed = mutableListOf<String>()
+        val viewModel = viewModel(beforeCall = { allowed += "allow" })
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        allowed.clear()
+        viewModel.tap(LabCall.COLLECTIONS)
+        runCurrent() // inside the Pacer, waiting out the 2 s gap
+        assertEquals(LabCall.COLLECTIONS, viewModel.ui.value.running, "precondition: the second tap is queued")
+
+        signals.usable = RunSession.NOT_USABLE
+        advanceUntilIdle()
+
+        assertEquals(listOf(LabCall.CURRENT_USER), runner.calls.map { it.first })
+        assertEquals(emptyList(), allowed, "the in-gate check refused it before anything was done")
     }
 
     @Test

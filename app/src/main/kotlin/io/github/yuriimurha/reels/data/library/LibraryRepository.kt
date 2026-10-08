@@ -51,6 +51,12 @@ class LibraryRepository(
     private val clearVideoCache: () -> Unit = {},
     /** R84: forgets the library's account (`LibraryAccount.forget`). */
     private val forgetAccount: suspend () -> Unit = {},
+    /**
+     * Runs first in [deleteLibrary] (the app passes the WebView transport's `reset()`): Delete library is how the owner switches
+     * accounts, so the page, and what it remembers of a login or a challenge, must not outlive the library. A failure of it is
+     * swallowed (cancellation excepted): a page that will not die must not stop the delete.
+     */
+    private val beforeSessionChange: suspend () -> Unit = {},
 ) {
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
@@ -101,6 +107,13 @@ class LibraryRepository(
      * the delete itself (the rows) still throws, for the caller to say so.
      */
     suspend fun deleteLibrary(): LibraryDeletion {
+        try {
+            beforeSessionChange()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Intentionally ignored: see beforeSessionChange.
+        }
         db.deleteLibrary()
         var accountRecordKept = false
         try {

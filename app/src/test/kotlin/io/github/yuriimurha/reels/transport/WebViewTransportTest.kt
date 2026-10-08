@@ -910,6 +910,70 @@ class WebViewTransportTest {
     }
 
     @Test
+    fun allowNewAttemptsGivesBackThePageCountAndNothingElse() = runTest {
+        val pages = Pages(*Array(6) { FakeWebPage(loadError = IOException("load $it")) })
+        val transport = transport(pages)
+        repeat(4) { assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull()) }
+        assertEquals(3, pages.attempts, "the limit is reached")
+
+        // A new user action (a sync run, a check, a lab tap) gets three pages of its own, and no more.
+        transport.allowNewAttempts()
+        repeat(4) { assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull()) }
+        assertEquals(6, pages.attempts)
+
+        transport.allowNewAttempts()
+        val after = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        assertEquals(7, pages.attempts)
+        pages.created.last().post(reply(1))
+        assertEquals(200, after.await().getOrThrow().code)
+    }
+
+    @Test
+    fun allowNewAttemptsNeverDestroysThePageOrDisturbsACallInFlight() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val pending = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val page = pages.created.single()
+
+        transport.allowNewAttempts()
+        assertFalse(page.destroyed)
+        assertTrue(pending.isActive, "the call in flight still waits for its reply")
+        page.post(reply(1))
+        assertEquals(200, pending.await().getOrThrow().code)
+
+        // Between calls too: the same page serves the next one.
+        transport.allowNewAttempts()
+        assertFalse(page.destroyed)
+        val next = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        assertEquals(1, pages.created.size)
+        page.post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun allowNewAttemptsNeverClearsALoginOrChallengeLanding() = runTest {
+        for ((landing, expected) in listOf(
+            "https://www.instagram.com/accounts/login/" to InstagramException.LoginRequired::class,
+            "https://www.instagram.com/challenge/" to InstagramException.ChallengeRequired::class,
+        )) {
+            val pages = Pages(FakeWebPage(landing = landing))
+            val transport = transport(pages)
+            assertTrue(expected.isInstance(call(transport, "api/v1/collections/list/").await().exceptionOrNull()), landing)
+
+            // Only reset() (the owner logged in, or finished the challenge) lets the next call load the site again.
+            repeat(2) {
+                transport.allowNewAttempts()
+                assertTrue(expected.isInstance(call(transport, "api/v1/collections/list/").await().exceptionOrNull()), landing)
+            }
+            assertEquals(1, pages.attempts, landing)
+            assertEquals(emptyList(), pages.created.single().evaluated, landing)
+        }
+    }
+
+    @Test
     fun thePageLimitCountsCreationsThatThrowToo() = runTest {
         val pages = Pages(createErrors = List(3) { IllegalStateException("no WebView provider") })
         val transport = transport(pages)

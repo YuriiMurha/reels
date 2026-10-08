@@ -11,13 +11,17 @@ import kotlin.test.assertTrue
  * given. `addJavascriptInterface` exposes an object to every page and frame the WebView ever shows, so it is never used.
  */
 class JavascriptInterfaceGuardTest {
+    /** Every file of the app's `src/main`: Kotlin and Java with their comments blanked (a doc may say why it is never used), the rest as it is. */
     @Test
-    fun noSourceFileEverCallsAddJavascriptInterface() {
-        val sources = File("src/main/kotlin").walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
-        assertTrue(sources.isNotEmpty(), "unit tests must run from the app module directory")
-        val users = sources
-            .filter { "addJavascriptInterface" in KotlinSource.code(it.readText()) }
-            .map { it.invariantSeparatorsPath.substringAfter("src/main/kotlin/") }
+    fun noFileInSrcMainEverCallsAddJavascriptInterface() {
+        val files = File("src/main").walkTopDown().filter { it.isFile }.toList()
+        assertTrue(files.any { it.extension == "kt" } && files.any { it.name == "ig_fetch.js" }, "unit tests must run from the app module directory")
+        val users = files
+            .filter { file ->
+                val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: return@filter false // a binary resource
+                "addJavascriptInterface" in if (file.extension == "kt" || file.extension == "java") KotlinSource.code(text) else text
+            }
+            .map { it.invariantSeparatorsPath.substringAfter("src/main/") }
         assertEquals(emptyList(), users)
     }
 }

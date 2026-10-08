@@ -58,10 +58,30 @@ class SessionRepositoryTest {
     /** The store behind the last [repository], so a test can read what is persisted at a given moment. */
     private lateinit var settings: SettingsStore
 
-    private fun TestScope.repository(requestLog: InMemoryRequestLog = log): SessionRepository {
+    private fun TestScope.repository(
+        requestLog: InMemoryRequestLog = log,
+        beforeSessionChange: suspend () -> Unit = {},
+        beforeCheck: suspend () -> Unit = {},
+    ): SessionRepository {
         settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
         val pacer = Pacer(PacingPolicy.Conservative, requestLog, cooldowns, Random(1), now = { testScheduler.currentTime })
-        return SessionRepository(cookies, probe, pacer, settings)
+        return SessionRepository(cookies, probe, pacer, settings, beforeSessionChange, beforeCheck)
+    }
+
+    /**
+     * What the transport's hooks and the probe did, in order. The cookie jar's own events go into the same list when a test asks
+     * ([inJar]), so "before the cookies change" is an order in one list rather than a guess.
+     */
+    private val order = mutableListOf<String>()
+
+    private val reset: suspend () -> Unit = { order += "reset" }
+    private val allow: suspend () -> Unit = { order += "allow" }
+
+    /** A hook that writes into the jar's event list, to see where it falls among the cookie writes. */
+    private val inJar: suspend () -> Unit = { cookies.events += "reset" }
+
+    private fun probeRecordsItself() {
+        probe.next = { order += "probe"; Account("42", "tester") }
     }
 
     /** A jar that already holds a session, as after a WebView login. Forgets the seeding writes so tests see only their own. */
@@ -328,6 +348,228 @@ class SessionRepositoryTest {
         repository.logout()
         assertFalse(repository.hasSessionCookies())
         assertEquals(SessionState.LoggedOut, repository.state.first())
+    }
+
+    // ---- The WebView transport's hooks (R91): what is destroyed, and when ----
+
+    /** Review Focus 3: a page that outlives the cookies could write them back, or keep acting for a session that is gone. */
+    @Test
+    fun logoutDestroysThePageBeforeClearingCookies() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = inJar)
+
+        repository.logout()
+
+        assertEquals(listOf("reset", "clear"), cookies.events)
+    }
+
+    @Test
+    fun aPasteDestroysThePageBeforeItWritesTheCookies() = runTest {
+        val repository = repository(beforeSessionChange = inJar)
+
+        assertEquals(SessionState.Valid("tester"), repository.pasteSessionId("42%3Aab"))
+
+        assertEquals("reset", cookies.events.first(), "the page goes before the first cookie is written: ${cookies.events}")
+        assertEquals(1, cookies.events.count { it == "reset" }, "an accepted paste keeps the page that just checked it: ${cookies.events}")
+    }
+
+    @Test
+    fun aPasteThePacerRefusesDestroysNothing() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = inJar)
+        cooldowns.onRateLimited(testScheduler.currentTime)
+
+        assertFailsWith<PacerRefusal.CoolingDown> { repository.pasteSessionId("43%3Acd") }
+
+        assertEquals(emptyList(), cookies.events, "a refused paste changes nothing, the page included")
+    }
+
+    @Test
+    fun aRejectedPasteDestroysThePageAgainBeforeItPutsThePreviousCookiesBack() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = inJar)
+        probe.next = { throw InstagramException.LoginRequired() }
+
+        assertEquals(SessionState.Expired(null), repository.pasteSessionId("43%3Acd"))
+
+        // The page the rejected id was checked on may be sitting on a login page, and would answer LoginRequired to the
+        // restored (valid) session too.
+        assertEquals(
+            listOf(
+                "reset",
+                "set sessionid=43%3Acd; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=31536000",
+                "set ds_user_id=43; Domain=.instagram.com; Path=/; Secure; Max-Age=7776000",
+                "flush",
+                "reset",
+                "set sessionid=s1; Domain=.instagram.com; Path=/; Secure; HttpOnly; Max-Age=31536000",
+                "set ds_user_id=42; Domain=.instagram.com; Path=/; Secure; Max-Age=7776000",
+                "flush",
+            ),
+            cookies.events,
+        )
+    }
+
+    @Test
+    fun aCancelledPasteDestroysThePageAgainToo() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = inJar)
+        probe.gate = CompletableDeferred()
+        val paste = launch { repository.pasteSessionId("43%3Acd") }
+        probe.entered.await()
+
+        paste.cancelAndJoin()
+
+        assertEquals(2, cookies.events.count { it == "reset" }, cookies.events.toString())
+        assertTrue(
+            cookies.events.indexOfLast { it == "reset" } < cookies.events.indexOfLast { it.startsWith("set sessionid=s1") },
+            "the page goes before the old cookies come back: ${cookies.events}",
+        )
+    }
+
+    @Test
+    fun aPageThatCannotBeDestroyedNeverStopsALogout() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = { throw IllegalStateException("the WebView is gone") })
+
+        repository.logout()
+
+        assertFalse(repository.hasSessionCookies(), "the owner asked to forget the session")
+        assertEquals(SessionState.LoggedOut, repository.state.first())
+    }
+
+    @Test
+    fun aPageThatCannotBeDestroyedNeverStopsAPastesRollback() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = { throw IllegalStateException("the WebView is gone") })
+        probe.next = { throw InstagramException.LoginRequired() }
+
+        assertEquals(SessionState.Expired(null), repository.pasteSessionId("43%3Acd"))
+
+        assertEquals("s1", cookies.cookieValue(SessionRepository.INSTAGRAM, "sessionid"), "the previous session is put back")
+        assertEquals("42", cookies.cookieValue(SessionRepository.INSTAGRAM, "ds_user_id"))
+    }
+
+    /**
+     * The owner had to act (log in again, finish a challenge) and asks again. The page a login or a challenge landing left
+     * behind (the transport remembers it until a reset) would answer the same way for ever, so this check starts on a new one.
+     */
+    private suspend fun TestScope.assertTheCheckStartsFresh(arrange: suspend (SessionRepository) -> Unit) {
+        signedIn()
+        probeRecordsItself()
+        val repository = repository(beforeSessionChange = reset, beforeCheck = allow)
+        arrange(repository)
+        order.clear()
+
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+
+        assertEquals(listOf("allow", "reset", "probe"), order)
+    }
+
+    @Test
+    fun aCheckAfterTheSessionExpiredStartsOnAFreshPage() = runTest {
+        assertTheCheckStartsFresh { it.loginRequired(it.epoch()) }
+    }
+
+    @Test
+    fun aCheckAfterAChallengeStartsOnAFreshPage() = runTest {
+        assertTheCheckStartsFresh { it.challengeRequired("https://www.instagram.com/challenge/x/", it.epoch()) }
+    }
+
+    @Test
+    fun theFirstCheckOfALoginTheOwnerJustMadeStartsOnAFreshPage() = runTest {
+        assertTheCheckStartsFresh { } // nothing stored yet (LoggedOut) but the jar holds a session
+    }
+
+    @Test
+    fun everyRetryAfterAnotherChallengeStartsFresh() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = reset, beforeCheck = allow)
+        probe.next = { order += "probe"; throw InstagramException.ChallengeRequired(null) }
+
+        repeat(2) { assertEquals(SessionState.Challenge(null, null), repository.validate()) }
+
+        assertEquals(listOf("allow", "reset", "probe", "allow", "reset", "probe"), order)
+    }
+
+    @Test
+    fun aCheckOnAValidSessionKeepsItsPage() = runTest {
+        signedIn()
+        probeRecordsItself()
+        val repository = repository(beforeSessionChange = reset, beforeCheck = allow)
+        assertEquals(SessionState.Valid("tester"), repository.validate())
+        assertEquals(listOf("allow", "reset", "probe"), order, "the first check starts on a LoggedOut state")
+        order.clear()
+
+        repeat(2) { assertEquals(SessionState.Valid("tester"), repository.validate()) }
+
+        assertEquals(listOf("allow", "probe", "allow", "probe"), order, "a page that is doing its job is not thrown away")
+    }
+
+    @Test
+    fun aCheckThePacerRefusesAllowsAndDestroysNothing() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = reset, beforeCheck = allow)
+        cooldowns.onRateLimited(testScheduler.currentTime)
+
+        assertFailsWith<PacerRefusal.CoolingDown> { repository.validate() }
+
+        assertEquals(emptyList(), order, "nothing is sent, so nothing needs a page")
+    }
+
+    @Test
+    fun aCheckWithNoSessionAllowsAndDestroysNothing() = runTest {
+        val repository = repository(beforeSessionChange = reset, beforeCheck = allow)
+
+        assertEquals(SessionState.LoggedOut, repository.validate())
+
+        assertEquals(emptyList(), order, "no cookies: no request, so no page")
+    }
+
+    @Test
+    fun theSessionSignalsOfARunNeverTouchThePage() = runTest {
+        signedIn()
+        val repository = repository(beforeSessionChange = reset, beforeCheck = allow)
+        val epoch = repository.epoch()
+
+        repository.sessionOk("tester", epoch)
+        repository.loginRequired(epoch)
+        repository.challengeRequired(null, epoch)
+        repository.runSession(epoch)
+
+        assertEquals(emptyList(), order)
+    }
+
+    /**
+     * A reset must never kill another request's call: it runs inside the Pacer's gate, where nothing else is in flight. Real
+     * time (the gate is held across a wait), with a clock that always runs ahead so the Pacer's own gaps cost nothing.
+     */
+    @Test
+    fun theFreshPageIsMadeInsideThePacersGateNeverWhileAnotherRequestIsOut() = runBlocking {
+        signedIn()
+        val ticks = java.util.concurrent.atomic.AtomicLong(0)
+        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = { ticks.addAndGet(10_000) })
+        val repository = SessionRepository(
+            cookies, probe, pacer,
+            SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "gate2.preferences_pb") }),
+            beforeSessionChange = reset, beforeCheck = allow,
+        )
+        probeRecordsItself()
+        repository.loginRequired(repository.epoch()) // Expired: a check would start on a fresh page
+        val holding = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+
+        withTimeout(20_000) {
+            val other = async { pacer.interactive { holding.complete(Unit); release.await() } } // some other request is out
+            holding.await()
+            val check = async { repository.validate() }
+            kotlinx.coroutines.delay(300) // far longer than the check needs to reach the gate
+            assertEquals(emptyList(), order, "the check waits for the gate before it destroys or allows anything")
+
+            release.complete(Unit)
+            other.await()
+            assertEquals(SessionState.Valid("tester"), check.await())
+        }
+        assertEquals(listOf("allow", "reset", "probe"), order)
     }
 
     @Test

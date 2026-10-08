@@ -25,8 +25,8 @@ import kotlin.time.TimeSource
  * **One page.** The first call (and the first after [reset]) creates the page and loads [homeUrl]; later calls reuse it.
  * At most one call is in flight, the load included: a second one is refused with [InstagramException.Transient] and
  * touches nothing (the Pacer serializes real calls, so this only guards misuse). At most [MAX_PAGES] pages are created per
- * session (from construction or the last [reset]), however they end: the site is not loaded over and over. Past that every
- * call is `Transient`, with no page, until [reset].
+ * user action (from construction, the last [reset] or the last [allowNewAttempts]), however they end: the site is not loaded
+ * over and over. Past that every call is `Transient`, with no page, until one of those.
  *
  * **A home page that is an HTTP error** fails the load: 429 is [InstagramException.RateLimited] (so the caller's cooldown
  * arms with no API request made), any other status [InstagramException.Transient]. The page is dropped either way.
@@ -88,8 +88,8 @@ class WebViewTransport(
     }
 
     /**
-     * Destroys the page (failing a call in flight with `Transient`), forgets a login or challenge landing, and starts a new
-     * session for the page limit.
+     * Destroys the page (failing a call in flight with `Transient`), forgets a login or challenge landing, and gives back the
+     * page limit. For a change of session: a logout, a paste, a deleted library, a check that starts after the owner had to act.
      */
     suspend fun reset() {
         withContext(main) {
@@ -98,6 +98,15 @@ class WebViewTransport(
             dropPage()
             waiting?.let { it.reply.complete(Answer.Destroyed) }
         }
+    }
+
+    /**
+     * A new user action begins (a sync run, a session check, a lab tap): the page limit starts counting again, so the three
+     * pages one action may create are not used up by an earlier one. This is ALL it does: it never destroys the page, never
+     * fails a call in flight, and never forgets a login or challenge landing (only [reset] does, when the session changes).
+     */
+    suspend fun allowNewAttempts() {
+        withContext(main) { pagesCreated = 0 }
     }
 
     private suspend fun call(path: String): RawReply {
@@ -312,7 +321,7 @@ class WebViewTransport(
     }
 
     companion object {
-        /** Pages created per session (R89): the site is loaded at most this often, whatever happens to the pages. */
+        /** Pages created per user action (R89, R91): the site is loaded at most this often, whatever happens to the pages. */
         const val MAX_PAGES = 3
 
         private val JSON = Json { ignoreUnknownKeys = true }
