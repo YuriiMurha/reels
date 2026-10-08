@@ -329,7 +329,9 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   `x-asbd-id: 359341`, `x-requested-with: XMLHttpRequest`, `x-csrftoken` (from `document.cookie`) and `x-ig-www-claim` (the
   site's own `sessionStorage` value, else `0`). It posts `{id, code, contentType, body, redirected}` back: an opaque redirect
   is posted as `redirected = true` with `code: 0`, a failed `fetch` (offline, DNS, reset) is code -1, a body that can't be read is null.
-  The CSRF token and the claim never leave the page.
+  The CSRF token and the claim never leave the page. Each fetch gets its own `AbortController`, kept by id until the fetch
+  settles, and `window.__igAbort(id)` (defined once, behind the same guard as `__igFetch`) aborts it (R105); an aborted fetch
+  posts code -1 for its id, which nobody waits for any more.
 - **The message channel** is `WebViewCompat.addWebMessageListener`, installed before the first load as `window.igBridge`
   for the origin `https://www.instagram.com` only. A message reaches the transport only from the MAIN frame, from exactly
   that origin, and only as a STRING; `AndroidWebPageGuardTest` pins the rule set and the three conditions (each removal, and
@@ -351,12 +353,27 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   dropped either way. A main-frame load error and a dead renderer fail it too.
 - **Time and failure.** The load is bounded at 30 s and each call at 30 s; neither blocks a thread (a `CompletableDeferred`
   under `withTimeoutOrNull`, which leaves a caller's own deadline alone), and expiry is `Transient`. A load that fails or
-  times out, a call that times out, a page that throws, and a caller cancelled while the page loads all drop the page: a
-  stuck or unchecked page is never reused. A network failure inside the page (code -1) is `Transient` and keeps it, and so
-  is a caller cancelled while it waits for a reply (the late reply carries an old id and is ignored). A dead renderer
-  (`onRenderProcessGone`) drops the page and fails a call in flight at once. At most one call is in flight, the load
-  included: a second one is refused `Transient` and touches nothing (the Pacer already serialises real calls, so this only
-  guards misuse).
+  times out, a call that times out and a page that throws all drop the page: a stuck page is never reused. A network
+  failure inside the page (code -1) is `Transient` and keeps it. A dead renderer (`onRenderProcessGone`) drops the page and
+  fails a call in flight at once. At most one call is in flight, the load included: a second one is refused `Transient` and
+  touches nothing (the Pacer already serialises real calls, so this only guards misuse).
+- **A cancelled caller** (the viewer's `collectLatest` at a swipe, a sync's Cancel, a caller's own deadline) always ends
+  with its own `CancellationException`, never another exception: one thrown by a cancelled coroutine fails its parent scope
+  and can take the app down.
+  - Cancelled while the page LOADS (R104), it does not drop the page. The load goes on under `NonCancellable`, still bounded
+    at 30 s from its start and still ended at once by `reset()` or a dead renderer, and its outcome is applied as for any
+    caller: a failure drops the page (and counts), a login or challenge landing is remembered, a good page is kept with its
+    idle timer. Then the caller gets its cancellation. So swipes during a cold load (or the load after an idle close) cost
+    one page between them; before, each dropped its page, and three swipes used up the cap and every link refresh after them
+    failed "page limit" until a sync or a check. The price: a cancelled caller, and the Pacer's gate it holds, waits for the
+    rest of the load, at most 30 s and normally seconds. The cap is never given back without a page (R89, R97).
+  - A home page answered 429 for a caller that is gone (R104a) is remembered once: the NEXT call fails `RateLimited` at
+    once, creating no page and evaluating nothing, so the Pacer still arms its cooldown there. `reset()` forgets it.
+  - Cancelled while it WAITS for a reply (R105), the call keeps the page and, if that page is still the current one,
+    evaluates `window.__igAbort(<id>)`, so the request ends at once, as an OkHttp call's did when cancelled. Without it the
+    fetch ran on in the page while the Pacer (which marks a request ended when its caller returns) let the next call send
+    its own. The abort is best effort: its failure is swallowed and the caller still gets its cancellation. The late
+    message (code -1, or a reply that won the race) carries an old id and is ignored.
 - **The page cap (R89, R91).** At most 3 pages are created per user action, however they end (a creation that throws
   counts too; an idle close gives the cap back): the site is not loaded over and over. Past that every call is `Transient`, with no page, until the next
   action. A user action is a sync run or a Resume (`SyncEngine.beforeRun`, set only for `Backend.Real`), a session check
@@ -376,7 +393,8 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   and still counts; a remembered login or challenge verdict is untouched. "Once per app run" in the spec's 3.2 and 4 is
   therefore "once per active period".
 - **Traffic, and the pacing rule.** API request rates and concurrency are unchanged: one `fetch` per call through the one
-  Conservative Pacer, and "Requests in 24 h" counts those calls only. What is new is unpaced traffic the Pacer does not
+  Conservative Pacer, and "Requests in 24 h" counts those calls only. A cancelled call is aborted, so request starts stay at
+  least the Pacer's gap apart and no two of the app's API requests are open at once (R105). What is new is unpaced traffic the Pacer does not
   see: the home-page load and the site's own background requests while the page exists, which are what any visit to
   instagram.com sends. They are bounded by the page's life: 3 page loads per user action at most (counted again after an
   idle close), and the page closes at most 5 minutes after the last call (before the idle close, the background traffic
@@ -418,7 +436,8 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
 - **Logging (spec 3.4).** Debug builds log one line per API call under the tag `InstagramHttp`:
   `GET <path, digit runs of 3 or more as <n>> -> <code> (<ms> ms)`, for example `GET api/v1/accounts/edit/web_form_data/ ->
   200 (412 ms)`. `<code>` is the HTTP status, `redirect`, or what happened when there is none: `timeout`, `login page`,
-  `challenge page`, `unexpected page`, `load http <status>`, `load failed`, `load timeout`, `page limit`, `busy`, `no page`,
+  `challenge page`, `unexpected page`, `load http <status>`, `load http 429 (remembered)` (R104a), `load failed`,
+  `load timeout`, `page limit`, `busy`, `no page`,
   `page destroyed`, `page error`, `network error`, `cancelled`, or `error` (the default, for a failure that is none of
   these). A non-2xx reply is followed by its `ErrorReplySummary` line
   (`<-- 429 reply: ...`, see [`:instagram`](#instagram)). Never a body in a 2xx line and never a header (the app sees none,
@@ -432,14 +451,16 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   (see there for why they were not deleted), and `BackendWiringGuardTest` fails if `:app`'s production code starts using
   one. The CDN client has no jar and never had them.
 - **Tests.** `WebViewTransportTest` (JVM, a fake page and virtual time) covers the call, the landing checks, the timeouts,
-  the page cap, the idle timer, the logging and that the script's headers match `WebHeaders`. `AndroidWebPageTest` exists
+  the page cap, the idle timer, cancelled callers (R104, R104a, R105, through a real Conservative Pacer for the remembered
+  429), the logging and that the script's headers match `WebHeaders`. `AndroidWebPageTest` exists
   twice: under `src/test` (Robolectric, which has no WebView provider or JavaScript) only that a WebView that cannot post
   messages refuses to construct; under `src/androidTest` (emulator only: it skips on a physical device with the smoke suite's
   `isEmulator()` check) it runs the real page, the real `ig_fetch.js` and the transport against LOCAL MockWebServers at
   `http://127.0.0.1:<port>`, which is also the allowed origin passed in for the test. It checks that one `get` reaches the
   server exactly once with the site headers and the page's cookie, that a redirect is reported and not followed, that
-  forged messages from another origin's frame and from a same-origin subframe are dropped, and that the transport works
-  from a `Dispatchers.Default` coroutine. Loopback cleartext needed no configuration on the API 37 emulator (the platform
+  forged messages from another origin's frame and from a same-origin subframe are dropped, that the transport works
+  from a `Dispatchers.Default` coroutine, and that a cancelled call aborts its fetch (the page posts code -1 for it while the
+  server still holds the reply) and the next call goes through. Loopback cleartext needed no configuration on the API 37 emulator (the platform
   allows it for `127.0.0.1` and `localhost`), so no network security config exists; `CleartextGuardTest` pins that no
   release source set permits cleartext or names a config, that a debug-only one could permit loopback only, and that no
   release or debug source set overrides `onReceivedSslError`.

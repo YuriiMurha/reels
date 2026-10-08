@@ -9,8 +9,12 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -61,10 +65,22 @@ import kotlin.time.TimeSource
  *
  * **Time and failure.** Loading is bounded by [loadTimeoutMs], a call by [callTimeoutMs]; neither blocks a thread (a
  * [CompletableDeferred] under `withTimeoutOrNull`, which leaves a caller's own deadline alone). A load that fails or times
- * out, a call that times out, a page that throws, and a caller cancelled while the page loads, all drop the page: a stuck or
- * unchecked page is never reused. A dead renderer ([WebPage.onGone]) drops it and fails a call in flight at once. A network
- * failure inside the page (`code == -1`) is [InstagramException.Transient] and keeps it. A caller cancelled while waiting
- * for a reply keeps it too; the late reply carries an old id and is ignored.
+ * out, a call that times out, and a page that throws all drop the page: a stuck page is never reused. A dead renderer
+ * ([WebPage.onGone]) drops it and fails a call in flight at once. A network failure inside the page (`code == -1`) is
+ * [InstagramException.Transient] and keeps it.
+ *
+ * **A cancelled caller** always ends with its own `CancellationException`, never with another exception (one thrown by a
+ * cancelled coroutine fails its parent scope, the viewer's `collectLatest` say). Cancelled while the page LOADS (R104), it
+ * does not drop the page: the load goes on under `NonCancellable`, still bounded by [loadTimeoutMs] from its start and still
+ * ended at once by [reset] or a dead renderer, and its outcome is applied as for any caller (a failure drops the
+ * page, a login or challenge landing is remembered, a good page is kept with its idle timer). Only then does the caller get
+ * its cancellation. So swipes during a cold load cost one page between them, not one each; the price is that a cancelled
+ * caller (and the Pacer's gate it holds) waits for the rest of the load, at most 30 s. A home page answered 429 for a caller
+ * that is gone is remembered once (R104a): the NEXT call fails [InstagramException.RateLimited] at once, with no page created
+ * and nothing evaluated, so the Pacer still arms its cooldown; [reset] forgets it. Cancelled while it WAITS for a reply
+ * (R105), the call keeps the page and aborts its own fetch in it (`window.__igAbort(id)`, see `ig_fetch.js`), so the request
+ * ends as an OkHttp call's did and the next call's request is never sent beside it; the late message carries an old id and is
+ * ignored.
  *
  * **Threads.** The page is touched on [main] only and all state below is confined to it ([get] and [reset] switch to it, and
  * the idle timer runs there too). A message is accepted only from the page that is current, only when it parses, and only for
@@ -99,6 +115,9 @@ class WebViewTransport(
     private var pagesCreated = 0
     private var idleTimer: Job? = null
 
+    /** R104a: a cancelled caller's load found a 429 home page; the next call answers it. */
+    private var rateLimitedLoad = false
+
     override suspend fun get(pathAndQuery: String): RawReply {
         // The script prefixes "/", so a slash or a backslash first would make a URL to another host, and so would a tab or a
         // newline in front of one (URL parsing drops them). Nothing but a letter or a digit starts a path of ours.
@@ -107,12 +126,14 @@ class WebViewTransport(
     }
 
     /**
-     * Destroys the page (failing a call in flight with `Transient`), forgets a login or challenge landing, and gives back the
-     * page limit. For a change of session: a logout, a paste, a deleted library, a check that starts after the owner had to act.
+     * Destroys the page (failing a call in flight with `Transient`), forgets a login or challenge landing (and a remembered
+     * 429, R104a), and gives back the page limit. For a change of session: a logout, a paste, a deleted library, a check that
+     * starts after the owner had to act.
      */
     suspend fun reset() {
         withContext(main) {
             blocked = null
+            rateLimitedLoad = false
             pagesCreated = 0
             cancelIdleTimer()
             dropPage()
@@ -137,6 +158,11 @@ class WebViewTransport(
         cancelIdleTimer()
         try {
             blocked?.let { throw Failed(it.reason, it.error()) }
+            if (rateLimitedLoad) {
+                // Once: the Pacer arms its cooldown on this answer, and the call after it may load the site again.
+                rateLimitedLoad = false
+                throw Failed("load http 429 (remembered)", InstagramException.RateLimited())
+            }
             val current = page ?: openPage()
             checkLanding(current)
             val id = ++lastId
@@ -149,7 +175,15 @@ class WebViewTransport(
                 dropPage()
                 throw Failed("page error", InstagramException.Transient(e))
             }
-            val answer = withTimeoutOrNull(callTimeoutMs) { waiter.reply.await() }
+            val answer = try {
+                withTimeoutOrNull(callTimeoutMs) { waiter.reply.await() }
+            } catch (e: CancellationException) {
+                // R105: the caller gave up. Its fetch is aborted in the page (if the page is still the one it went out on), so the
+                // request ends now and the next call's is never sent beside it. `evaluate` does not suspend, and its failing must
+                // not turn the cancellation into anything else.
+                if (page === current) runCatching { current.evaluate("window.__igAbort && window.__igAbort($id)") }
+                throw e
+            }
             if (answer == null) {
                 dropPage()
                 throw Failed("timeout", InstagramException.Transient())
@@ -187,7 +221,13 @@ class WebViewTransport(
         idleTimer = null
     }
 
-    /** Creates and loads the page, and checks how it landed. Returns it only when it is the Instagram page itself. */
+    /**
+     * Creates and loads the page, and checks how it landed. Returns it only when it is the Instagram page itself.
+     *
+     * R104: once the load has started it is finished, and its outcome applied, even when the caller is cancelled meanwhile (the
+     * load and the checks run under `NonCancellable`, bounded by [loadTimeoutMs] from the load's start). A cancelled caller then
+     * gets its cancellation, never the outcome; a 429 is remembered for the next call instead (R104a).
+     */
     private suspend fun openPage(): WebPage {
         if (pagesCreated >= MAX_PAGES) throw Failed("page limit", InstagramException.Transient())
         pagesCreated++
@@ -202,15 +242,33 @@ class WebViewTransport(
             dropPage()
             throw Failed("no page", InstagramException.Transient(e))
         }
+        // The caller's cancellation cannot reach in here: what the load finds is applied whatever happens to the caller. Its
+        // own failures come back as a value, so the caller's cancellation (checked below) always wins over them.
+        val failure = withContext(NonCancellable) {
+            try {
+                land(created)
+                null
+            } catch (e: Failed) {
+                e
+            }
+        }
+        if (!currentCoroutineContext().isActive) {
+            if (failure?.error is InstagramException.RateLimited) rateLimitedLoad = true
+            currentCoroutineContext().ensureActive() // throws the caller's own CancellationException
+        }
+        failure?.let { throw it }
+        return created
+    }
+
+    /** Loads [created] and checks where it landed: returns when it is the Instagram page itself, else drops it and throws. */
+    private suspend fun land(created: WebPage) {
         val landed = try {
             withTimeoutOrNull(loadTimeoutMs) { created.load(homeUrl) }
         } catch (e: PageHttpError) {
             dropIfCurrent(created)
             throw Failed("load http ${e.code}", if (e.code == 429) InstagramException.RateLimited() else InstagramException.Transient(e))
-        } catch (e: CancellationException) {
-            dropIfCurrent(created)
-            throw e
         } catch (e: Exception) {
+            // Not the caller's cancellation (it cannot reach a NonCancellable block): the page's own failure, whatever its type.
             dropIfCurrent(created)
             throw Failed("load failed", InstagramException.Transient(e))
         }
@@ -221,7 +279,6 @@ class WebViewTransport(
         // reset() ran while the page was loading and destroyed it: it must not be used, whatever it finished on.
         if (page !== created) throw Failed("page destroyed", InstagramException.Transient())
         verdictFor(landed)?.let { fail(it) }
-        return created
     }
 
     /** Before every call: where [current] is now, which is not necessarily where it loaded. */

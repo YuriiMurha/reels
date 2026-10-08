@@ -9,6 +9,8 @@ import io.github.yuriimurha.reels.NOT_AN_EMULATOR
 import io.github.yuriimurha.reels.instagram.web.RawReply
 import io.github.yuriimurha.reels.isEmulator
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
@@ -31,6 +33,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -185,6 +188,51 @@ class AndroidWebPageTest {
         assertEquals(2, site.requestsTo(API).size)
     }
 
+    // --- 5. Cancellation ------------------------------------------------------------------------------------------------------
+
+    /**
+     * R105: a caller that gives up while its API request is out (a swipe in the viewer, a sync's Cancel) aborts the page's
+     * fetch. The page then posts code -1 for that call's id at once, while the server is still holding the reply, and the
+     * transport, which no longer waits for that id, ignores it. The next call goes through on the same page.
+     */
+    @Test
+    fun aCancelledCallAbortsItsFetchAndTheNextCallWorks() {
+        val site = site()
+        val inFlight = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val apiCalls = AtomicInteger()
+        site.route("/") { html("<html><body>home</body></html>") }
+        site.route(API) {
+            if (apiCalls.incrementAndGet() == 1) {
+                inFlight.countDown()
+                release.await(GATE_SECONDS, TimeUnit.SECONDS) // held until the test is done with it
+                json("{\"late\":true}")
+            } else {
+                json(REPLY_BODY)
+            }
+        }
+        val heard = CopyOnWriteArrayList<String>()
+        val transport = transport(site, heard)
+        try {
+            runBlocking {
+                val call = launch(Dispatchers.Default) { transport.get(API.removePrefix("/")) }
+                assertTrue("the call's request never reached the server", inFlight.await(GATE_SECONDS, TimeUnit.SECONDS))
+                call.cancelAndJoin()
+            }
+            // Only an abort ends that fetch now: the server has not answered it, and will not until `release`.
+            val aborted = waitFor(10_000) { heard.any { "\"id\":1," in it && "\"code\":-1," in it } }
+            Log.i(TAG, "messages the page posted after the cancel: $heard")
+            assertTrue("the page never reported an aborted fetch for id 1: $heard", aborted)
+
+            val reply = runBlocking { transport.get(API.removePrefix("/")) }
+            assertEquals(REPLY_BODY, reply.body)
+            assertEquals(2, site.requestsTo(API).size)
+            assertEquals("still the same page", 1, site.requestsTo("/").size)
+        } finally {
+            release.countDown()
+        }
+    }
+
     // --- The forging frame ---------------------------------------------------------------------------------------------------
 
     private class ForgedCall(val reply: RawReply, val report: String)
@@ -274,17 +322,38 @@ class AndroidWebPageTest {
 
     private fun site(): Site = Site().also { sites += it }
 
-    /** The real transport on the real page, pointed at [site]: its origin is the home page and the only allowed sender. */
-    private fun transport(site: Site): WebViewTransport {
+    /**
+     * The real transport on the real page, pointed at [site]: its origin is the home page and the only allowed sender. With
+     * [heard], every message the page hands the transport is also kept there (the transport keeps none it does not wait for).
+     */
+    private fun transport(site: Site, heard: MutableList<String>? = null): WebViewTransport {
         val origin = site.origin
         // The one thing standing between these tests and the real site: nothing but a local address is ever the home page.
         require(origin.startsWith("http://127.0.0.1:")) { "the page tests talk to a local server only: $origin" }
         val script = context.assets.open("ig_fetch.js").bufferedReader().use { it.readText() }
         return WebViewTransport(
-            createPage = { AndroidWebPage(context, allowedOrigin = origin) },
+            createPage = { AndroidWebPage(context, allowedOrigin = origin).let { page -> if (heard == null) page else Recorded(page, heard) } },
             homeUrl = "$origin/",
             script = script,
         ).also { transport = it }
+    }
+
+    /** [page], with a copy of every message it delivers put into [heard] first. */
+    private class Recorded(private val page: WebPage, private val heard: MutableList<String>) : WebPage by page {
+        override fun onMessage(listener: (String) -> Unit) = page.onMessage { raw ->
+            heard += raw
+            listener(raw)
+        }
+    }
+
+    /** Polls [condition] until it holds or [timeoutMs] passes; true when it held. */
+    private fun waitFor(timeoutMs: Long, condition: () -> Boolean): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (System.nanoTime() < deadline) {
+            if (condition()) return true
+            Thread.sleep(50)
+        }
+        return condition()
     }
 
     /** A cookie value that is plainly not a real one, built from parts (and different on every run). */

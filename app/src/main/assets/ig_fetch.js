@@ -1,5 +1,7 @@
 (function () {
   if (window.__igFetch) return;
+  // One AbortController per call id: a call the app gave up on is aborted by window.__igAbort(id), so its request ends.
+  var aborts = {};
   function cookie(name) {
     var m = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
     return m ? decodeURIComponent(m[1]) : '';
@@ -15,7 +17,10 @@
       'x-csrftoken': cookie('csrftoken'),
       'x-ig-www-claim': claim()
     };
-    fetch('/' + path, { method: 'GET', credentials: 'same-origin', redirect: 'manual', headers: headers })
+    var controller = new AbortController();
+    aborts[id] = controller;
+    function forget() { delete aborts[id]; }
+    fetch('/' + path, { method: 'GET', credentials: 'same-origin', redirect: 'manual', headers: headers, signal: controller.signal })
       .then(function (r) {
         if (r.type === 'opaqueredirect') {
           window.igBridge.postMessage(JSON.stringify({ id: id, code: 0, contentType: null, body: null, redirected: true }));
@@ -29,6 +34,14 @@
       })
       .catch(function () {
         window.igBridge.postMessage(JSON.stringify({ id: id, code: -1, contentType: null, body: null, redirected: false }));
-      });
+      })
+      .then(forget, forget);
+  };
+  // Aborting makes the fetch above post code -1 for this id, which the app no longer waits for and ignores.
+  window.__igAbort = function (id) {
+    var controller = aborts[id];
+    if (!controller) return;
+    delete aborts[id];
+    controller.abort();
   };
 })();

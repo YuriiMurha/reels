@@ -5,6 +5,10 @@ import io.github.yuriimurha.reels.instagram.web.ErrorReplySummary
 import io.github.yuriimurha.reels.instagram.web.RawReply
 import io.github.yuriimurha.reels.instagram.web.WebHeaders
 import io.github.yuriimurha.reels.instagram.web.classifyReply
+import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
+import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
+import io.github.yuriimurha.reels.sync.pacing.Pacer
+import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
@@ -27,6 +31,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
 import java.io.IOException
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -34,6 +40,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class WebViewTransportTest {
@@ -106,7 +113,7 @@ class WebViewTransportTest {
             goneListener?.invoke()
         }
 
-        /** The calls this page was asked to make (everything evaluated except the injected script). */
+        /** The calls this page was asked to make (everything evaluated except the injected script and the aborts). */
         val fetches: List<String> get() = evaluated.filter { it.startsWith("window.__igFetch") }
     }
 
@@ -168,6 +175,25 @@ class WebViewTransportTest {
     private fun Throwable.causes(): List<Throwable> = generateSequence(this) { it.cause }.toList()
 
     private fun fetchOf(id: Long, quotedPath: String) = "window.__igFetch && window.__igFetch($id,$quotedPath)"
+
+    private fun abortOf(id: Long) = "window.__igAbort && window.__igAbort($id)"
+
+    /** The id of the last fetch [this] page was asked to make. */
+    private val FakeWebPage.lastFetchId: Long get() = fetches.last().substringAfter("__igFetch(").substringBefore(',').toLong()
+
+    /** Runs [block] as a caller that is cancelled later, and keeps what it ended with: a cancelled caller must end cancelled. */
+    private class Caller {
+        var ended: Throwable? = null
+
+        suspend fun run(block: suspend () -> Unit) {
+            try {
+                block()
+            } catch (t: Throwable) {
+                ended = t
+                throw t
+            }
+        }
+    }
 
     @Test
     fun aCallLoadsTheHomePageOnceAndSendsOneFetch() = runTest {
@@ -515,11 +541,55 @@ class WebViewTransportTest {
         // Same page: a cancelled call is not a stuck page. The new call has a new id.
         assertEquals(1, pages.created.size)
         assertEquals(fetchOf(2, "\"api/v1/feed/saved/posts/\""), page.fetches.last())
+        // R105: the cancelled call's fetch was aborted in the page before the next one was sent, so no two of the app's API
+        // requests are ever open at once.
+        assertEquals(
+            listOf(SCRIPT, fetchOf(1, "\"api/v1/collections/list/\""), abortOf(1), SCRIPT, fetchOf(2, "\"api/v1/feed/saved/posts/\"")),
+            page.evaluated,
+        )
         page.post(reply(1, body = "late reply of the cancelled call"))
         runCurrent()
         assertTrue(next.isActive)
         page.post(reply(2, body = "answer"))
         assertEquals("answer", next.await().getOrThrow().body)
+    }
+
+    /** R105: the abort is a courtesy to the server. It failing must never turn the caller's cancellation into anything else. */
+    @Test
+    fun aCancelledCallEndsInItsCancellationEvenWhenTheAbortFails() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val caller = Caller()
+        val abandoned = launch { caller.run { transport.get("api/v1/collections/list/") } }
+        runCurrent()
+        val page = pages.created.single()
+        page.evaluateError = IllegalStateException("evaluateJavascript failed")
+
+        abandoned.cancel()
+        runCurrent()
+
+        assertIs<CancellationException>(caller.ended)
+        assertTrue(abandoned.isCancelled)
+        assertEquals(abortOf(1), page.evaluated.last(), "the abort was tried")
+    }
+
+    /** R105: a page that is no longer the current one (its renderer died) is not asked to abort anything: it is gone. */
+    @Test
+    fun aCancelledCallWhosePageIsGoneEvaluatesNoAbortOnIt() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val abandoned = launch { transport.get("api/v1/collections/list/") }
+        runCurrent()
+        val page = pages.created.single()
+
+        // In one turn of the main thread: the renderer dies (the call is woken), then the caller is cancelled before it runs.
+        page.die()
+        abandoned.cancel()
+        runCurrent()
+
+        assertTrue(abandoned.isCancelled)
+        assertTrue(page.destroyed)
+        assertEquals(listOf(SCRIPT, fetchOf(1, "\"api/v1/collections/list/\"")), page.evaluated)
     }
 
     @Test
@@ -739,30 +809,221 @@ class WebViewTransportTest {
         assertEquals(listOf(1L, 2L, 3L), evaluated.filterIndexed { i, _ -> i % 2 == 1 }.map { it.substringAfter("__igFetch(").substringBefore(',').toLong() })
     }
 
+    /**
+     * R104: a caller cancelled while the home page loads (the viewer's `collectLatest` at a swipe) does not drop the page. It
+     * waits for the load, under the load's own bound, and the landing is checked exactly as for a caller that waited: here it
+     * is the login page, so the page goes and the verdict is remembered. The caller still ends with its cancellation, never
+     * with the verdict (a cancelled coroutine that throws anything else fails its parent scope).
+     */
     @Test
-    fun aCallCancelledWhileTheHomePageLoadsLeavesNoUncheckedPageToReuse() = runTest {
+    fun aCallCancelledWhileTheHomePageLoadsStillChecksTheLandingBeforeAnyReuse() = runTest {
         val gate = CompletableDeferred<Unit>()
         val pages = Pages(FakeWebPage(landing = "https://www.instagram.com/accounts/login/", loadGate = gate, destroyFailsTheLoad = false))
         val transport = transport(pages)
-        val abandoned = launch { transport.get("api/v1/collections/list/") }
+        val caller = Caller()
+        val abandoned = launch { caller.run { transport.get("api/v1/collections/list/") } }
         runCurrent()
         val first = pages.created.single()
         assertEquals(listOf(home), first.loaded)
 
         abandoned.cancel()
         runCurrent()
-        // The page was never checked, so nobody may use it, whatever it goes on to finish loading (here: the login page).
+        assertFalse(abandoned.isCompleted, "the cancelled caller waits for the load")
+        assertFalse(first.destroyed, "the page is not dropped while it loads")
+
         gate.complete(Unit)
         runCurrent()
+        assertTrue(abandoned.isCancelled)
+        assertIs<CancellationException>(caller.ended)
+        // The login landing is a verdict like any other: the page goes, nothing was evaluated, and it is remembered.
         assertTrue(first.destroyed)
         assertEquals(emptyList(), first.evaluated)
+        assertIs<InstagramException.LoginRequired>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertEquals(1, pages.attempts)
+        assertEquals(emptyList(), first.evaluated)
+    }
 
+    /** R104: a good page a cancelled caller waited for is kept, with its idle timer, and serves the next call without a new load. */
+    @Test
+    fun aCallCancelledWhileTheHomePageLoadsKeepsAGoodPageForTheNextCall() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val pages = Pages(FakeWebPage(loadGate = gate))
+        val transport = transport(pages)
+        val caller = Caller()
+        val abandoned = launch { caller.run { transport.get("api/v1/collections/list/") } }
+        runCurrent()
+        val page = pages.created.single()
+        abandoned.cancel()
+        runCurrent()
+
+        advanceTimeBy(5_000)
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(abandoned.isCancelled)
+        assertIs<CancellationException>(caller.ended)
+        assertFalse(page.destroyed)
+        assertEquals(emptyList(), page.evaluated, "nothing is fetched for a caller that is gone")
+        assertEquals(1, pendingIdleTimers(), "the kept page closes by itself if nothing uses it")
+
+        assertEquals(200, completedCall(transport, pages, 1).code)
+        assertEquals(1, pages.created.size)
+        assertEquals(listOf(home), page.loaded)
+    }
+
+    /**
+     * C2: the viewer's `collectLatest` cancels the link refresh at every swipe, also while the home page loads. When a cancelled
+     * load dropped its page, three swipes during cold loads used up [WebViewTransport.MAX_PAGES] and every refresh after them
+     * failed "page limit" until a sync or a check. Now the swipes cost one page between them.
+     */
+    @Test
+    fun callsCancelledWhileThePageLoadsUseOnePageAndTheNextCallGoesThrough() = runTest {
+        val gates = List(WebViewTransport.MAX_PAGES) { CompletableDeferred<Unit>() }
+        val pages = Pages(*Array(gates.size) { FakeWebPage(loadGate = gates[it]) })
+        val transport = transport(pages)
+        repeat(3) { swipe ->
+            val caller = Caller()
+            val refresh = launch { caller.run { transport.get("api/v1/media/3100000000000000001/info/") } }
+            runCurrent()
+            refresh.cancel()
+            runCurrent()
+            // The page this refresh was loading, if it made one, finishes loading now (no page made later loads by itself).
+            gates.take(pages.created.size).forEach { it.complete(Unit) }
+            runCurrent()
+            assertTrue(refresh.isCancelled, "swipe $swipe")
+            assertIs<CancellationException>(caller.ended, "swipe $swipe")
+        }
+
+        val next = call(transport, "api/v1/media/3100000000000000001/info/")
+        runCurrent()
+        if (next.isCompleted) fail("the call after the swipes was not sent: ${next.await().exceptionOrNull()}")
+        val page = pages.created.last()
+        page.post(reply(page.lastFetchId))
+        assertEquals(200, next.await().getOrThrow().code)
+        assertEquals(1, pages.created.size, "one page for all the swipes")
+    }
+
+    /**
+     * R104a: a 429 home page found while finishing a cancelled caller's load must still reach the Pacer, but the cancelled
+     * caller may only end with its cancellation. So the 429 is remembered, once: the NEXT call fails RateLimited at once,
+     * creating no page and evaluating nothing, and through the real Conservative Pacer that arms the cooldown.
+     */
+    @Test
+    fun aRateLimitedLoadOfACancelledCallerReachesTheNextCallAsRateLimited() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val pages = Pages(FakeWebPage(loadError = PageHttpError(429), loadGate = gate, destroyFailsTheLoad = false))
+        val transport = transport(pages)
+        val cooldowns = InMemoryCooldownStore()
+        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, Random(1), now = { testScheduler.currentTime })
+        val caller = Caller()
+        val abandoned = launch { caller.run { pacer.interactive { transport.get("api/v1/media/3100000000000000001/info/") } } }
+        runCurrent()
+        val refused = pages.created.single()
+
+        abandoned.cancel()
+        runCurrent()
+        assertFalse(abandoned.isCompleted, "the cancelled caller waits for the load")
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(abandoned.isCancelled)
+        assertIs<CancellationException>(caller.ended)
+        assertFalse(caller.ended is InstagramException, "a cancelled caller never ends with the verdict")
+        assertTrue(refused.destroyed)
+        assertNull(cooldowns.activeUntil(), "nothing told the Pacer yet")
+
+        val next = async { runCatching { pacer.interactive { transport.get("api/v1/media/3100000000000000001/info/") } } }
+        assertIs<InstagramException.RateLimited>(next.await().exceptionOrNull())
+        assertEquals(1, pages.attempts, "no page was created for it")
+        assertEquals(emptyList(), refused.evaluated)
+        assertTrue(checkNotNull(cooldowns.activeUntil()) > testScheduler.currentTime, "the Pacer armed the cooldown")
+
+        // Once: the call after that one starts over (straight on the transport: the Pacer is cooling down).
+        val after = call(transport, "api/v1/media/3100000000000000001/info/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        pages.created.last().post(reply(1))
+        assertEquals(200, after.await().getOrThrow().code)
+    }
+
+    /** R104a: `reset()` (a new session) forgets a remembered 429, like every other verdict. */
+    @Test
+    fun resetForgetsARateLimitedLoadOfACancelledCaller() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val pages = Pages(FakeWebPage(loadError = PageHttpError(429), loadGate = gate, destroyFailsTheLoad = false))
+        val transport = transport(pages)
+        val abandoned = launch { transport.get("api/v1/collections/list/") }
+        runCurrent()
+        abandoned.cancel()
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(abandoned.isCancelled)
+
+        transport.reset()
         val next = call(transport, "api/v1/collections/list/")
         runCurrent()
         assertEquals(2, pages.created.size)
-        assertEquals(emptyList(), first.evaluated)
         pages.created.last().post(reply(1))
         assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    /** R104: other failed loads of a cancelled caller are dropped and counted as today, and the caller still ends cancelled. */
+    @Test
+    fun aCancelledCallersLoadThatFailsDropsThePageAndTheCallerEndsCancelled() = runTest {
+        for (failure in listOf<Exception?>(IOException("net::ERR_INTERNET_DISCONNECTED"), PageHttpError(503), null)) {
+            val what = failure?.toString() ?: "load timeout"
+            val gate = CompletableDeferred<Unit>()
+            val pages = Pages(FakeWebPage(loadError = failure, loadGate = gate, destroyFailsTheLoad = false))
+            val transport = transport(pages)
+            val caller = Caller()
+            val start = currentTime
+            val abandoned = launch { caller.run { transport.get("api/v1/collections/list/") } }
+            runCurrent()
+            val broken = pages.created.single()
+            abandoned.cancel()
+            runCurrent()
+            assertFalse(abandoned.isCompleted, what)
+            if (failure != null) gate.complete(Unit) else advanceTimeBy(30_000)
+            runCurrent()
+
+            assertTrue(abandoned.isCancelled, what)
+            assertIs<CancellationException>(caller.ended, what)
+            assertFalse(caller.ended is InstagramException, what)
+            assertTrue(broken.destroyed, what)
+            assertEquals(emptyList(), broken.evaluated, what)
+            // The load's bound counts from its start: a cancelled caller waits no longer than one that is not.
+            assertTrue(currentTime - start <= 30_000, what)
+            // Not a verdict on the account: the next call starts over (and the dropped page still counts towards the cap).
+            val next = call(transport, "api/v1/collections/list/")
+            runCurrent()
+            assertEquals(2, pages.created.size, what)
+            pages.created.last().post(reply(1))
+            assertEquals(200, next.await().getOrThrow().code, what)
+        }
+    }
+
+    /** R104: `reset()` and a dead renderer still end a cancelled caller's load at once, as they do any other. */
+    @Test
+    fun resetOrADeadRendererEndsACancelledCallersLoadAtOnce() = runTest {
+        for (end in listOf("reset", "renderer gone")) {
+            val pages = Pages(FakeWebPage(loadGate = CompletableDeferred()))
+            val transport = transport(pages)
+            val caller = Caller()
+            val start = currentTime
+            val abandoned = launch { caller.run { transport.get("api/v1/collections/list/") } }
+            runCurrent()
+            val page = pages.created.single()
+            abandoned.cancel()
+            runCurrent()
+            assertFalse(abandoned.isCompleted, end)
+
+            if (end == "reset") transport.reset() else page.die()
+            runCurrent()
+            assertTrue(abandoned.isCancelled, end)
+            assertIs<CancellationException>(caller.ended, end)
+            assertEquals(start, currentTime, "$end: at once, not at the load's bound")
+            assertTrue(page.destroyed, end)
+            assertEquals(emptyList(), page.evaluated, end)
+        }
     }
 
     @Test
@@ -1006,10 +1267,12 @@ class WebViewTransportTest {
         assertFailsWith<TimeoutCancellationException> { withTimeout(10_000) { transport.get("api/v1/collections/list/") } }
         assertEquals(10_000, currentTime)
 
+        // R104: a caller whose deadline passes while the page loads waits for the load to end (here its own 30 s bound, counted
+        // from its start), and only then gets its own timeout; the page that never loaded is dropped.
         val slow = Pages(FakeWebPage(loadGate = CompletableDeferred()))
         val loading = transport(slow)
         assertFailsWith<TimeoutCancellationException> { withTimeout(10_000) { loading.get("api/v1/collections/list/") } }
-        assertEquals(20_000, currentTime)
+        assertEquals(10_000 + 30_000, currentTime)
         assertTrue(slow.created.single().destroyed)
     }
 
@@ -1323,6 +1586,21 @@ class WebViewTransportTest {
             assertEquals(setOf("id", "code", "contentType", "body", "redirected"), keys)
         }
         assertEquals(4, Regex("""igBridge\.postMessage\(""").findAll(script).count(), "every postMessage is one of those")
+    }
+
+    /**
+     * R105: every call's fetch has its own AbortController, kept by id, and `window.__igAbort(id)` aborts it; both are defined in
+     * the same guarded block as `__igFetch`, so a second injection keeps the controllers of the calls in flight. (The emulator
+     * test shows the abort on the wire.)
+     */
+    @Test
+    fun theScriptCanAbortACallById() {
+        val script = File("src/main/assets/ig_fetch.js").also { assertTrue(it.isFile, "unit tests must run from the app module directory") }.readText()
+        assertTrue(Regex("""signal:\s*controller\.signal""").containsMatchIn(script), "the fetch takes the call's signal")
+        assertTrue(Regex("""aborts\[id]\s*=\s*controller""").containsMatchIn(script), "the controller is kept by id")
+        assertTrue("window.__igAbort = function (id)" in script, "the abort is exposed")
+        val guard = script.indexOf("if (window.__igFetch) return;")
+        assertTrue(guard in 0 until script.indexOf("window.__igAbort = function"), "defined once, behind the same guard")
     }
 
     @Test
