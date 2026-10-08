@@ -119,3 +119,9 @@ Six small commits on `claude/hardening`; each started with a failing test. Every
 ## 2026-10-08: review test gaps closed
 
 - Tests now pin that the Adapter lab and the video resolver check the session they started under (not the one current when the pacer gate opens), that Delete library keeps removing every other thumbnail when one cannot be removed, and that the storage message clears when a new Delete library starts. Each test was shown to fail under the mutation it guards against. No app code changed.
+
+## 2026-10-08: debug builds log a redacted summary of Instagram error replies
+
+- The app's first real request (the login check) was classified as a rate limit and armed a 1 h cooldown, but the debug log shows headers only and the phone's log buffer had rotated, so what Instagram said was lost. Debug builds now log one line per non-2xx reply (`ErrorReplyLogger` in `:instagram`, a network interceptor registered only when a logger is passed): `status`, `message`, `error_type`, `require_login`, `spam`, `lock` and the sorted top-level key names, each value through the Adapter lab's `isVisibleString` (else `<redacted len N>`) and each key through `isSafeName` (else counted). A body that is not a JSON object logs its content type and size only. No URL, cookie, id, handle or raw body; 2xx untouched; release builds unchanged.
+- It amends spec 4.4's "response bodies are never logged" for debug builds only, with these allowlisted fields (noted in `ARCHITECTURE.md`). The peek is at most 16 KiB and does not consume the body; it un-gzips the peek itself because a network interceptor sees the wire bytes (a test fails without that). No request is added: no pacing, budget or concurrency change.
+- `README.md` troubleshooting: after a login check or Check now ends in a cooldown, run `adb -d logcat -s InstagramHttp` before retrying and paste the `reply:` line.
