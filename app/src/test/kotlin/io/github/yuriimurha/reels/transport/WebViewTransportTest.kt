@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -128,7 +129,23 @@ class WebViewTransportTest {
         callTimeoutMs: Long = 30_000,
         loadTimeoutMs: Long = 30_000,
         log: ((String) -> Unit)? = null,
-    ) = WebViewTransport(pages::create, home, SCRIPT, StandardTestDispatcher(testScheduler), callTimeoutMs, loadTimeoutMs, log, testTimeSource)
+    ) = WebViewTransport(
+        pages::create, home, SCRIPT, StandardTestDispatcher(testScheduler), callTimeoutMs, loadTimeoutMs,
+        // The background scope: virtual time drives the idle timer, and a timer still pending when a test ends is cancelled
+        // with it (the test scope itself would wait for it, and run it).
+        idleScope = backgroundScope, log = log, timeSource = testTimeSource,
+    )
+
+    /** A call on the transport's current page, answered at once. Returns what the caller got. */
+    private suspend fun TestScope.completedCall(transport: WebViewTransport, pages: Pages, id: Long): RawReply {
+        val pending = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        pages.created.last().post(reply(id))
+        return pending.await().getOrThrow()
+    }
+
+    /** Idle timers waiting in the background scope (the one the transport is given). */
+    private fun TestScope.pendingIdleTimers(): Int = backgroundScope.coroutineContext.job.children.count { it.isActive }
 
     private fun TestScope.call(transport: WebViewTransport, path: String): Deferred<Result<RawReply>> =
         async { runCatching { transport.get(path) } }
@@ -994,6 +1011,261 @@ class WebViewTransportTest {
         assertFailsWith<TimeoutCancellationException> { withTimeout(10_000) { loading.get("api/v1/collections/list/") } }
         assertEquals(20_000, currentTime)
         assertTrue(slow.created.single().destroyed)
+    }
+
+    @Test
+    fun anIdlePageIsClosedAfterFiveMinutes() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        completedCall(transport, pages, 1)
+        val first = pages.created.single()
+
+        advanceTimeBy(WebViewTransport.IDLE_MS - 1)
+        runCurrent()
+        assertFalse(first.destroyed)
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(first.destroyed)
+
+        // The next call starts over: a new page, loaded, and the call goes through.
+        assertEquals(200, completedCall(transport, pages, 2).code)
+        assertEquals(2, pages.created.size)
+        assertEquals(listOf(home), pages.created.last().loaded)
+        assertEquals(listOf(SCRIPT, fetchOf(2, "\"api/v1/collections/list/\"")), pages.created.last().evaluated)
+    }
+
+    @Test
+    fun aCallBeforeTheDeadlineKeepsThePageOpen() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        completedCall(transport, pages, 1)
+        val page = pages.created.single()
+
+        advanceTimeBy(200_000)
+        runCurrent()
+        completedCall(transport, pages, 2)
+        advanceTimeBy(200_000)
+        runCurrent()
+        // The first call's deadline (300 s) has passed, and the second call re-armed the timer.
+        assertFalse(page.destroyed)
+        assertEquals(1, pages.created.size)
+
+        // The new deadline is a full IDLE_MS after the second call (200 s + 300 s).
+        advanceTimeBy(WebViewTransport.IDLE_MS - 200_000 - 1)
+        runCurrent()
+        assertFalse(page.destroyed)
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(page.destroyed)
+    }
+
+    @Test
+    fun theIdleTimerNeverClosesThePageUnderACall() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        completedCall(transport, pages, 1)
+        val page = pages.created.single()
+
+        // A second call starts a second before the first call's deadline, and its page does not reply yet.
+        advanceTimeBy(WebViewTransport.IDLE_MS - 1_000)
+        runCurrent()
+        val second = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        assertTrue(second.isActive)
+        // The call's start cancelled the timer: none is pending while a call runs.
+        assertEquals(0, pendingIdleTimers())
+
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertFalse(page.destroyed, "the first call's deadline passed under the second call")
+        assertTrue(second.isActive)
+        page.post(reply(2, body = "in time"))
+        assertEquals("in time", second.await().getOrThrow().body)
+        assertEquals(1, pages.created.size)
+    }
+
+    @Test
+    fun anIdleCloseGivesBackThePageLimit() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        // No allowNewAttempts, no reset: each visit ends cleanly with an idle close, so the limit never builds up.
+        repeat(WebViewTransport.MAX_PAGES + 1) { n ->
+            assertEquals(200, completedCall(transport, pages, n + 1L).code)
+            advanceTimeBy(WebViewTransport.IDLE_MS)
+            runCurrent()
+        }
+        assertEquals(WebViewTransport.MAX_PAGES + 1, pages.created.size)
+        assertTrue(pages.created.all { it.destroyed })
+    }
+
+    @Test
+    fun aPageDroppedByAFailureStillCountsAfterTheTimerWouldHaveFired() = runTest {
+        val pages = Pages(
+            FakeWebPage(loadError = PageHttpError(500)),
+            FakeWebPage(loadError = IOException("net::ERR_INTERNET_DISCONNECTED")),
+            FakeWebPage(), // loads fine and never replies: the call times out
+        )
+        val transport = transport(pages)
+        assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        val timedOut = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        advanceTimeBy(30_000)
+        runCurrent()
+        assertIs<InstagramException.Transient>(timedOut.await().exceptionOrNull())
+        assertEquals(WebViewTransport.MAX_PAGES, pages.attempts)
+        assertTrue(pages.created.all { it.destroyed })
+
+        // No page exists, so no timer ran: the idle time gives nothing back.
+        advanceTimeBy(WebViewTransport.IDLE_MS + 1)
+        runCurrent()
+        assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertEquals(WebViewTransport.MAX_PAGES, pages.attempts, "the cap holds")
+    }
+
+    @Test
+    fun aPageThatDiedBetweenCallsIsNotAnIdleCloseAndKeepsCounting() = runTest {
+        val lines = mutableListOf<String>()
+        val pages = Pages()
+        val transport = transport(pages, log = lines::add)
+        // Each page serves a call, and then its renderer dies while the idle timer is pending.
+        repeat(WebViewTransport.MAX_PAGES) { n ->
+            completedCall(transport, pages, n + 1L)
+            pages.created.last().die()
+        }
+        advanceTimeBy(WebViewTransport.IDLE_MS + 1)
+        runCurrent()
+
+        // The timer found another page than the one it was armed for (none): it closed nothing, logged nothing, gave nothing back.
+        assertTrue(lines.none { "idle" in it }, lines.toString())
+        assertIs<InstagramException.Transient>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertEquals(WebViewTransport.MAX_PAGES, pages.attempts)
+    }
+
+    @Test
+    fun resetCancelsTheIdleTimer() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        completedCall(transport, pages, 1)
+        assertEquals(1, pendingIdleTimers())
+
+        transport.reset()
+        runCurrent()
+        assertTrue(pages.created.single().destroyed)
+        assertEquals(0, pendingIdleTimers())
+
+        advanceTimeBy(100_000)
+        runCurrent()
+        completedCall(transport, pages, 2)
+        val second = pages.created.last()
+        assertEquals(2, pages.created.size)
+
+        // The first call's deadline passes, and the page that came after the reset is not touched by it.
+        advanceTimeBy(WebViewTransport.IDLE_MS - 100_000 + 1)
+        runCurrent()
+        assertFalse(second.destroyed)
+        // Its own deadline is IDLE_MS after its call.
+        advanceTimeBy(100_000)
+        runCurrent()
+        assertTrue(second.destroyed)
+    }
+
+    @Test
+    fun allowNewAttemptsNeverCancelsTheIdleTimer() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        completedCall(transport, pages, 1)
+        val page = pages.created.single()
+
+        advanceTimeBy(200_000)
+        runCurrent()
+        // A new user action only gives back the page count: the page's deadline is still the one its last call set.
+        transport.allowNewAttempts()
+        assertEquals(1, pendingIdleTimers())
+        advanceTimeBy(WebViewTransport.IDLE_MS - 200_000 - 1)
+        runCurrent()
+        assertFalse(page.destroyed)
+        advanceTimeBy(1)
+        runCurrent()
+        assertTrue(page.destroyed)
+    }
+
+    @Test
+    fun anIdleCloseNeverForgetsALoginLanding() = runTest {
+        val pages = Pages(FakeWebPage(landing = "https://www.instagram.com/accounts/login/?next=%2F"))
+        val transport = transport(pages)
+        assertIs<InstagramException.LoginRequired>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+
+        advanceTimeBy(WebViewTransport.IDLE_MS + 1)
+        runCurrent()
+        // Still the owner's to fix: no new page, nothing evaluated, until reset().
+        assertIs<InstagramException.LoginRequired>(call(transport, "api/v1/collections/list/").await().exceptionOrNull())
+        assertEquals(1, pages.attempts)
+        assertEquals(emptyList(), pages.created.single().evaluated)
+    }
+
+    @Test
+    fun theIdleCloseIsLogged() = runTest {
+        val lines = mutableListOf<String>()
+        val pages = Pages()
+        val transport = transport(pages, log = lines::add)
+        completedCall(transport, pages, 1)
+        advanceTimeBy(WebViewTransport.IDLE_MS - 1)
+        runCurrent()
+        assertEquals(0, lines.count { it == "page closed (idle)" }, "a page that is reused is not closed")
+
+        completedCall(transport, pages, 2)
+        advanceTimeBy(WebViewTransport.IDLE_MS - 1)
+        runCurrent()
+        assertEquals(0, lines.count { it == "page closed (idle)" })
+
+        advanceTimeBy(1)
+        runCurrent()
+        // Exactly once, and later time adds nothing.
+        advanceTimeBy(WebViewTransport.IDLE_MS * 2)
+        runCurrent()
+        assertEquals(
+            listOf(
+                "GET api/v1/collections/list/ -> 200 (0 ms)",
+                "GET api/v1/collections/list/ -> 200 (0 ms)",
+                "page closed (idle)",
+            ),
+            lines,
+        )
+    }
+
+    @Test
+    fun aCallThatEndsWithoutAReplyStillLeavesTheTimerArmedWhenThePageIsKept() = runTest {
+        // A caller that gives up while waiting keeps the page (the late reply is ignored), and so does a network failure inside it.
+        for (outcome in listOf("cancelled", "network failure")) {
+            val pages = Pages()
+            val transport = transport(pages)
+            when (outcome) {
+                "cancelled" -> {
+                    val abandoned = launch { transport.get("api/v1/collections/list/") }
+                    runCurrent()
+                    abandoned.cancel()
+                    runCurrent()
+                }
+                else -> {
+                    val failing = call(transport, "api/v1/collections/list/")
+                    runCurrent()
+                    pages.created.single().post("""{"id":1,"code":-1,"contentType":null,"body":null,"redirected":false}""")
+                    assertIs<InstagramException.Transient>(failing.await().exceptionOrNull())
+                }
+            }
+            val page = pages.created.single()
+            assertFalse(page.destroyed, outcome)
+
+            advanceTimeBy(WebViewTransport.IDLE_MS - 1)
+            runCurrent()
+            assertFalse(page.destroyed, outcome)
+            advanceTimeBy(1)
+            runCurrent()
+            assertTrue(page.destroyed, outcome)
+            // Left for the next round: this transport's timer is over, and the previous round's too.
+            assertEquals(0, pendingIdleTimers(), outcome)
+        }
     }
 
     @Test

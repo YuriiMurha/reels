@@ -6,7 +6,12 @@ import io.github.yuriimurha.reels.instagram.web.InstagramTransport
 import io.github.yuriimurha.reels.instagram.web.RawReply
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
@@ -22,11 +27,17 @@ import kotlin.time.TimeSource
  * instagram.com page, so Chromium sends the request with its own TLS stack, headers and cookies. Production transport;
  * [io.github.yuriimurha.reels.instagram.web.OkHttpTransport] is the JVM-test one.
  *
- * **One page.** The first call (and the first after [reset]) creates the page and loads [homeUrl]; later calls reuse it.
- * At most one call is in flight, the load included: a second one is refused with [InstagramException.Transient] and
- * touches nothing (the Pacer serializes real calls, so this only guards misuse). At most [MAX_PAGES] pages are created per
- * user action (from construction, the last [reset] or the last [allowNewAttempts]), however they end: the site is not loaded
- * over and over. Past that every call is `Transient`, with no page, until one of those.
+ * **One page.** The first call (and the first after [reset]) creates the page and loads [homeUrl]; later calls reuse it until
+ * it has been idle for [IDLE_MS]. At most one call is in flight, the load included: a second one is refused with
+ * [InstagramException.Transient] and touches nothing (the Pacer serializes real calls, so this only guards misuse). At most
+ * [MAX_PAGES] pages are created per user action (from construction, the last [reset] or the last [allowNewAttempts]), however
+ * they end: the site is not loaded over and over. Past that every call is `Transient`, with no page, until one of those.
+ *
+ * **Idle.** The page is a live single-page app whose own scripts keep sending background requests while it exists, and the
+ * process can stay cached for hours. So when a call ends, whatever its outcome, and a page exists, a timer starts; if no call
+ * begins within [idleMs] ([IDLE_MS] by default) the page is closed. A call's start cancels the timer, and so does [reset].
+ * That clean end of a visit gives back the page limit (a page dropped by a failure never has a timer and still counts), and
+ * never touches a remembered login or challenge landing. The cost is one more home-page load per active period.
  *
  * **A home page that is an HTTP error** fails the load: 429 is [InstagramException.RateLimited] (so the caller's cooldown
  * arms with no API request made), any other status [InstagramException.Transient]. The page is dropped either way.
@@ -52,12 +63,14 @@ import kotlin.time.TimeSource
  * failure inside the page (`code == -1`) is [InstagramException.Transient] and keeps it. A caller cancelled while waiting
  * for a reply keeps it too; the late reply carries an old id and is ignored.
  *
- * **Threads.** The page is touched on [main] only and all state below is confined to it ([get] and [reset] switch to it).
- * A message is accepted only from the page that is current, only when it parses, and only for the awaited call id.
+ * **Threads.** The page is touched on [main] only and all state below is confined to it ([get] and [reset] switch to it, and
+ * the idle timer runs there too). A message is accepted only from the page that is current, only when it parses, and only for
+ * the awaited call id.
  *
  * **Debug log** ([log], debug builds only): one line per call, `GET <path, digit runs of 3+ as <n>> -> <code> (<ms> ms)`;
  * `<code>` is `redirect`, `timeout` and so on when there is no status. A non-2xx reply is followed by its
- * [ErrorReplySummary] line. Never a body in a 2xx line, never a header (none is visible here).
+ * [ErrorReplySummary] line. Never a body in a 2xx line, never a header (none is visible here). An idle close logs
+ * `page closed (idle)`.
  */
 class WebViewTransport(
     private val createPage: () -> WebPage,
@@ -66,6 +79,8 @@ class WebViewTransport(
     private val main: CoroutineDispatcher = Dispatchers.Main.immediate,
     private val callTimeoutMs: Long = 30_000,
     private val loadTimeoutMs: Long = 30_000,
+    private val idleMs: Long = IDLE_MS,
+    private val idleScope: CoroutineScope = CoroutineScope(SupervisorJob() + main),
     private val log: ((String) -> Unit)? = null,
     /** Only for the debug log's timings; tests pass their virtual one. */
     private val timeSource: TimeSource = TimeSource.Monotonic,
@@ -79,6 +94,7 @@ class WebViewTransport(
     private var lastId = 0L
     private var waiting: Waiting? = null
     private var pagesCreated = 0
+    private var idleTimer: Job? = null
 
     override suspend fun get(pathAndQuery: String): RawReply {
         // The script prefixes "/", so a slash or a backslash first would make a URL to another host, and so would a tab or a
@@ -95,6 +111,7 @@ class WebViewTransport(
         withContext(main) {
             blocked = null
             pagesCreated = 0
+            cancelIdleTimer()
             dropPage()
             waiting?.let { it.reply.complete(Answer.Destroyed) }
         }
@@ -113,6 +130,8 @@ class WebViewTransport(
         // First, before the page is created or looked at: a call that arrives while another loads the page must not use it.
         if (busy) throw Failed("busy", InstagramException.Transient())
         busy = true
+        // No timer is pending while a call runs: the page is in use from here on.
+        cancelIdleTimer()
         try {
             blocked?.let { throw Failed(it.reason, it.error()) }
             val current = page ?: openPage()
@@ -139,7 +158,30 @@ class WebViewTransport(
         } finally {
             waiting = null
             busy = false
+            // After the cleanup, so the timer never sees a call that has ended as one in flight.
+            armIdleTimer()
         }
+    }
+
+    /** After a call, whatever its outcome: when the page is still there, closes it if nothing uses it for [idleMs]. */
+    private fun armIdleTimer() {
+        val armed = page ?: return
+        idleTimer = idleScope.launch(main) {
+            delay(idleMs)
+            // The page may have been dropped or replaced meanwhile (a dead renderer, say): that is no idle close.
+            if (page === armed && !busy) {
+                dropPage()
+                // A clean end of a visit, not a failure: the next call may load the site again (a page dropped by a failure
+                // still counts, and never has a timer). A remembered login or challenge landing is left alone.
+                pagesCreated = 0
+                log?.invoke("page closed (idle)")
+            }
+        }
+    }
+
+    private fun cancelIdleTimer() {
+        idleTimer?.cancel()
+        idleTimer = null
     }
 
     /** Creates and loads the page, and checks how it landed. Returns it only when it is the Instagram page itself. */
@@ -323,6 +365,12 @@ class WebViewTransport(
     companion object {
         /** Pages created per user action (R89, R91): the site is loaded at most this often, whatever happens to the pages. */
         const val MAX_PAGES = 3
+
+        /**
+         * How long the page may sit between calls before it is closed. Longer than the Pacer's longest break (192 s) and its
+         * longest transient backoff (240 s), so one sync run keeps one page.
+         */
+        const val IDLE_MS = 300_000L
 
         private val JSON = Json { ignoreUnknownKeys = true }
         private val DIGIT_RUN = Regex("\\d{3,}")
