@@ -235,8 +235,9 @@ endpoint to learn the real response shapes (spec 6.3).
   - It keeps its mappings keyed by a salted SHA-256 digest, never by the raw value, so it holds no raw id, handle, caption
     or URL. Output with a word of the fixture guard's list is withheld.
 - **The redaction is heuristic, not a proof:** a lowercase handle used as a key or as a URL parameter name, or a one-word
-  value of letters and underscores in any case under an enum-like key (`johndoe`, `JohnDoe`, `jane_doe`), can't be told
-  from schema and is kept, and a one-word or lowercase sentence under `message` passes. Read a scrubbed file before committing it.
+  value of letters and underscores in any case (`johndoe`, `JohnDoe`, `jane_doe`) under ANY visible-value key (`message` and
+  `feedback_title` included, not only the enum-like ones such as `status`), can't be told from schema and is kept; so does
+  a lowercase sentence under `message`. Read a scrubbed file before committing it.
 
 ## Pacer
 

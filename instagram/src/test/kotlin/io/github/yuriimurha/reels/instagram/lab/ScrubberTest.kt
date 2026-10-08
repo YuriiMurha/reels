@@ -416,7 +416,7 @@ class ScrubberTest {
 
     @Test
     fun aHandleUnderStatusOrErrorTypeIsAcceptedAsEnumLikeAndSurvives() {
-        // Documented limit: one word of letters or underscores under an enum-like key cannot be told from an enum value.
+        // Documented limit: one word of letters or underscores under a visible-value key cannot be told from an enum value.
         val scrubbed = Scrubber().scrub(parse("""{"status":"johndoe","error_type":"jane_doe"}"""))
         assertEquals(parse("""{"status":"johndoe","error_type":"jane_doe"}"""), scrubbed)
     }
