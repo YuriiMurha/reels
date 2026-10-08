@@ -600,8 +600,8 @@ Mock mode switch.
   WebView, possibly as another account). A run (or a lab call, or a video resolve) reads the epoch before it starts and every
   signal carries it; the repository ignores a signal whose epoch is not current, so a request that was in flight across a
   logout can neither expire nor revive the login that came after. `epoch()` never throws: `CookieManager` fails without a
-  WebView provider (while it is being updated), and every caller reads the epoch outside its try; the engine also reads it
-  inside its own.
+  WebView provider (while it is being updated), so no caller has to guard it; the engine reads it inside its try anyway,
+  so any other failure there still ends the run PAUSED.
   - The repository remembers what the current epoch was issued for (`issuedFor`, an `AtomicReference` of the sessionid's
     fingerprint and the jar's `ds_user_id`). Every bump records the jar's session once it is written. Nothing reads the jar
     at construction (that would load the WebView), so epoch 0 is recorded by the first `epoch()` call (what a run holds), or
@@ -653,6 +653,10 @@ Mock mode switch.
   couldn't be removed" (only thumbnails or cached videos are left: the library IS deleted), or "Couldn't delete the library;
   try again" (the delete itself failed). `logout` clears the session line when it starts, and Delete library clears the
   storage line when it starts.
+## Login
+
+`app/.../ui/login/`, `ui/sync/SessionSection.kt`. Instagram's own login page in a WebView.
+
 - **Allowed pages.** It only loads https pages on the domains in `WebEndpoints.LOGIN_DOMAINS` (`instagram.com`,
   `facebook.com`, `meta.com`, and their subdomains, dot boundary; `:app` only parses the `Uri` and asks
   `WebEndpoints.isLoginPage`); every other navigation is dropped, never handed to another app, and a start URL that isn't one

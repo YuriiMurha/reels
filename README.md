@@ -260,7 +260,9 @@ Do this once, on the phone, with the throwaway account. You need the Mac set up 
   in as @handle" tap **Resume**.
 - **"Session expired. Log in again, then tap Resume."** Instagram no longer accepts the login, or a sessionid was pasted
   while the run was going (the run stops before its next request rather than carry on under another session). Tap
-  **Log in again** (finish any 2FA), then **Resume**. If Sync already says "Logged in as @handle", just tap **Resume**.
+  **Log in again** (finish any 2FA), then **Resume**. If Sync already says "Logged in as @handle" but Resume stops again
+  at once with this banner, the phone's login changed (for example you logged in as another account and left the login
+  screen right away): tap **Check now** first, then **Resume**.
 - **"Adapter needs repair: …"** Instagram's answer was not what the app expects; the text after the colon says where.
   Nothing was deleted. Don't keep tapping Resume (each tap sends the same request again). Run the Adapter lab once,
   and paste the banner and the lab's result in a Claude session. The common texts after the colon are explained in
