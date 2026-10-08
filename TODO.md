@@ -22,6 +22,7 @@ All of these need your phone. [`README.md`](README.md) says how.
 - [ ] Run the M2 checklist: log in on the phone (README section 8, "M2: session")
   - [ ] In `chrome://inspect`, see whether the WebView sends `X-Requested-With: io.github.yuriimurha.reels`
   - [ ] Note whether `sessionid` changes during a checkpoint flow
+  - [ ] Note whether Instagram re-issues `sessionid` on ordinary API responses (the app's own requests): if it does, Check now (or a login-screen check) while a sync runs ends the epoch and the run stops with STOPPED_LOGIN. Safe, but spurious
 - [ ] Confirm `X-IG-App-ID`: compare what the mobile site sends (in `chrome://inspect`) with the app's `WebHeaders.APP_ID`, `936619743392459`
 - [ ] Run the Adapter lab once (README section 7) and hand back the seven spike answers (README section 8, "M3")
 - [ ] Flip `SAVED_COLLECTION_IDS_CONFIRMED` to `true` (in `instagram/src/main/kotlin/io/github/yuriimurha/reels/instagram/web/WebInstagramClient.kt`) only if spike Q2 says saved items carry `saved_collection_ids`
@@ -71,4 +72,5 @@ All of these need your phone. [`README.md`](README.md) says how.
 From the reviews of M3–M6; none has been reproduced on a device.
 
 - After a Full sync is refused by the proportional guard (`STOPPED_SHAPE`), or paused, the items its earlier pages added stay in All Saved. Fixed in the final review: the guard's "before the run" now ends at the last finished (Done) run (R83), so after **Discard paused run** those items no longer count towards M; and a library remembers its Instagram account, so a run under another account stops right after its session check and writes nothing (R84), which also closes Discard, then Sync, then Full sync with another account's feed. Left by design: a same-account feed that a Sync (QUICK) run has finished with counts as library from then on.
+- A WebView login as another account is now seen by every run's gate as soon as the jar's `ds_user_id` differs (no check needed), but not atomically: the one request that is already past the gate when the cookies change can go out under the new account, and R84's account check only guards a run's first `currentUser`, so a page of the other account's feed could be written into this library. Only a sync running while the owner logs in as someone else can meet it.
 - A library synced before the account check existed (or after a settings-file corruption) has no stored account, so its next run adopts whichever account is logged in.

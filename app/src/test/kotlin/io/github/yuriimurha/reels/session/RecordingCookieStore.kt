@@ -12,6 +12,14 @@ class RecordingCookieStore(private val inner: InMemoryCookieStore = InMemoryCook
 
     val flushes: Int get() = events.count { it == "flush" }
 
+    /** When set, every read of the jar throws it, as `CookieManager` does while no WebView provider is available. */
+    var readFailure: Exception? = null
+
+    override fun cookieHeader(url: String): String? {
+        readFailure?.let { throw it }
+        return inner.cookieHeader(url)
+    }
+
     override fun setCookie(url: String, setCookie: String) {
         events += "set $setCookie"
         inner.setCookie(url, setCookie)

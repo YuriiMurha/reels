@@ -50,8 +50,8 @@ class SyncEngine(
     /**
      * R82: asked from inside the Pacer's gate right before every request (the session check included), with the epoch the run
      * started under. Anything but [RunSession.USABLE] stops the run with nothing more sent: a challenge or an expiry another
-     * lane stored (the viewer, the lab, Check now), a logout, or a paste. The fake backend has no session: the default lets
-     * every request through.
+     * lane stored (the viewer, the lab, Check now), a logout, a paste, or a login as another account. The fake backend has no
+     * session: the default lets every request through.
      */
     private val sessionUsable: suspend (epoch: Int) -> RunSession = { RunSession.USABLE },
     /** R84: the account this library belongs to. A run under another account stops before it writes anything. */
@@ -75,16 +75,20 @@ class SyncEngine(
      * only the exception class. Only cancellation propagates (after the run is left PAUSED, "Cancelled").
      */
     suspend fun run(runId: Long) {
-        // The session this run starts under. Every signal below carries it, so one that outlives a logout or a paste is ignored.
-        val epoch = signals.epoch()
         val stored = checkNotNull(syncDao.run(runId)) { "No sync run $runId" }
         val progress = Progress(
             stored.copy(status = SyncStatus.RUNNING, lastError = null, finishedAt = null, collectionsDone = 0),
             pacer.newRun(),
-            epoch,
+            epoch = 0, // replaced below, inside the try
         )
         progress.save()
+        var epoch = 0
         try {
+            // The session this run starts under. Every signal below carries it, so one that outlives a logout or a paste is
+            // ignored. Asked INSIDE the try: a session layer that cannot answer (no WebView provider while it is being updated)
+            // ends the run PAUSED like any other unexpected error, instead of leaving the row RUNNING.
+            epoch = signals.epoch()
+            progress.epoch = epoch
             progress.phase("Checking session")
             val account = call(progress) { client.currentUser() }
             notifySession { signals.sessionOk(account.username, epoch) }
@@ -433,7 +437,7 @@ class SyncEngine(
      * The run row plus this invocation's request budget and the session [epoch] it started under; every change is written
      * straight through.
      */
-    private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget, val epoch: Int) {
+    private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget, var epoch: Int) {
         private val requestsBefore = run.requestsUsed
 
         /**

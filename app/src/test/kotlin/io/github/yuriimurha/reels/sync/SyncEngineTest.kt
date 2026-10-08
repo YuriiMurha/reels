@@ -1270,6 +1270,27 @@ class SyncEngineTest {
         assertEquals(client.library.allSaved().map { it.pk }, pks(ALL_SAVED_ID))
     }
 
+    /** M1: the session layer cannot even say which session this run starts under (no WebView provider, say). */
+    @Test
+    fun aSessionLayerThatCannotGiveAnEpochEndsTheRunPausedNotRunning() = runTest {
+        val client = smallClient()
+        val failing = object : SessionSignals {
+            override fun epoch(): Int = error("no WebView provider")
+
+            override suspend fun sessionOk(username: String, epoch: Int) = Unit
+
+            override suspend fun loginRequired(epoch: Int) = Unit
+
+            override suspend fun challengeRequired(challengeUrl: String?, epoch: Int) = Unit
+        }
+
+        val run = runSync(engine(client, sessionSignals = failing), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.PAUSED, run.status, "before: the exception escaped run() and the row stayed RUNNING")
+        assertEquals("Unexpected error: IllegalStateException", run.lastError, "the message of the failure is never shown")
+        assertEquals(emptyList(), client.calls)
+    }
+
     private class ThrowingSignals : SessionSignals {
         override fun epoch(): Int = 1
 

@@ -8,6 +8,15 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.instagram.Account
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import io.github.yuriimurha.reels.data.settings.SettingsStore
+import io.github.yuriimurha.reels.instagram.SessionProbe
+import io.github.yuriimurha.reels.session.RecordingCookieStore
+import io.github.yuriimurha.reels.session.SessionRepository
+import io.github.yuriimurha.reels.session.toStored
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.MediaType
@@ -15,6 +24,7 @@ import io.github.yuriimurha.reels.instagram.Page
 import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import io.github.yuriimurha.reels.session.SessionState
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
@@ -258,7 +268,12 @@ class RealVideoSourceResolverTest {
      * [afterwards] once the resolve is queued behind it, and only then lets the gate go. (A latch, not a delay: while the test
      * waits for a real I/O thread the virtual clock runs on by itself, so a delay could end before the resolve has queued.)
      */
-    private suspend fun TestScope.resolveWhileTheGateIsBusy(media: MediaEntity, afterwards: SessionState, forceRefresh: Boolean = false): VideoSource? {
+    private suspend fun TestScope.resolveWhileTheGateIsBusy(
+        media: MediaEntity,
+        afterwards: SessionState,
+        forceRefresh: Boolean = false,
+        signalsAfterwards: RunSession = RunSession.USABLE,
+    ): VideoSource? {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
         val asked = CompletableDeferred<Unit>()
@@ -276,6 +291,7 @@ class RealVideoSourceResolverTest {
         // The resolver reads the row first (a real I/O thread). Once it has passed its own readiness check it queues for the gate.
         withContext(Dispatchers.Default) { withTimeout(5_000) { asked.await() } }
         sessionState = afterwards
+        signals.usable = signalsAfterwards
         release.complete(Unit)
         advanceUntilIdle() // the holder finishes, then the queued resolve takes the gate and waits out the 2 s gap
         // What follows touches Room again (a real I/O thread), so the end is awaited in real time.
@@ -294,6 +310,46 @@ class RealVideoSourceResolverTest {
         assertEquals(VideoSource.Unavailable("Instagram session needs attention (Sync screen)"), source)
         assertEquals(OLD_URL, row().videoUrl, "nothing was stored")
         assertEquals(emptyList(), signals.events, "and nothing is signalled to the session layer: the resolver itself declined")
+    }
+
+    /** I1: the stored state is still Valid, but the epoch or the account behind it changed while the request waited. */
+    @Test
+    fun aSessionThatIsNoLongerTheOneTheRequestStartedUnderSendsNothing() = runTest {
+        val media = stored(expiresAt = START - 1)
+        client.answer = { pk -> remote(pk, NEW_URL, START + 7_200_000) }
+
+        val source = resolveWhileTheGateIsBusy(media, afterwards = SessionState.Valid("tester"), signalsAfterwards = RunSession.NOT_USABLE)
+
+        assertEquals(emptyList(), client.calls, "mediaInfo must not be called under another session")
+        assertEquals(VideoSource.Unavailable("Instagram session needs attention (Sync screen)"), source)
+        assertEquals(OLD_URL, row().videoUrl, "nothing was stored")
+        assertEquals(listOf(7), signals.asked, "it was asked, from inside the gate, with the epoch the resolve started under")
+    }
+
+    /**
+     * M1: with the real session layer over a jar that cannot be read, `epoch()` used to throw at the top of `resolve`, outside
+     * its try: the viewer crashed. Now the resolve sends nothing and answers "Can't load this video right now".
+     */
+    @Test
+    fun aJarThatCannotBeReadDoesNotCrashTheViewerAndSendsNothing() = runTest {
+        val jar = RecordingCookieStore().apply { readFailure = IllegalStateException("no WebView provider") }
+        val storeScope = CoroutineScope(Dispatchers.IO + Job())
+        try {
+            val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
+            settings.setSession(SessionState.Valid("tester").toStored())
+            val clock = { START + testScheduler.currentTime }
+            val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
+            val repository = SessionRepository(jar, object : SessionProbe { override suspend fun currentUser() = error("never asked") }, pacer, settings)
+            val resolver = RealVideoSourceResolver(client, pacer, db.mediaDao(), videoCache, repository, ::sessionIsValid, now = clock)
+            val media = stored(expiresAt = START - 1)
+
+            val source = withContext(Dispatchers.Default) { withTimeout(5_000) { resolver.resolve(media) } }
+
+            assertEquals(VideoSource.Unavailable("Can't load this video right now"), source)
+            assertEquals(emptyList(), client.calls, "mediaInfo was never called")
+        } finally {
+            storeScope.cancel()
+        }
     }
 
     @Test
@@ -511,6 +567,15 @@ class RealVideoSourceResolverTest {
         val events = mutableListOf<String>()
         val challengeUrls = mutableListOf<String?>()
         var failWith: Exception? = null
+
+        /** What the in-gate check answers, and the epochs it was asked with. */
+        var usable = RunSession.USABLE
+        val asked = mutableListOf<Int>()
+
+        override suspend fun runSession(epoch: Int): RunSession {
+            asked += epoch
+            return usable
+        }
 
         override fun epoch(): Int = epoch
 

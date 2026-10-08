@@ -694,14 +694,17 @@ class SessionRepositoryTest {
         assertEquals(3, probe.calls, "all three checks were real requests")
     }
 
-    /** The epoch is only started when validate() sees a different session, so a repository that never saw one starts none. */
+    /**
+     * The epoch is only started when validate() sees a different session. The first validate() of a process has nothing recorded
+     * to compare with (nobody has called epoch() yet), so it records the jar's session and starts no epoch. It must be the
+     * FIRST call: asking for the epoch first would record the session itself and never reach that branch.
+     */
     @Test
     fun theFirstValidateOfAProcessStartsNoEpoch() = runTest {
         signedIn()
         val repository = repository()
-        val before = repository.epoch()
         assertEquals(SessionState.Valid("tester"), repository.validate())
-        assertEquals(before, repository.epoch(), "nothing had been handed out for another session")
+        assertEquals(0, repository.epoch(), "nothing was held under any other session: there is nothing to end")
     }
 
     /** A process that holds a run from before any check: its epoch was issued for the jar's session as of the run's start. */
@@ -822,6 +825,105 @@ class SessionRepositoryTest {
         assertEquals(SessionState.Valid("tester"), repository.validate())
 
         assertNotEquals(afterLogout, repository.epoch())
+    }
+
+    // ---- M1: a jar that cannot be read must not crash the callers of epoch() ----
+
+    @Test
+    fun anEpochIsHandedOutEvenWhenTheJarCannotBeRead() = runTest {
+        signedIn()
+        val repository = repository()
+        cookies.readFailure = IllegalStateException("no WebView provider")
+
+        assertEquals(0, repository.epoch(), "epoch() is called outside every try: it must not throw")
+    }
+
+    /** Nothing was recorded then, so the next call records the jar as it is by then, and a later login is seen as a change. */
+    @Test
+    fun theEpochIsRecordedByALaterCallOnceTheJarCanBeRead() = runTest {
+        signedIn("s1", "42")
+        val repository = repository()
+        cookies.readFailure = IllegalStateException("no WebView provider")
+        val runEpoch = repository.epoch()
+        cookies.readFailure = null
+        assertEquals(runEpoch, repository.epoch())
+
+        signedIn("s2", "43")
+        probe.next = { Account("43", "other") }
+        assertEquals(SessionState.Valid("other"), repository.validate())
+
+        assertNotEquals(runEpoch, repository.epoch(), "the second epoch() recorded the first session, so the login is a change")
+    }
+
+    @Test
+    fun aCheckOverAJarThatCannotBeReadFailsInsteadOfGuessing() = runTest {
+        signedIn("s1", "42")
+        val repository = repository()
+        repository.epoch()
+        cookies.readFailure = IllegalStateException("no WebView provider")
+
+        // Its callers (Check now, the login screen) catch it and say "Couldn't check the session".
+        assertFailsWith<IllegalStateException> { repository.validate() }
+        assertEquals(0, probe.calls)
+    }
+
+    // ---- I1: the gate also compares the jar's account, so a login that no check has seen yet still stops a run ----
+
+    private fun TestScope.validRun(repository: SessionRepository): Int {
+        val epoch = repository.epoch()
+        runBlocking { repository.sessionOk("tester", epoch) }
+        return epoch
+    }
+
+    /** The WebView login landed, but nothing has validated yet (the login screen polls once a second, and may be gone). */
+    @Test
+    fun aRunIsNotUsableOnceTheJarHoldsAnotherAccountEvenBeforeAnyCheck() = runTest {
+        signedIn("s1", "42")
+        val repository = repository()
+        val runEpoch = validRun(repository)
+        assertEquals(RunSession.USABLE, repository.runSession(runEpoch))
+
+        signedIn("s2", "43") // another account, no validate()
+
+        assertEquals(RunSession.NOT_USABLE, repository.runSession(runEpoch))
+        assertEquals(runEpoch, repository.epoch(), "nothing has ended the epoch: it is the gate that looks at the jar")
+        assertEquals(SessionState.Valid("tester"), repository.state.first(), "and the stored state is untouched")
+    }
+
+    /** Instagram may re-issue the sessionid for the same account: that is not another login and must not stop a run. */
+    @Test
+    fun aRotatedSessionIdOfTheSameAccountKeepsTheRunUsable() = runTest {
+        signedIn("s1", "42")
+        val repository = repository()
+        val runEpoch = validRun(repository)
+
+        signedIn("s1-rotated", "42")
+
+        assertEquals(RunSession.USABLE, repository.runSession(runEpoch))
+    }
+
+    @Test
+    fun aRunIsNotUsableOnceTheJarLostItsAccount() = runTest {
+        signedIn("s1", "42")
+        val repository = repository()
+        val runEpoch = validRun(repository)
+
+        cookies.clearAll() // the WebView dropped its cookies without going through logout
+
+        assertEquals(RunSession.NOT_USABLE, repository.runSession(runEpoch))
+    }
+
+    @Test
+    fun theAccountOfAPastedSessionIsTheOneARunStartedAfterItIsHeldTo() = runTest {
+        signedIn("s1", "42")
+        val repository = repository()
+        probe.next = { Account("43", "pasted") }
+        assertEquals(SessionState.Valid("pasted"), repository.pasteSessionId("43%3Acd"))
+        val runEpoch = repository.epoch()
+
+        assertEquals(RunSession.USABLE, repository.runSession(runEpoch))
+        signedIn("s3", "44")
+        assertEquals(RunSession.NOT_USABLE, repository.runSession(runEpoch))
     }
 
     private companion object {

@@ -87,7 +87,13 @@ class LoginMidRunTest {
         }
     }
 
-    private class Setup(val repository: SessionRepository, val engine: SyncEngine, val startRun: suspend () -> Long, val status: suspend (Long) -> SyncRunEntity)
+    private class Setup(
+        val repository: SessionRepository,
+        val engine: SyncEngine,
+        val settings: SettingsStore,
+        val startRun: suspend () -> Long,
+        val status: suspend (Long) -> SyncRunEntity,
+    )
 
     private fun TestScope.setup(client: InstagramClient): Setup {
         val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
@@ -105,6 +111,7 @@ class LoginMidRunTest {
         return Setup(
             repository,
             engine,
+            settings,
             startRun = {
                 delay(1)
                 db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = testScheduler.currentTime))
@@ -135,6 +142,63 @@ class LoginMidRunTest {
         assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
         assertEquals("Session expired", run.lastError)
         assertEquals(SessionState.Valid("other_account"), s.repository.state.first(), "and the new login is what is stored")
+    }
+
+    /**
+     * I1, the reviewer's probe: the cookies switch to another account while request 3 is out and NOTHING validates (the login
+     * screen polls only once a second, and the owner may have left it). Before the fix the run went on to DONE and the
+     * next pages were sent as the other account.
+     */
+    @Test
+    fun aLoginAsAnotherAccountWithNoCheckStillStopsTheRunBeforeItsNextRequest() = runTest {
+        signIn("s1", "1")
+        val (fake, client) = hooked(onCall = 3) { signIn("s2", "2") }
+        val s = setup(client)
+        assertEquals(SessionState.Valid("test_account"), s.repository.validate())
+
+        val id = s.startRun()
+        s.engine.run(id)
+
+        val run = s.status(id)
+        assertEquals(3, fake.calls.size, "nothing more is sent under the other account: ${fake.calls}")
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals("Session expired", run.lastError)
+    }
+
+    /** The same sync, but the sessionid is re-issued for the SAME account: no false stop. */
+    @Test
+    fun aReissuedSessionIdOfTheSameAccountMidRunDoesNotStopIt() = runTest {
+        signIn("s1", "1")
+        val (fake, client) = hooked(onCall = 3) { signIn("s1-reissued", "1") }
+        val s = setup(client)
+        assertEquals(SessionState.Valid("test_account"), s.repository.validate())
+
+        val id = s.startRun()
+        s.engine.run(id)
+
+        assertEquals(SyncStatus.DONE, s.status(id).status)
+        assertTrue(fake.calls.size > 3, "the run went on past the re-issue: ${fake.calls}")
+    }
+
+    /**
+     * M1: a process that starts with its jar unreadable (`CookieManager` without a WebView provider) and a stored Valid session.
+     * The run is left PAUSED with the usual "Unexpected error", with nothing sent; before, `epoch()` threw outside the engine's
+     * try and the row stayed RUNNING.
+     */
+    @Test
+    fun aJarThatCannotBeReadEndsTheRunPausedAndSendsNothing() = runTest {
+        cookies.readFailure = IllegalStateException("no WebView provider")
+        val (fake, client) = hooked(onCall = 3) { }
+        val s = setup(client)
+        s.settings.setSession(SessionState.Valid("test_account").toStored())
+
+        val id = s.startRun()
+        s.engine.run(id)
+
+        val run = s.status(id)
+        assertEquals(SyncStatus.PAUSED, run.status)
+        assertEquals("Unexpected error: IllegalStateException", run.lastError)
+        assertEquals(emptyList(), fake.calls, "not even the session check was sent")
     }
 
     @Test

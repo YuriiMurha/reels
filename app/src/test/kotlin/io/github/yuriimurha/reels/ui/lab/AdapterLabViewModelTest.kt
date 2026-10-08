@@ -1,10 +1,23 @@
 package io.github.yuriimurha.reels.ui.lab
 
+import io.github.yuriimurha.reels.data.settings.SettingsStore
+import io.github.yuriimurha.reels.instagram.SessionProbe
+import io.github.yuriimurha.reels.session.RecordingCookieStore
+import io.github.yuriimurha.reels.session.SessionRepository
+import io.github.yuriimurha.reels.session.toStored
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.lab.LabCall
 import io.github.yuriimurha.reels.instagram.lab.LabIds
 import io.github.yuriimurha.reels.instagram.lab.LabResult
 import io.github.yuriimurha.reels.session.SessionState
+import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
@@ -61,7 +74,7 @@ class AdapterLabViewModelTest {
     fun tearDown() = Dispatchers.resetMain()
 
     /** The clock is the test scheduler's, so the Pacer's 2 s interactive gap passes in virtual time. */
-    private fun TestScope.viewModel(dir: File = labDir): AdapterLabViewModel {
+    private fun TestScope.viewModel(dir: File = labDir, signals: SessionSignals = this@AdapterLabViewModelTest.signals): AdapterLabViewModel {
         val pacer = Pacer(PacingPolicy.Conservative, log, cooldowns, now = { START + testScheduler.currentTime })
         val viewModel = AdapterLabViewModel(
             lab = runner,
@@ -365,6 +378,53 @@ class AdapterLabViewModelTest {
         assertEquals(emptyList(), signals.events, "and nothing was signalled")
     }
 
+    /** I1: the epoch or the account behind the session changed while the tap waited (a login as another account, a paste). */
+    @Test
+    fun aSessionThatIsNoLongerTheOneTheTapStartedUnderSendsNothing() = runTest {
+        val viewModel = viewModel()
+        viewModel.tap(LabCall.CURRENT_USER)
+        advanceUntilIdle()
+        viewModel.tap(LabCall.COLLECTIONS)
+        runCurrent()
+        assertEquals(LabCall.COLLECTIONS, viewModel.ui.value.running, "precondition: the second tap is queued")
+
+        signals.usable = RunSession.NOT_USABLE // the stored state still says Valid
+        advanceUntilIdle()
+
+        assertEquals(listOf(LabCall.CURRENT_USER), runner.calls.map { it.first }, "the queued call never reached Instagram")
+        assertEquals(1, log.countSince(0), "and used no budget")
+        assertEquals(listOf(3, 3), signals.asked, "asked from inside the gate by each tap, with the epoch the tap started under")
+        assertNull(viewModel.ui.value.message)
+    }
+
+    /**
+     * M1: with the real session layer over a jar that cannot be read (no WebView provider), `epoch()` used to throw in the tap's
+     * coroutine, outside every try: the debug screen crashed the app. Now the tap sends nothing and shows a failure.
+     */
+    @Test
+    fun aJarThatCannotBeReadDoesNotCrashTheLabAndSendsNothing() = runTest {
+        val jar = RecordingCookieStore().apply { readFailure = IllegalStateException("no WebView provider") }
+        val storeScope = CoroutineScope(Dispatchers.IO + Job())
+        try {
+            val settings = SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
+            settings.setSession(SessionState.Valid("tester").toStored())
+            val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore())
+            val repository = SessionRepository(jar, object : SessionProbe { override suspend fun currentUser() = error("never asked") }, pacer, settings)
+            val viewModel = viewModel(signals = repository)
+
+            viewModel.tap(LabCall.CURRENT_USER)
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000) { while (viewModel.ui.value.running != null || viewModel.ui.value.message == null) { delay(10) } }
+            }
+
+            assertEquals(emptyList(), runner.calls, "nothing was sent")
+            assertEquals(0, log.countSince(0))
+            assertEquals("Who am I: The call failed", viewModel.ui.value.message)
+        } finally {
+            storeScope.cancel()
+        }
+    }
+
     @Test
     fun aTapThatPassesTheInGateCheckIsSent() = runTest {
         val viewModel = viewModel()
@@ -534,6 +594,15 @@ class AdapterLabViewModelTest {
         val events = mutableListOf<String>()
 
         var current = 3
+
+        /** What the in-gate check answers, and the epochs it was asked with. */
+        var usable = RunSession.USABLE
+        val asked = mutableListOf<Int>()
+
+        override suspend fun runSession(epoch: Int): RunSession {
+            asked += epoch
+            return usable
+        }
 
         override fun epoch(): Int = current
 

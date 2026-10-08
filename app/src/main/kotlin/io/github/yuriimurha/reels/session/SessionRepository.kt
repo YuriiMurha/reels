@@ -55,19 +55,36 @@ class SessionRepository(
     @Volatile
     private var sessionEpoch = 0
 
-    /** The session (a [currentSessionFingerprint], or null for none) a [sessionEpoch] was issued for. */
-    private class Issued(val fingerprint: String?)
+    /**
+     * The session a [sessionEpoch] was issued for: the fingerprint of its sessionid (null for none) and the account it belongs to
+     * (`ds_user_id`, which Instagram keeps when it re-issues a sessionid).
+     */
+    private class Issued(val fingerprint: String?, val userId: String?)
+
+    private fun jarSession() = Issued(currentSessionFingerprint(), userId())
 
     /**
      * What the current epoch was issued for. Null until something needs it: nothing reads the jar when the repository is built
      * (that would load the WebView), so epoch 0 is recorded by the first [epoch] call, which is what a run holds from then on,
-     * or else by the first [validate], when nobody holds it. Every bump records its own session, under [lock], once the jar is
-     * written. Only ever read for a decision under [lock]; the one write outside it is the first [epoch]'s compare-and-set from null.
+     * or else by the first [validate] or [runSession], when nobody holds it. Every bump records its own session, under [lock],
+     * once the jar is written. Only ever read for a decision under [lock] or by [runSession]; the one write outside the lock is
+     * a compare-and-set from null.
      */
     private val issuedFor = AtomicReference<Issued?>(null)
 
+    /**
+     * The epoch a run (or a lab call, or a video resolve) starts under, and the moment the jar's session is remembered for it
+     * the first time. It never throws: `CookieManager` fails without a WebView provider (while it is being updated, say), and
+     * this is called outside every try. Then nothing is recorded, and the next call or the in-gate [runSession] tries again.
+     */
     override fun epoch(): Int {
-        if (issuedFor.get() == null) issuedFor.compareAndSet(null, Issued(currentSessionFingerprint()))
+        if (issuedFor.get() == null) {
+            try {
+                issuedFor.compareAndSet(null, jarSession())
+            } catch (e: Exception) {
+                // Not recorded: retried by the next epoch(), validate() or runSession().
+            }
+        }
         return sessionEpoch
     }
 
@@ -191,23 +208,33 @@ class SessionRepository(
     }
 
     /**
-     * R82: may a sync run that started under [epoch] send its next request? A stored Challenge says [RunSession.CHALLENGE];
-     * only a Valid state under the same epoch is [RunSession.USABLE]; anything else (Expired, LoggedOut, or a logout or paste
-     * since the run started) is [RunSession.NOT_USABLE]. A read, never a request, and it changes nothing.
+     * R82: may work that started under [epoch] (a sync run, a lab call, a video resolve) send its next request? A stored
+     * Challenge says [RunSession.CHALLENGE]; only a Valid state under the same epoch, with the jar still holding the ACCOUNT
+     * the epoch was issued for, is [RunSession.USABLE]; anything else (Expired, LoggedOut, a logout, a paste or a new login
+     * since the work started, another account's cookies in the jar, or a jar that lost its account) is [RunSession.NOT_USABLE].
+     * A read, never a request, and it changes nothing.
+     *
+     * The account check is what closes the gap before a check has seen a WebView login as another account: the epoch only ends
+     * in [validate], which the login screen calls up to a second after the new cookies arrive (and not at all if the owner has
+     * left it). The jar's `ds_user_id` is compared, not the sessionid: Instagram re-issuing a sessionid for the same account
+     * must not stop work.
      *
      * The engine asks this from INSIDE the Pacer's gate. It must never take [lock]: a paste holds the lock while it waits for
      * that same gate, so taking it here would leave each waiting for the other. It needs no lock: [sessionEpoch] is volatile
-     * and the state is one DataStore read. The state is read first, the epoch second: logout and paste bump the epoch before
-     * they touch the jar, so one that has begun is always seen.
+     * and the state is one DataStore read. The state is read first, the epoch second, the jar last: logout, paste and a new
+     * login's check bump the epoch before they record anything else, so one that has begun is always seen. One request can still
+     * go out under the new account if the cookies change between this check and OkHttp reading them a moment later.
      */
-    suspend fun runSession(epoch: Int): RunSession {
+    override suspend fun runSession(epoch: Int): RunSession {
         val stored = state.first()
         return when {
             stored is SessionState.Challenge -> RunSession.CHALLENGE
-            stored is SessionState.Valid && epoch == sessionEpoch -> RunSession.USABLE
+            stored is SessionState.Valid && epoch == sessionEpoch && jarStillHoldsTheEpochsAccount() -> RunSession.USABLE
             else -> RunSession.NOT_USABLE
         }
     }
+
+    private fun jarStillHoldsTheEpochsAccount(): Boolean = userId() == recordedOrRecord(jarSession()).userId
 
     private suspend fun probeSession(handle: String?): SessionState = try {
         SessionState.Valid(pacer.interactive { probe.currentUser() }.username)
@@ -218,7 +245,7 @@ class SessionRepository(
     }
 
     /** Under [lock]: the epoch just bumped was issued for whatever session the jar holds now. */
-    private fun recordIssuedFor() = issuedFor.set(Issued(currentSessionFingerprint()))
+    private fun recordIssuedFor() = issuedFor.set(jarSession())
 
     /**
      * Under [lock]: ends the current epoch if the jar holds a session other than the one it was issued for. The epoch moves
@@ -226,16 +253,19 @@ class SessionRepository(
      * a run that sees the old state still sees the new epoch.
      */
     private fun startEpochIfSessionChanged() {
-        val now = currentSessionFingerprint()
+        val now = jarSession()
         // Nothing has asked for the epoch yet (no run, no lab call): nobody holds it, so there is nothing to stop. If a run
         // asked in between, its record wins, and the comparison below is made against that.
-        val issued = issuedFor.get() ?: run {
-            issuedFor.compareAndSet(null, Issued(now))
-            issuedFor.get()!!
-        }
-        if (issued.fingerprint == now) return
+        val issued = recordedOrRecord(now)
+        if (issued.fingerprint == now.fingerprint && issued.userId == now.userId) return
         sessionEpoch++
-        issuedFor.set(Issued(now))
+        issuedFor.set(now)
+    }
+
+    /** What the current epoch was issued for; [ifNone] is recorded first when nothing has been (see [issuedFor]). */
+    private fun recordedOrRecord(ifNone: Issued): Issued {
+        issuedFor.compareAndSet(null, ifNone)
+        return issuedFor.get()!!
     }
 
     private suspend fun store(result: SessionState): SessionState {
