@@ -21,13 +21,27 @@ class EmulatorDetectionTest {
         assertFalse(isEmulator("Xiaomi/marble/marble:14/UKQ1.230804.001/V816.0.6.0.UMRMIXM:user/release-keys", "qcom", "marble_eea"))
     }
 
+    /** A phone running a Generic System Image says "generic" in its fingerprint; that alone must not read as an emulator. */
+    @Test
+    fun aGsiPhoneIsNotAnEmulator() {
+        assertFalse(isEmulator("google/gsi_arm64/generic_arm64:15/AP4A.250205.002/12345678:user/release-keys", "qcom", "gsi_arm64"))
+    }
+
+    /** "sdk" inside a word of a product name is not the SDK images' `sdk` token. */
+    @Test
+    fun aProductWithSdkInsideAWordIsNotAnEmulator() {
+        assertFalse(isEmulator(fingerprint = "x", hardware = "qcom", product = "mysdkphone"))
+        assertFalse(isEmulator(fingerprint = "x", hardware = "qcom", product = "sdkphone_eea"))
+    }
+
     @Test
     fun emulatorsAreRecognisedByAnyOneSignal() {
         assertTrue(isEmulator("google/sdk_gphone64_arm64/emu64a:17/CE2A.260420.019/15611780:user/release-keys", "ranchu", "sdk_gphone64_arm64"))
-        assertTrue(isEmulator(fingerprint = "generic/vbox86p/vbox86p:7.1.1/NMF26Q/1:userdebug/test-keys", hardware = "x", product = "x"))
         assertTrue(isEmulator(fingerprint = "Android/emulator/emulator:14/x/1:eng/test-keys", hardware = "x", product = "x"))
         assertTrue(isEmulator(fingerprint = "x", hardware = "ranchu", product = "x"))
         assertTrue(isEmulator(fingerprint = "x", hardware = "goldfish", product = "x"))
         assertTrue(isEmulator(fingerprint = "x", hardware = "x", product = "sdk_gphone_x86"))
+        assertTrue(isEmulator(fingerprint = "x", hardware = "x", product = "google_sdk"))
+        assertTrue(isEmulator(fingerprint = "x", hardware = "x", product = "sdk"))
     }
 }

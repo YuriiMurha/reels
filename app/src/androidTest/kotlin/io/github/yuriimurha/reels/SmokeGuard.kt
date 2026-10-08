@@ -26,15 +26,21 @@ internal const val MOCK_MODE_OFF =
 /**
  * True on an Android emulator or a virtual device. The inputs are parameters (defaulting to this device's [Build] values)
  * so [EmulatorDetectionTest] can feed it what a real phone reports.
+ *
+ * Deliberately NOT a match on "generic": a real phone running a Generic System Image (fingerprint
+ * `google/gsi_arm64/generic_arm64:...`) says that too. What only emulators say is `ro.hardware` ranchu/goldfish, an
+ * `sdk_gphone` or `emulator` fingerprint, and a product named from the SDK images: `sdk_gphone64_arm64`, `sdk_x86`,
+ * `google_sdk`. The product is compared by its `_`-separated tokens, so a phone whose name merely contains the letters
+ * "sdk" somewhere inside a word does not match.
  */
 internal fun isEmulator(
     fingerprint: String = Build.FINGERPRINT,
     hardware: String = Build.HARDWARE,
     product: String = Build.PRODUCT,
 ): Boolean =
-    fingerprint.lowercase().let { "generic" in it || "emulator" in it || "sdk_gphone" in it } ||
+    fingerprint.lowercase().let { "emulator" in it || "sdk_gphone" in it } ||
         hardware.lowercase() in setOf("ranchu", "goldfish") ||
-        "sdk" in product.lowercase()
+        "sdk" in product.lowercase().split('_')
 
 /**
  * Fails (not skips) when this process runs on the real library. `usesFake` is read once per process from the stored
