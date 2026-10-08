@@ -142,9 +142,44 @@ class ShapeDumpTest {
         }
     }
 
+    private fun shownOnScreen(text: String): Boolean =
+        ShapeDump.of(JsonObject(mapOf("message" to JsonPrimitive(text)))) == "message string = \"$text\""
+
+    /** H6: an id written with sentence punctuation between its digits is still an id. The check strips the whole set first. */
+    @Test
+    fun aDigitRunSplitByColonsOrParenthesesIsHiddenOnScreenToo() {
+        for (text in listOf("id 31:00:00:00:00", "(31)(00)(00)", "31:00:00:00", "pk 31;00;00;00", "id 31!00!00!00", "id 31?00?00?00", "id 31'00'00'00")) {
+            assertFalse(LabRules.isVisibleString(text), text)
+            assertEquals("message string(len ${text.length}, text)", ShapeDump.of(JsonObject(mapOf("message" to JsonPrimitive(text)))), text)
+        }
+    }
+
+    @Test
+    fun everyMarkOfTheSentenceSetCountsAsASeparatorBetweenDigits() {
+        for (mark in " .,:;!?'\"()-_/") {
+            val text = "id 31${mark}00${mark}00"
+            assertFalse(LabRules.isVisibleString(text), "'$text': $mark between digits must not hide a run")
+        }
+    }
+
+    @Test
+    fun sentencesWithSmallNumbersStillShow() {
+        for (text in listOf("Wait 2 minutes, 30 seconds", "Try again in 5 minutes.", "You can retry in 10 minutes or 2 hours!", "Please wait 20 (twenty) minutes")) {
+            assertTrue(LabRules.isVisibleString(text), text)
+            assertTrue(shownOnScreen(text), text)
+        }
+    }
+
+    @Test
+    fun anEnumLikeValueMayHaveAnyCase() {
+        // KDoc: "one word of letters or underscores, any case" (the old text said bare lowercase). Keys are lowercase only.
+        for (text in listOf("clips", "JohnDoe", "ALL_MEDIA_AUTO_COLLECTION", "Jane_Doe")) assertTrue(LabRules.isVisibleString(text), text)
+        assertFalse(LabRules.isSafeName("JohnDoe"), "a KEY must be lowercase")
+    }
+
     @Test
     fun anEnumLikeValueUnderAVisibleKeyIsShownEvenWhenItLooksLikeAHandle() {
-        // Documented limit: a bare lowercase word under an enum-like key cannot be told from an enum value.
+        // Documented limit: one word of letters or underscores under an enum-like key cannot be told from an enum value.
         val shape = dump("""{"status":"johndoe","error_type":"jane_doe"}""")
         assertEquals("status string = \"johndoe\"\nerror_type string = \"jane_doe\"", shape)
     }

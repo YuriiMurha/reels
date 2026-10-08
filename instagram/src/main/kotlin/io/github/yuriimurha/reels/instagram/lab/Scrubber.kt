@@ -20,8 +20,8 @@ import java.security.SecureRandom
  * [LabRules.isVisibleString]) or a number of at most 6 characters; otherwise it becomes `text <n>` or `n`. A key or URL
  * parameter name that is data (see [LabRules.isSafeName]) is replaced too.
  *
- * It is a heuristic, not a proof: a bare lowercase handle used as a key or as an enum-like value cannot be told from
- * schema, so read a scrubbed file before committing it.
+ * It is a heuristic, not a proof: a lowercase handle used as a key, or a one-word value of letters and underscores (any
+ * case) under an enum-like key, cannot be told from schema, so read a scrubbed file before committing it.
  *
  * One Scrubber keeps its mappings for its whole life, so the same real id becomes the same synthetic id in every
  * response of a lab session and the saved fixtures cross-reference each other. The mappings live in memory only and are

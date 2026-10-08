@@ -376,6 +376,18 @@ class ScrubberTest {
     fun aSpaceGroupedIdIsRedactedInTheScrubber() = assertRedactedInTheScrubber("message", "user 3100 0000 0000 0000 001")
 
     @Test
+    fun anIdSplitByColonsOrParenthesesIsRedactedInTheScrubber() {
+        assertRedactedInTheScrubber("message", "id 31:00:00:00:00")
+        assertRedactedInTheScrubber("message", "(31)(00)(00)")
+        assertRedactedInTheScrubber("message", "31:00:00:00")
+    }
+
+    @Test
+    fun aSentenceWithSmallNumbersSurvivesInTheScrubber() {
+        assertEquals("Wait 2 minutes, 30 seconds", scrubVisible("message", "Wait 2 minutes, 30 seconds"))
+    }
+
+    @Test
     fun aThreeDigitRunIsRedactedInTheScrubber() {
         assertRedactedInTheScrubber("message", "Code 1234")
         assertEquals("text 1", scrubVisible("message", "Item 1 2 3"))
@@ -404,7 +416,7 @@ class ScrubberTest {
 
     @Test
     fun aHandleUnderStatusOrErrorTypeIsAcceptedAsEnumLikeAndSurvives() {
-        // Documented limit: a bare lowercase word under an enum-like key cannot be told from an enum value.
+        // Documented limit: one word of letters or underscores under an enum-like key cannot be told from an enum value.
         val scrubbed = Scrubber().scrub(parse("""{"status":"johndoe","error_type":"jane_doe"}"""))
         assertEquals(parse("""{"status":"johndoe","error_type":"jane_doe"}"""), scrubbed)
     }
@@ -482,7 +494,7 @@ class ScrubberTest {
         val scrubbed = Scrubber().scrub(
             parse("""{"u":"https://h.example.invalid/a?AbCd=1&oe=deadbeefcafebabe&ab12cd34ef56ab78cd90ab12=2&johndoe=3"}"""),
         ).jsonObject
-        // johndoe is a bare lowercase name: kept, like a bare lowercase key (documented limit). Its value is x.
+        // johndoe is a bare lowercase name: kept, like a lowercase key (documented limit). Its value is x.
         assertEquals(
             "https://cdn.example.invalid/m/1?p_0=x&oe=deadbeefcafebabe&p_2=x&johndoe=x",
             scrubbed["u"]!!.jsonPrimitive.content,

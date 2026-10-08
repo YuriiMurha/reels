@@ -375,8 +375,8 @@ adb -d exec-out run-as io.github.yuriimurha.reels cat files/lab/media_info.json 
 If an exported file contains an error such as `No such file or directory`, that button has no scrubbed copy (never
 tapped, or its latest answer was not JSON).
 
-**Read each scrubbed file before you hand it over or commit it: redaction is heuristic.** A bare lowercase handle used
-as a key, or as a one-word value, can't be told from schema and is kept. The pre-commit guard only catches session
+**Read each scrubbed file before you hand it over or commit it: redaction is heuristic.** A lowercase handle used
+as a key, or a one-word value (letters and underscores, any case), can't be told from schema and is kept. The pre-commit guard only catches session
 material, not personal data.
 
 **Hand it back.** Once you have read them, give the five files and the on-screen results (long-press the shape text to select and copy it, or

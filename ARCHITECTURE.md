@@ -217,7 +217,8 @@ endpoint to learn the real response shapes (spec 6.3).
   key of `VISIBLE_VALUE_KEYS` (`media_type`, `product_type`, `collection_type`, `status`, `more_available`, `num_results`,
   sizes, `carousel_media_count`, `error_type`, `message`, `feedback_title` and a few flags), where a number of at most 6 characters and a string that
   is enum-like (up to 40 letters and `_`) or a plain sentence (up to 200 ASCII characters, no word with a `.`, `_` or `@`
-  inside, no run of 3 or more digits even when separated by `,`, `-` or spaces, no two capitalised words in a row) are
+  inside, no run of 3 or more digits even when separated by any sentence punctuation or spaces (`3,100`, `31:00:00`,
+  `(31)(00)(00)`), no two capitalised words in a row) are
   shown. A URL shows `url(host=instagram|cdn|other, params=[sorted names], oe=hex|absent|malformed)`, never the host or a
   value; a key that is data shows only its length and class.
 - **`Scrubber`** writes the synthetic copy that can become a fixture in this public repo, with the same visible-value rule:
@@ -233,9 +234,9 @@ endpoint to learn the real response shapes (spec 6.3).
     never overwrites a real one in the same object.
   - It keeps its mappings keyed by a salted SHA-256 digest, never by the raw value, so it holds no raw id, handle, caption
     or URL. Output with a word of the fixture guard's list is withheld.
-- **The redaction is heuristic, not a proof:** a bare lowercase handle used as a key, as a URL parameter name or as an
-  enum-like value (`johndoe`, `jane_doe`) can't be told from schema and is kept, and a one-word or lowercase sentence under
-  `message` passes. Read a scrubbed file before committing it.
+- **The redaction is heuristic, not a proof:** a lowercase handle used as a key or as a URL parameter name, or a one-word
+  value of letters and underscores in any case under an enum-like key (`johndoe`, `JohnDoe`, `jane_doe`), can't be told
+  from schema and is kept, and a one-word or lowercase sentence under `message` passes. Read a scrubbed file before committing it.
 
 ## Pacer
 
