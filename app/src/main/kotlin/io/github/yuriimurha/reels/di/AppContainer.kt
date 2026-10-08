@@ -21,6 +21,7 @@ import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
 import io.github.yuriimurha.reels.instagram.web.CookieStore
 import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
+import io.github.yuriimurha.reels.instagram.web.OkHttpTransport
 import io.github.yuriimurha.reels.instagram.web.WebInstagramClient
 import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
 import io.github.yuriimurha.reels.session.AndroidCookieStore
@@ -136,7 +137,7 @@ class AppContainer(context: Context) {
         if (usesFake) {
             Backend.Fake()
         } else {
-            Backend.Real(WebInstagramClient({ instagramHttp }, cookieStore), HttpMediaFetcher({ cdnHttp }), instagramPacer)
+            Backend.Real(WebInstagramClient({ OkHttpTransport(instagramHttp) }, cookieStore), HttpMediaFetcher({ cdnHttp }), instagramPacer)
         }
     }
 
@@ -145,7 +146,7 @@ class AppContainer(context: Context) {
         MockModeSwitch(usesFake, backendChoice, cancelSync = { syncScheduler.cancelAndAwait() }, restart = restart)
 
     /** The debug Adapter lab. Built without the HTTP client: that is only built when a lab call reaches the network. */
-    val adapterLab: AdapterLab by lazy { AdapterLab({ instagramHttp }, cookieStore) }
+    val adapterLab: AdapterLab by lazy { AdapterLab({ OkHttpTransport(instagramHttp) }, cookieStore) }
 
     /**
      * Building this loads no WebView: the HTTP client (whose user agent comes from the WebView provider) is only built
@@ -154,7 +155,7 @@ class AppContainer(context: Context) {
     val session: SessionRepository by lazy {
         SessionRepository(
             cookies = cookieStore,
-            probe = LazySessionProbe { WebSessionProbe(instagramHttp, cookieStore) },
+            probe = LazySessionProbe { WebSessionProbe({ OkHttpTransport(instagramHttp) }, cookieStore) },
             pacer = instagramPacer,
             settings = settings,
         )

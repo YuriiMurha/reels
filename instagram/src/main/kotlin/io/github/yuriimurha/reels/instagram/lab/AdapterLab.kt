@@ -2,10 +2,9 @@ package io.github.yuriimurha.reels.instagram.lab
 
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.CookieStore
-import io.github.yuriimurha.reels.instagram.web.ErrorClassifier
+import io.github.yuriimurha.reels.instagram.web.InstagramTransport
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
-import io.github.yuriimurha.reels.instagram.web.classifyUnreadable
-import io.github.yuriimurha.reels.instagram.web.getRaw
+import io.github.yuriimurha.reels.instagram.web.classifyReply
 import io.github.yuriimurha.reels.instagram.web.idString
 import io.github.yuriimurha.reels.instagram.web.sessionUserId
 import io.github.yuriimurha.reels.instagram.web.string
@@ -14,7 +13,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl
-import okhttp3.OkHttpClient
 
 /** The five endpoint calls the Adapter lab can make (spec 6.2). */
 enum class LabCall { CURRENT_USER, COLLECTIONS, SAVED_ALL, SAVED_COLLECTION, MEDIA_INFO }
@@ -52,44 +50,43 @@ class LabIds(val firstCollectionId: String?, val firstMediaPk: String?) {
  * Sends ONE paced-by-the-caller request per [run] to an Instagram endpoint and reports what came back as a redacted
  * shape and a scrubbed copy, so the owner can see the real response structure without any real value leaving the
  * phone's memory. The raw body is read into a local, classified, parsed, and dropped: it is never stored, logged or
- * returned. There is no retry. The OkHttpClient is built on the first call that reaches the network.
+ * returned. There is no retry. The transport is built on the first call that reaches the network.
  */
 class AdapterLab(
-    http: () -> OkHttpClient,
+    transport: () -> InstagramTransport,
     private val cookies: CookieStore,
-    private val base: HttpUrl = WebEndpoints.BASE,
 ) {
-    private val http by lazy(http)
+    private val transport by lazy(transport)
 
     /** One Scrubber for the whole lab session: the same real id gets the same synthetic id in every call. */
     val scrubber: Scrubber = Scrubber()
 
     /**
      * Sends exactly one request. [arg] is a collection id (SAVED_COLLECTION) or a media pk (MEDIA_INFO). An HTTP error
-     * status is an answer, not an exception, even when its body can't be read (then it is classified from its headers);
-     * a failure to connect, or to read the body of a 2xx or 5xx, is a [InstagramException.Transient].
+     * status is an answer, not an exception, even when its body can't be read (then it is classified from its status); a
+     * redirect is an answer too (it was not followed, so its target is unknown). A failure to connect, or to read the
+     * body of a 2xx or 5xx, is a [InstagramException.Transient].
      */
     suspend fun run(call: LabCall, arg: String?): LabResult {
-        // Built first: a missing session or a bad id throws before the lazy client exists and before any request.
+        // Built first: a missing session or a bad id throws before the lazy transport exists and before any request.
         val url = urlFor(call, arg)
-        val raw = http.getRaw(url)
-        // A 3xx or 4xx whose body was cut still says what it was in its headers (a rate limit must arm the cooldown).
-        val error = if (raw.bodyUnreadable) {
-            classifyUnreadable(raw.code, raw.location, raw.contentType)
-        } else {
-            ErrorClassifier.classify(raw.code, raw.location, raw.contentType, raw.body)
-        }
-        val json = if (raw.body.isEmpty()) null else runCatching { Json.parseToJsonElement(raw.body) }.getOrNull()
+        val reply = transport.get(WebEndpoints.relative(url))
+        // One rule for every transport. A 3xx or 4xx whose body was cut still says what it was (a rate limit must arm the cooldown).
+        val error = classifyReply(reply)
+        if (reply.body == null && error is InstagramException.Transient) throw error
+        val body = reply.body
+        val json = if (body.isNullOrEmpty()) null else runCatching { Json.parseToJsonElement(body) }.getOrNull()
         val shape = when {
-            raw.bodyUnreadable -> "(unreadable body)"
-            raw.body.isEmpty() -> "(empty body)"
-            json == null -> "(not JSON: ${mediaType(raw.contentType)}, ${raw.body.length} chars)"
+            reply.redirected -> "(redirect, not followed)"
+            body == null -> "(unreadable body)"
+            body.isEmpty() -> "(empty body)"
+            json == null -> "(not JSON: ${mediaType(reply.contentType)}, ${body.length} chars)"
             else -> ShapeDump.of(json)
         }
         val scrubbed = json?.let { PRETTY.encodeToString(JsonElement.serializer(), scrubber.scrub(it)) }
         return LabResult(
             call = call,
-            httpCode = raw.code,
+            httpCode = reply.code,
             classification = error?.let { it::class.simpleName ?: "Unknown" } ?: "ok",
             error = error,
             // Defence in depth: the rules keep these words out by construction, but a lab result is never worth the risk.
@@ -100,13 +97,16 @@ class AdapterLab(
     }
 
     private fun urlFor(call: LabCall, arg: String?): HttpUrl = when (call) {
-        LabCall.CURRENT_USER ->
-            WebEndpoints.currentUser(base, cookies.sessionUserId() ?: throw InstagramException.LoginRequired())
-        LabCall.COLLECTIONS -> WebEndpoints.collections(base, null)
-        LabCall.SAVED_ALL -> WebEndpoints.savedPosts(base, null)
+        LabCall.CURRENT_USER -> {
+            // The URL carries no id, but without a session there is nothing to ask about: no request, as for the probe.
+            cookies.sessionUserId() ?: throw InstagramException.LoginRequired()
+            WebEndpoints.currentUser()
+        }
+        LabCall.COLLECTIONS -> WebEndpoints.collections(WebEndpoints.BASE, null)
+        LabCall.SAVED_ALL -> WebEndpoints.savedPosts(WebEndpoints.BASE, null)
         LabCall.SAVED_COLLECTION ->
-            WebEndpoints.collectionPosts(base, arg ?: throw InstagramException.ShapeChanged("collection_id"), null)
-        LabCall.MEDIA_INFO -> WebEndpoints.mediaInfo(base, arg ?: throw InstagramException.ShapeChanged("pk"))
+            WebEndpoints.collectionPosts(WebEndpoints.BASE, arg ?: throw InstagramException.ShapeChanged("collection_id"), null)
+        LabCall.MEDIA_INFO -> WebEndpoints.mediaInfo(WebEndpoints.BASE, arg ?: throw InstagramException.ShapeChanged("pk"))
     }
 
     /** The first MEDIA collection's id, and the first saved or info item's pk, read leniently: the shape may have drifted. */

@@ -32,7 +32,7 @@ class WebInstagramClientTest {
     fun stop() = server.close()
 
     private fun client(http: () -> OkHttpClient = { HttpClientFactory.create(cookies, "test-agent") }) =
-        WebInstagramClient(http, cookies, base = server.url("/"))
+        WebInstagramClient({ OkHttpTransport(http(), server.url("/")) }, cookies)
 
     private fun fixture(name: String): String = javaClass.getResource("/fixtures/web/$name")!!.readText()
 
@@ -164,9 +164,9 @@ class WebInstagramClientTest {
 
     @Test
     fun currentUserDelegatesToTheProbe() = runTest {
-        serve("""{"user":{"pk":42,"username":"user_1"},"status":"ok"}""")
+        serve("""{"form_data":{"username":"user_1"},"status":"ok"}""")
         assertEquals(Account("42", "user_1"), client().currentUser())
-        assertEquals("/api/v1/users/42/info/", server.takeRequest().url.encodedPath)
+        assertEquals("/api/v1/accounts/edit/web_form_data/", server.takeRequest().url.encodedPath)
     }
 
     @Test
@@ -200,7 +200,7 @@ class WebInstagramClientTest {
     fun currentUserAndAListCallShareOneHttpClient() = runTest {
         var built = 0
         val client = client { built++; HttpClientFactory.create(cookies, "test-agent") }
-        serve("""{"user":{"pk":42,"username":"user_1"},"status":"ok"}""")
+        serve("""{"form_data":{"username":"user_1"},"status":"ok"}""")
         serveFixture("collections_list.json")
         client.currentUser()
         client.collections(null)
@@ -232,7 +232,11 @@ class WebInstagramClientTest {
 
     @Test
     fun reportsSavedCollectionIdsFollowsTheConstructorArgument() {
-        val on = WebInstagramClient({ HttpClientFactory.create(cookies, "test-agent") }, cookies, reportsSavedCollectionIds = true, base = server.url("/"))
+        val on = WebInstagramClient(
+            { OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), server.url("/")) },
+            cookies,
+            reportsSavedCollectionIds = true,
+        )
         assertEquals(true, on.reportsSavedCollectionIds)
     }
 
@@ -241,7 +245,7 @@ class WebInstagramClientTest {
         val dead = MockWebServer().apply { start() }
         val url = dead.url("/")
         dead.close()
-        val unreachable = WebInstagramClient({ HttpClientFactory.create(cookies, "test-agent") }, cookies, base = url)
+        val unreachable = WebInstagramClient({ OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), url) }, cookies)
         assertFailsWith<InstagramException.Transient> { unreachable.savedMedia(null, null) }
         assertFailsWith<InstagramException.Transient> { unreachable.mediaInfo("3100000000000000001") }
     }

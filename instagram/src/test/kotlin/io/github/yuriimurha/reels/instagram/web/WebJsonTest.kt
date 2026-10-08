@@ -10,8 +10,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 
-/** A response whose headers arrive but whose body is cut off: reading it throws an IOException. */
+/** What a reply whose body is cut off signals, and the header-only classification behind it (cut bodies: [CutResponse]). */
 class WebJsonTest {
     private val server = MockWebServer()
     private val client = HttpClientFactory.create(InMemoryCookieStore(), "UA")
@@ -30,7 +31,8 @@ class WebJsonTest {
     fun aChallengeRedirectStopsEvenWhenItsBodyCannotBeRead() = runTest {
         server.enqueue(cutOff(302, location = "/challenge/"))
         val error = assertFailsWith<InstagramException.ChallengeRequired> { fetch() }
-        assertEquals("https://www.instagram.com/challenge/", error.challengeUrl)
+        // A redirect is not followed and its body is not read, so the target is never kept (the owner opens the WebView).
+        assertNull(error.challengeUrl)
         assertEquals(1, server.requestCount)
     }
 
@@ -72,79 +74,6 @@ class WebJsonTest {
         assertIs<InstagramException.Transient>(assertFailsWith<InstagramException> { fetch() })
         assertIs<InstagramException.Transient>(assertFailsWith<InstagramException> { fetch() })
         assertEquals(2, server.requestCount)
-    }
-
-    @Test
-    fun getRawReturnsAnyStatusWithItsHeadersAndBodyWithoutThrowing() = runTest {
-        server.enqueue(
-            MockResponse.Builder().code(404).addHeader("Content-Type", "application/json").body("""{"message":"gone"}""").build(),
-        )
-        server.enqueue(MockResponse.Builder().code(302).addHeader("Location", "/accounts/login/").build())
-        server.enqueue(MockResponse.Builder().code(503).body("down").build())
-        val url = server.url("/api/v1/x/")
-
-        val notFound = client.getRaw(url)
-        assertEquals(404, notFound.code)
-        assertEquals("application/json", notFound.contentType)
-        assertEquals("""{"message":"gone"}""", notFound.body)
-        assertEquals(null, notFound.location)
-
-        val redirect = client.getRaw(url)
-        assertEquals(302, redirect.code)
-        assertEquals("/accounts/login/", redirect.location)
-        assertEquals("", redirect.body)
-
-        assertEquals(503, client.getRaw(url).code)
-        assertEquals(3, server.requestCount)
-    }
-
-    @Test
-    fun getRawNeverPrintsTheBody() {
-        assertEquals("RawResponse(code=200, body=<6 chars>)", RawResponse(200, null, null, "secret").toString())
-    }
-
-    @Test
-    fun getRawMapsAConnectFailureToTransient() = runTest {
-        val dead = MockWebServer().apply { start() }
-        val url = dead.url("/")
-        dead.close()
-        assertFailsWith<InstagramException.Transient> { client.getRaw(url) }
-    }
-
-    @Test
-    fun getRawStillThrowsTransientForAnUnreadable2xxOr5xxBody() = runTest {
-        server.enqueue(cutOff(200))
-        server.enqueue(cutOff(503))
-        assertFailsWith<InstagramException.Transient> { client.getRaw(server.url("/api/v1/x/")) }
-        assertFailsWith<InstagramException.Transient> { client.getRaw(server.url("/api/v1/x/")) }
-        assertEquals(2, server.requestCount)
-    }
-
-    @Test
-    fun getRawReportsAnUnreadable3xxOr4xxBodyAsAResponseSoItsHeadersStillCount() = runTest {
-        server.enqueue(cutOff(429))
-        server.enqueue(cutOff(403))
-        server.enqueue(cutOff(302, location = "/challenge/x/"))
-        val url = server.url("/api/v1/x/")
-
-        val limited = client.getRaw(url)
-        assertEquals(429, limited.code)
-        assertEquals(true, limited.bodyUnreadable)
-        assertEquals("", limited.body)
-        assertEquals("RawResponse(code=429, body=<unreadable>)", limited.toString())
-
-        assertEquals(403, client.getRaw(url).code)
-        val redirect = client.getRaw(url)
-        assertEquals(302, redirect.code)
-        assertEquals("/challenge/x/", redirect.location)
-        assertEquals(true, redirect.bodyUnreadable)
-        assertEquals(3, server.requestCount)
-    }
-
-    @Test
-    fun aReadableBodyIsNotMarkedUnreadable() = runTest {
-        server.enqueue(MockResponse.Builder().code(429).body("{}").build())
-        assertEquals(false, client.getRaw(server.url("/api/v1/x/")).bodyUnreadable)
     }
 
     @Test

@@ -3,6 +3,7 @@ package io.github.yuriimurha.reels.instagram.lab
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
 import io.github.yuriimurha.reels.instagram.web.InMemoryCookieStore
+import io.github.yuriimurha.reels.instagram.web.OkHttpTransport
 import io.github.yuriimurha.reels.instagram.web.cutResponse
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -44,7 +45,7 @@ class AdapterLabTest {
     fun stop() = server.close()
 
     private fun lab(http: () -> OkHttpClient = { HttpClientFactory.create(cookies, "test-agent") }) =
-        AdapterLab(http, cookies, base = server.url("/"))
+        AdapterLab({ OkHttpTransport(http(), server.url("/")) }, cookies)
 
     private fun fixture(name: String): String = javaClass.getResource("/fixtures/web/$name")!!.readText()
 
@@ -58,7 +59,7 @@ class AdapterLabTest {
     @Test
     fun eachCallHitsExactlyOneExpectedPath() = runTest {
         val lab = lab()
-        serve("""{"user":{"pk":42,"username":"user_1"},"status":"ok"}""")
+        serve("""{"form_data":{"username":"user_1"},"status":"ok"}""")
         serveFixture("collections_list.json")
         serveFixture("saved_page_more.json")
         serveFixture("collection_page.json")
@@ -73,7 +74,7 @@ class AdapterLabTest {
         val paths = (1..5).map { server.takeRequest().url }
         assertEquals(
             listOf(
-                "/api/v1/users/42/info/",
+                "/api/v1/accounts/edit/web_form_data/",
                 "/api/v1/collections/list/",
                 "/api/v1/feed/saved/posts/",
                 "/api/v1/feed/collection/$collectionId/posts/",
@@ -119,7 +120,7 @@ class AdapterLabTest {
 
     @Test
     fun currentUserNeedsTheCookieAndYieldsNoIds() = runTest {
-        serve("""{"user":{"pk":42,"username":"user_1"},"status":"ok"}""")
+        serve("""{"form_data":{"username":"user_1"},"status":"ok"}""")
         val result = lab().run(LabCall.CURRENT_USER, null)
         assertNull(result.ids.firstCollectionId)
         assertNull(result.ids.firstMediaPk)
@@ -183,14 +184,14 @@ class AdapterLabTest {
     }
 
     @Test
-    fun aChallengeRedirectWhoseBodyIsCutIsStillAChallenge() = runTest {
+    fun aChallengeRedirectIsStillAChallengeButItsTargetIsUnknown() = runTest {
         server.enqueue(cut(302, location = "/challenge/x/"))
         val result = lab().run(LabCall.MEDIA_INFO, mediaPk)
         assertEquals(302, result.httpCode)
         assertEquals("ChallengeRequired", result.classification)
-        val error = assertIs<InstagramException.ChallengeRequired>(result.error)
-        assertEquals("https://www.instagram.com/challenge/x/", error.challengeUrl)
-        assertEquals("(unreadable body)", result.shape)
+        // A redirect is not followed and its Location is not read, so no URL is kept (the owner opens the WebView).
+        assertNull(assertIs<InstagramException.ChallengeRequired>(result.error).challengeUrl)
+        assertEquals("(redirect, not followed)", result.shape)
         assertNull(result.scrubbedJson)
         assertFalse("/challenge/x/" in result.toString())
     }
@@ -215,8 +216,9 @@ class AdapterLabTest {
         val redirect = lab.run(LabCall.COLLECTIONS, null)
         assertEquals(302, redirect.httpCode)
         assertEquals("LoginRequired", redirect.classification)
-        assertEquals("(empty body)", redirect.shape)
-        assertNull(redirect.scrubbedJson)
+        // The transport turns a bounce to the login page into the require_login body Instagram itself sends.
+        assertEquals("require_login boolean = true", redirect.shape)
+        assertNotNull(redirect.scrubbedJson)
 
         assertEquals("LoginRequired", lab.run(LabCall.COLLECTIONS, null).classification)
 
@@ -410,7 +412,7 @@ class AdapterLabTest {
         val dead = MockWebServer().apply { start() }
         val url = dead.url("/")
         dead.close()
-        val unreachable = AdapterLab({ HttpClientFactory.create(cookies, "test-agent") }, cookies, base = url)
+        val unreachable = AdapterLab({ OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), url) }, cookies)
         assertFailsWith<InstagramException.Transient> { unreachable.run(LabCall.SAVED_ALL, null) }
 
         server.enqueue(cut(200))

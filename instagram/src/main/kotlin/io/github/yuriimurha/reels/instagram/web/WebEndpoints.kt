@@ -30,14 +30,14 @@ object WebEndpoints {
         return LOGIN_DOMAINS.any { lower == it || lower.endsWith(".$it") }
     }
 
-    /** Candidate from spec 6.2, confirmed on the phone in Task 18. */
-    fun currentUser(base: HttpUrl, userId: String): HttpUrl =
-        base.newBuilder()
-            .addPathSegments("api/v1/users")
-            .addPathSegment(userId)
-            .addPathSegment("info")
-            .addPathSegment("")
-            .build()
+    /**
+     * The login check: the account edit form the website loads for the logged-in user. The reply holds `form_data.username`;
+     * the pk comes from the `ds_user_id` cookie, so this URL carries no id.
+     */
+    fun currentUser(base: HttpUrl = BASE): HttpUrl = base.newBuilder().addPathSegments("api/v1/accounts/edit/web_form_data/").build()
+
+    /** [url] as an [InstagramTransport] takes it: the encoded path without its leading slash, then `?query` when there is one. */
+    fun relative(url: HttpUrl): String = url.encodedPath.removePrefix("/") + (url.encodedQuery?.let { "?$it" } ?: "")
 
     private val DIGITS = Regex("[0-9]{1,30}")
 
