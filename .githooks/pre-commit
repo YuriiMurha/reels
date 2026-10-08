@@ -13,10 +13,11 @@ while IFS= read -r -d '' file; do
       fail=1
       ;;
   esac
-  # Release signing material. .gitignore already keeps these out; this also refuses a force-added one (git add -f).
+  # Release signing material (a Java keystore, or a PKCS#12 bundle: .p12/.pfx). .gitignore already keeps these out; this
+  # also refuses a force-added one (git add -f).
   # Compared in lower case: macOS file systems don't tell Reels.JKS from reels.jks.
   case "$(printf '%s' "$file" | tr '[:upper:]' '[:lower:]')" in
-    keystore.properties|*/keystore.properties|*.jks|*.keystore)
+    keystore.properties|*/keystore.properties|*.jks|*.keystore|*.p12|*.pfx)
       echo "pre-commit: refusing to commit $file (release signing material)"
       fail=1
       ;;

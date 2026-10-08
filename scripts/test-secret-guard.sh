@@ -60,7 +60,7 @@ check_bytes() {
 
 check allowed "ordinary file" "README.md" "hello"
 # Release signing material, force-added past a .gitignore like the real one (git add -f), and prose that merely names it.
-printf '%s\n' 'keystore.properties' '*.jks' '*.keystore' > "$tmp/.gitignore"
+printf '%s\n' 'keystore.properties' '*.jks' '*.keystore' '*.p12' '*.pfx' > "$tmp/.gitignore"
 check_forced() {
   local want="$1" what="$2" path="$3" content="$4" got
   mkdir -p "$tmp/$(dirname "$path")"
@@ -82,7 +82,13 @@ check_forced blocked "force-added keystore.properties in a subfolder" "app/keyst
 check_forced blocked "force-added .jks file" "reels-release.jks" "x"
 check_forced blocked "force-added .keystore file" "signing/upload.keystore" "x"
 check_forced blocked "force-added upper-case .JKS file" "Reels.JKS" "x"
+check_forced blocked "force-added .p12 file" "reels-release.p12" "x"
+check_forced blocked "force-added .pfx file" "signing/upload.pfx" "x"
+check_forced blocked "force-added upper-case .P12 file" "Reels.P12" "x"
+check_forced blocked "force-added mixed-case .Pfx file" "certs/Reels.Pfx" "x"
 check allowed "prose that mentions keystore.properties and .jks" "README.md" "Create keystore.properties next to gradlew; reels-release.jks stays on your Mac"
+check allowed "prose that mentions .p12 and .pfx files" "docs/keys.md" "A PKCS#12 bundle (.p12 or .pfx) never goes in the repo"
+check allowed "a file that only has p12 or pfx in its name" "docs/p12-notes.md" "no key material here"
 check allowed "prose that mentions sessionid" "docs/howto.md" "Paste your sessionid; never share the Cookie: header"
 check blocked "HAR capture" "captures/run.har" "{}"
 check blocked "session json" "app/session.json" "{}"
