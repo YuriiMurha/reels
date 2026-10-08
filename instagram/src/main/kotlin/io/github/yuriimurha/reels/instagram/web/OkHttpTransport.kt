@@ -16,10 +16,14 @@ import kotlin.coroutines.resumeWithException
  * [InstagramTransport] over the OkHttp client of [HttpClientFactory.create] (no redirects, no retries, the shared cookie
  * jar). One request per [get]. A connect failure is [InstagramException.Transient]; an HTTP error status is a reply.
  *
- * A 3xx is not followed and its body is not read: it is a [RawReply] with `redirected = true`, except that a bounce to
- * `/accounts/login` becomes the same `require_login` body Instagram itself sends, so the login-bounce rule of
- * [ErrorClassifier] still applies. A body that can't be read is `null`, whatever the status: [classifyReply] decides
- * what that means.
+ * This is the JVM-test transport (MockWebServer and the like). Production uses the WebView transport (`:app`,
+ * `WebViewTransport`), which runs each call as a same-origin `fetch()` in a hidden instagram.com page.
+ *
+ * A 3xx is not followed and its body is not read: it is a [RawReply] with `redirected = true`. The one exception is a
+ * 3xx whose `Location` is `/accounts/login`: for it this class synthesizes the body `{"require_login":true}`, so the
+ * login-bounce rule of [ErrorClassifier] applies. That body is not something Instagram sent; the WebView transport
+ * cannot read a redirect target at all, and reports every redirect as `redirected = true`. A body that can't be read is
+ * `null`, whatever the status: [classifyReply] decides what that means.
  */
 class OkHttpTransport(
     private val http: OkHttpClient,

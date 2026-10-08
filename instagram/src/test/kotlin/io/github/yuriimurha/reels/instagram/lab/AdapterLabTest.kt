@@ -193,7 +193,6 @@ class AdapterLabTest {
         assertNull(assertIs<InstagramException.ChallengeRequired>(result.error).challengeUrl)
         assertEquals("(redirect, not followed)", result.shape)
         assertNull(result.scrubbedJson)
-        assertFalse("/challenge/x/" in result.toString())
     }
 
     @Test

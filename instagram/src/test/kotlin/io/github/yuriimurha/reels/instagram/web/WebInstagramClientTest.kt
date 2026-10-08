@@ -126,6 +126,14 @@ class WebInstagramClientTest {
     }
 
     @Test
+    fun mediaInfoStillStopsOnARedirect() = runTest {
+        // A 3xx is never followed and never read: it is a challenge (ChallengeRequired), not "gone" (null).
+        server.enqueue(MockResponse.Builder().code(302).addHeader("Location", "/challenge/x/").build())
+        assertFailsWith<InstagramException.ChallengeRequired> { client().mediaInfo("1") }
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
     fun mediaInfoStillStopsOnLoginAndRateLimit() = runTest {
         serve("""{"message":"login_required","status":"fail"}""", code = 400)
         serve("""{"message":"Please wait a few minutes before you try again.","status":"fail"}""", code = 400)
