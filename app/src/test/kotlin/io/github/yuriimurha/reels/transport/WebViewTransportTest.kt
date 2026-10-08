@@ -6,11 +6,14 @@ import io.github.yuriimurha.reels.instagram.web.RawReply
 import io.github.yuriimurha.reels.instagram.web.WebHeaders
 import io.github.yuriimurha.reels.instagram.web.classifyReply
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -52,6 +55,9 @@ class WebViewTransportTest {
 
         /** What [currentUrl] says. Null before the load finishes, like a WebView with nothing shown. */
         var url: String? = null
+
+        /** When set, [currentUrl] throws it, like a WebView that fails on being asked where it is. */
+        var urlError: Exception? = null
         private var listener: ((String) -> Unit)? = null
         private var goneListener: (() -> Unit)? = null
 
@@ -68,7 +74,10 @@ class WebViewTransportTest {
             return landing
         }
 
-        override fun currentUrl(): String? = url
+        override fun currentUrl(): String? {
+            urlError?.let { throw it }
+            return url
+        }
 
         override fun evaluate(script: String) {
             evaluated += script
@@ -671,6 +680,32 @@ class WebViewTransportTest {
     }
 
     @Test
+    fun aPageThatFailsToSayWhereItIsIsDroppedAndTransientAndNothingIsEvaluated() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val first = call(transport, "api/v1/collections/list/")
+        runCurrent()
+        val page = pages.created.single()
+        page.post(reply(1))
+        first.await().getOrThrow()
+        val sent = page.evaluated.toList()
+
+        // A WebView that throws when asked for its URL (a dead renderer, a destroyed view) is not a page to run anything in.
+        page.urlError = IllegalStateException("getUrl failed")
+        val error = assertIs<InstagramException.Transient>(call(transport, "api/v1/feed/saved/posts/").await().exceptionOrNull())
+        assertTrue(error.causes().any { it is IllegalStateException }, "the Transient keeps what went wrong")
+        assertEquals(sent, page.evaluated, "nothing is evaluated on a page that cannot say where it is")
+        assertTrue(page.destroyed)
+
+        // Not a verdict on the account: the next call starts over on a new page.
+        val next = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        assertEquals(2, pages.created.size)
+        pages.created.last().post(reply(2))
+        assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
     fun theScriptIsInjectedBeforeEveryFetch() = runTest {
         val pages = Pages()
         val transport = transport(pages)
@@ -758,6 +793,21 @@ class WebViewTransportTest {
         assertEquals(2, pages.created.size)
         pages.created.last().post(reply(2))
         assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    @Test
+    fun aGonePageIsDroppedBeforeTheWaitingCallIsWoken() = runBlocking {
+        // Unconfined: the woken call runs inside the complete() that wakes it, so what it sees is what the transport left behind.
+        val page = FakeWebPage()
+        val destroyedWhenTheCallEnded = mutableListOf<Boolean>()
+        val transport = WebViewTransport({ page }, home, SCRIPT, Dispatchers.Unconfined, log = { destroyedWhenTheCallEnded += page.destroyed })
+        val pending = async(start = CoroutineStart.UNDISPATCHED) { runCatching { transport.get("api/v1/collections/list/") } }
+        assertTrue(pending.isActive, "the call waits for the page's reply")
+
+        page.die()
+
+        assertIs<InstagramException.Transient>(pending.await().exceptionOrNull())
+        assertEquals(listOf(true), destroyedWhenTheCallEnded, "the page was still the current one when the call that waited on it ended")
     }
 
     @Test

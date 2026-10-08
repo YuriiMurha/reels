@@ -226,10 +226,13 @@ class WebViewTransport(
         if (message.id == awaited.id) awaited.reply.complete(Answer.Reply(message))
     }
 
-    /** The current page's renderer died: a call waiting on it fails now, and the page goes. */
+    /**
+     * The current page's renderer died: the page goes, and then a call waiting on it fails now. In that order, as in [reset]:
+     * completing the waiter may run the woken call at once (on an immediate dispatcher), and it must find no page left.
+     */
     private fun pageGone() {
-        waiting?.let { it.reply.complete(Answer.Destroyed) }
         dropPage()
+        waiting?.let { it.reply.complete(Answer.Destroyed) }
     }
 
     private fun toReply(message: PageMessage): RawReply = when {
