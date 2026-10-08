@@ -18,11 +18,25 @@ interface CookieStore {
     fun clearAll()
 }
 
-fun CookieStore.cookieValue(url: String, name: String): String? =
-    cookieHeader(url)
-        ?.split(';')
-        ?.map { it.trim() }
-        ?.firstOrNull { it.startsWith("$name=") }
+/** The value of cookie [name] among the cookies this store holds for [url]; see [cookieValueIn] for how a header is read. */
+fun CookieStore.cookieValue(url: String, name: String): String? = cookieHeader(url)?.let { cookieValueIn(it, name) }
+
+/**
+ * The value of cookie [name] in a Cookie header ("a=1; b=2"), or null. THE one place a header is read for one cookie: the jar's
+ * [cookieValue] and [SessionGuard] (which compares the session a request sent with the one the jar holds now) both call it, so
+ * they can't read the same header two ways. Pairs are split at `;` (a `;` inside quotes splits too) and trimmed; a pair
+ * matches only when it starts with exactly `name=` (the name is case sensitive, and `x<name>=` or `<name>2=` is another
+ * cookie); the value is everything after the FIRST `=`. The first matching pair decides: when its value is empty the answer is
+ * null, and a later pair of the same name is not looked at.
+ *
+ * [CookieStoreJar.loadForRequest] enumerates every cookie to build OkHttp's own list (and drops header-unsafe ones), a
+ * different job, so it keeps its own, more forgiving split.
+ */
+internal fun cookieValueIn(header: String, name: String): String? =
+    header
+        .split(';')
+        .map { it.trim() }
+        .firstOrNull { it.startsWith("$name=") }
         ?.substringAfter('=')
         ?.takeIf { it.isNotEmpty() }
 

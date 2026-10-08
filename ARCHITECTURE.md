@@ -125,7 +125,12 @@ Pure Kotlin/JVM.
   with the jar's `sessionid` when the answer is back. If they differ (a logout, a paste or another login during the
   flight) it returns the response with every `Set-Cookie` header removed, just before OkHttp's cookie bridge would store
   them. This narrows the race, it does not close it: a change between the guard's read and the bridge's store, a few
-  instructions later, is not seen. The CDN client has no jar and needs none.
+  instructions later, is not seen. The CDN client has no jar and needs none. Both reads, "sent" (the request's header) and
+  "now" (the jar through `CookieStore.cookieValue`), go through ONE parser, `internal fun cookieValueIn(header, name)` in
+  `CookieStore.kt`, so the comparison can't drift: pairs split at `;` and trimmed, a pair matches only with the exact
+  case-sensitive prefix `name=`, the value is everything after the first `=`, an empty value is null, and the first matching
+  pair decides. `CookieValueInTest` pins those cases and, as source pins, that neither call site parses a header itself.
+  (`CookieStoreJar.loadForRequest` enumerates every cookie for OkHttp and keeps its own, more forgiving split.)
 - **The CDN client** (`HttpClientFactory.createCdn`) is cookieless (no jar at all, only the WebView user agent reduced to
   printable ASCII, so the header can't throw; 15 s connect, 30 s read) and every download is ONE request on the wire.
   `retryOnConnectionFailure(false)` alone does not give that in OkHttp 5.5: it neither stops the follow-up after a 503 with
