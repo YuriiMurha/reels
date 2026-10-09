@@ -7,16 +7,17 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
  * Source pins for the repair page: its script `ig_watch.js` and the channel `AndroidRepairPage` reads it through (in the
  * style of [AndroidWebPageGuardTest] and `WebViewTransportTest`'s script pins). The emulator test (`AndroidRepairPageTest`)
  * shows the page at work against a local server; these pins say what it can never do, whatever a fake page does:
- * - the script watches one query, `WebGraphQl.SAVED_COLLECTIONS`, POSTed to one of `WebGraphQl.QUERY_PATHS`, and reports only
- *   that request's doc id (from its form), the reply's status and the reply's text, in its one message to the app;
- * - it never names a token, the cookie jar, the session storage or the console (WebView logs `console` to logcat);
+ * - the script is exactly the text below, built from `:instagram`'s names (the watched query, `WebGraphQl.QUERY_PATHS`, the
+ *   two form fields), so any change to it is a deliberate change of this test too;
+ * - whatever that text becomes, its one message to the app is `{kind, docId, code, body}`, posted by `report()` alone, and it
+ *   never names a token, the cookie jar, the session storage or the console (WebView logs `console` to logcat);
  * - the page has no JavaScript interface, its own WebView (never the transport's page or listener), the watching script and
  *   the bridge for the allowed origin only, and the bridge's listener keeps the three conditions both pages share
  *   ([BridgeListenerPin]);
@@ -37,13 +38,13 @@ class RepairPageGuardTest {
     // --- ig_watch.js -------------------------------------------------------------------------------------------------------
 
     @Test
-    fun theScriptWatchesOnlyTheSavedCollectionsQuery() {
-        assertScriptWatchesOnlyTheQuery(script())
+    fun theScriptIsExactlyTheOneTheTestsKnow() {
+        assertScriptIsTheKnownOne(script())
     }
 
     @Test
     fun theScriptsOnlyMessageIsTheWatchedQuerysIdStatusAndReply() {
-        assertScriptReportsOnlyTheWatchedQuery(script())
+        assertScriptPostsOnlyTheReport(script())
     }
 
     @Test
@@ -51,104 +52,97 @@ class RepairPageGuardTest {
         assertScriptNamesNoSecret(script())
     }
 
+    /** The whole-text pin is tied to each `:instagram` name: the known text made with any other one is not the script. */
+    @Test
+    fun theKnownScriptIsBuiltFromTheAdaptersNames() {
+        val real = script()
+        for ((what, other) in mapOf(
+            "another query" to knownScript(name = "PolarisSomeOtherQuery"),
+            "another path" to knownScript(paths = listOf(WebGraphQl.PATH, "graphql/other")),
+            "one path fewer" to knownScript(paths = listOf(WebGraphQl.PATH)),
+            "another friendly-name field" to knownScript(friendlyNameField = "fb_api_req_other"),
+            "another doc-id field" to knownScript(docIdField = "query_id"),
+        )) {
+            assertNotEquals(other, real, what)
+        }
+    }
+
     /**
-     * The script pins themselves: each way of widening what is watched, of leaking through the report, or of naming a secret
-     * fails the pin it is aimed at, checked alone (so each pin means something on its own).
+     * The script pins themselves: every mutant fails the whole-text pin; and a mutant that leaks through the report or names a
+     * secret also fails the structural pin aimed at it, checked alone, so those hold even if the known text were edited along.
      */
     @Test
-    fun eachWayOfWideningOrLeakingTheScriptFailsItsPin() {
+    fun eachWayOfWideningOrLeakingTheScriptFailsItsPins() {
         val real = script()
         val name = WebGraphQl.SAVED_COLLECTIONS.friendlyName
         val watching = mapOf(
             "another query" to real.replace("var NAME = '$name';", "var NAME = 'PolarisSomeOtherQuery';"),
-            "every friendly name reported" to real.replace(" || form.get('fb_api_req_friendly_name') !== NAME", ""),
-            "NAME used elsewhere" to real.replace("var form = formOf(body);", "var form = formOf(body); var n = NAME;"),
-            "a GET watched" to real.replace("    if (String(method).toUpperCase() !== 'POST') return null;\n", ""),
-            "any method watched" to real.replace("!== 'POST'", "=== 'TRACE'"),
-            "any path watched" to real.replace("    if (path !== '/api/graphql' && path !== '/graphql/query') return null;\n", ""),
-            "a third path watched" to real.replace("path !== '/graphql/query')", "path !== '/graphql/query' && path !== '/api/v1/x')"),
-            "one path forgotten" to real.replace(" && path !== '/graphql/query'", ""),
-            "the doc id from another field" to real.replace("return form.get('doc_id');", "return form.get('variables');"),
+            "every friendly name reported" to real.replace("form.get('fb_api_req_friendly_name') === NAME ? form.get('doc_id') : null", "form.get('doc_id')"),
+            "a GET watched" to real.replace("String(method).toUpperCase() === 'POST' && ", ""),
+            "any path watched" to real.replace("PATHS.indexOf(new URL(String(url), location.href).pathname) >= 0", "true"),
+            "a third path watched" to real.replace("'/graphql/query'];", "'/graphql/query', '/api/v1/x'];"),
+            "the doc id from another field" to real.replace("? form.get('doc_id') : null", "? form.get('variables') : null"),
+            "any status reported" to real.replace("if (!docId || !(code >= 100 && code <= 599)) return;", "if (!docId) return;"),
+            "a Request's body not read" to real.replace("(request ? request.clone().text() : Promise.resolve(null))", "Promise.resolve(null)"),
+            "the request's body as the reply" to real.replace("report(both[0], both[1].status, t);", "report(both[0], both[1].status, t + String(init.body));"),
+            "the XHR's request body as the reply" to real.replace("report(id, code, text);", "report(id, code, String(body));"),
+            "responseText whatever the type" to real.replace("    try {\n      if (xhr.responseType", "    return xhr.responseText;\n    try {\n      if (xhr.responseType"),
+            "a throw into the site" to real.replace("    } catch (e) {}\n    var p = origFetch", "    } finally {}\n    var p = origFetch"),
         )
         val reporting = mapOf(
-            "the doc id from the URL" to real.replace("var docId = matches(url, method, init && init.body);", "var docId = url;"),
-            "the XHR's doc id from its URL" to real.replace("var docId = w && matches(w.url, w.method, body);", "var docId = w && w.url;"),
-            "a report whatever matched" to real.replace("if (docId) p.then(", "p.then("),
-            "the request's body as the reply" to real.replace("report(docId, r.status, t);", "report(docId, r.status, String(init.body));"),
-            "the XHR's request body as the reply" to real.replace("report(docId, xhr.status, typeof", "report(docId, xhr.status, body || typeof"),
             "a field more" to real.replace("code: code, body: text }", "code: code, body: text, url: location.href }"),
             "a field fewer" to real.replace(", body: text }", " }"),
             "the body is something else" to real.replace("body: text }", "body: document.title }"),
             "another kind" to real.replace("kind: 'watched'", "kind: 'seen'"),
-            "a second message" to real.replace(
-                "    return send.apply(this, arguments);",
-                "    window.igBridge.postMessage(String(body));\n    return send.apply(this, arguments);",
-            ),
+            "a second message" to real.replace("    return send.apply(this, arguments);", "    window.igBridge.postMessage(String(body));\n    return send.apply(this, arguments);"),
             "the bridge kept under another name" to real.replace("var origFetch = window.fetch;", "var b = window.igBridge; var origFetch = window.fetch;"),
             "the post through a computed member" to real.replace("window.igBridge.postMessage(", "window.igBridge['postMessage']("),
-            "a third report" to real.replace("    return send.apply(this, arguments);", "    report(docId, 0, null);\n    return send.apply(this, arguments);"),
+            "a post outside report()" to real.replace(
+                "    if (!docId || !(code >= 100 && code <= 599)) return;\n    window.igBridge.postMessage(JSON.stringify({ kind: 'watched', docId: docId, code: code, body: text }));\n",
+                "    if (!docId || !(code >= 100 && code <= 599)) return;\n",
+            ).replace(
+                "          docId.then(function (id) { report(id, code, text); })",
+                "          docId.then(function (id) { window.igBridge.postMessage(JSON.stringify({ kind: 'watched', docId: id, code: code, body: text })); })",
+            ),
         )
-        // Secrets and logcat.
         val naming = mapOf(
-            "the page's token read" to real.replace("return form.get('doc_id');", "return form.get('doc_id') + form.get('fb_dtsg');"),
+            "the page's token read" to real.replace("? form.get('doc_id') : null", "? form.get('doc_id') + form.get('fb_dtsg') : null"),
             "the site's token module read" to real.replace("var origFetch = window.fetch;", "var d = require('DTSGInitialData'); var origFetch = window.fetch;"),
-            "the lsd read" to real.replace("var form = formOf(body);", "var form = formOf(body); var l = form.get('lsd');"),
+            "the lsd read" to real.replace("var form = new URLSearchParams(text);", "var form = new URLSearchParams(text); var l = form.get('lsd');"),
             "the cookie jar read" to real.replace("var origFetch = window.fetch;", "var c = document.cookie; var origFetch = window.fetch;"),
-            "a cookie header read" to real.replace("var w = this.__w, xhr = this;", "var w = this.__w, xhr = this; var c = xhr.getResponseHeader('Set-Cookie');"),
+            "a cookie header read" to real.replace("var code = xhr.status,", "var c = xhr.getResponseHeader('Set-Cookie'), code = xhr.status,"),
             "the session storage read" to real.replace("var origFetch = window.fetch;", "var s = sessionStorage.getItem('www-claim-v2'); var origFetch = window.fetch;"),
-            "the reply logged" to real.replace("report(docId, r.status, t);", "report(docId, r.status, t); console.log(t);"),
+            "the reply logged" to real.replace("report(both[0], both[1].status, t);", "report(both[0], both[1].status, t); console.log(t);"),
         )
-        for ((pin, mutants) in listOf(
-            ::assertScriptWatchesOnlyTheQuery to watching,
-            ::assertScriptReportsOnlyTheWatchedQuery to reporting,
-            ::assertScriptNamesNoSecret to naming,
-        )) {
+        for ((what, mutant) in watching + reporting + naming) {
+            assertTrue(mutant != real, "the mutant '$what' did not change the script")
+            assertFailsWith<AssertionError>(what) { assertScriptIsTheKnownOne(mutant) }
+        }
+        for ((pin, mutants) in listOf(::assertScriptPostsOnlyTheReport to reporting, ::assertScriptNamesNoSecret to naming)) {
             for ((what, mutant) in mutants) {
-                assertTrue(mutant != real, "the mutant '$what' did not change the script")
                 assertFailsWith<AssertionError>(what) { pin(mutant) }
             }
         }
     }
 
-    /**
-     * The script watches `WebGraphQl.SAVED_COLLECTIONS` alone: its `NAME`, declared once and read only by the check, and
-     * `matches()`, which is exactly the text the tests know (a POST, to one of `WebGraphQl.QUERY_PATHS`, whose form names that
-     * query; it gives back the form's doc id and nothing else).
-     */
-    private fun assertScriptWatchesOnlyTheQuery(script: String) {
-        val names = Regex("""var NAME = '([^']*)';""").findAll(script).map { it.groupValues[1] }.toList()
-        assertEquals(listOf(WebGraphQl.SAVED_COLLECTIONS.friendlyName), names, "the script watches WebGraphQl.SAVED_COLLECTIONS")
-        assertEquals(2, Regex("""\bNAME\b""").findAll(script).count(), "NAME is declared and checked, nothing else")
-        assertEquals(codeOf(MATCHES_BODY), codeOf(block(script, "function matches(url, method, body) {")), "matches() is exactly the check the tests know")
+    private fun assertScriptIsTheKnownOne(script: String) {
+        assertEquals(knownScript(), script, "ig_watch.js is exactly the script the tests know")
     }
 
     /**
-     * The one message to the app is `{kind: 'watched', docId, code, body}`, posted by `report()` alone; `report()` is called
-     * twice, once per wrapper, each time only for a request `matches()` gave a doc id for, with that doc id, the reply's status
-     * and the reply's own text.
+     * The one message to the app is `{kind: 'watched', docId, code, body}`, posted by `report()` alone, with that function's
+     * own arguments: the bridge and `postMessage` are named once, inside `report()`.
      */
-    private fun assertScriptReportsOnlyTheWatchedQuery(script: String) {
+    private fun assertScriptPostsOnlyTheReport(script: String) {
         assertEquals(1, Regex("""\bpostMessage\b""").findAll(script).count(), "postMessage is named once (no computed member)")
         assertEquals(1, Regex("""\bigBridge\b""").findAll(script).count(), "the bridge is named once (never kept under another name)")
-        val post = Regex("""^window\.igBridge\.postMessage\(JSON\.stringify\(\{(.*)\}\)\);$""")
-            .find(codeOf(block(script, "function report(docId, code, text) {")))
-        assertNotNull(post, "report() is the one post and nothing else")
+        val posts = Regex("""window\.igBridge\.postMessage\(JSON\.stringify\(\{(.*?)\}\)\);""").findAll(block(script, "function report(docId, code, text) {")).toList()
+        assertEquals(1, posts.size, "report() posts the one message")
         assertEquals(
             listOf("kind" to "'watched'", "docId" to "docId", "code" to "code", "body" to "text"),
-            fieldsOf(post.groupValues[1]),
+            fieldsOf(posts.single().groupValues[1]),
             "the message's fields",
         )
-        // The doc id is matches()'s answer (the form's doc_id) and nothing else, for both wrappers.
-        assertEquals(
-            listOf("matches(url, method, init && init.body)", "w && matches(w.url, w.method, body)"),
-            Regex("""\bdocId\s*=(?!=)\s*([^;]*);""").findAll(script).map { it.groupValues[1].trim() }.toList(),
-            "docId is set from matches() only",
-        )
-        val code = codeOf(script)
-        assertEquals(2, Regex("""(?<!function )\breport\(""").findAll(code).count(), "report() is called twice, once per wrapper")
-        for (statement in REPORTS) {
-            assertEquals(1, code.split(codeOf(statement)).size - 1, "the wrapper reports exactly so: $statement")
-        }
     }
 
     /**
@@ -284,9 +278,6 @@ class RepairPageGuardTest {
 
     // --- Plumbing ------------------------------------------------------------------------------------------------------------
 
-    /** [script]'s code as one line: every run of white space one space (the script has no comments). */
-    private fun codeOf(script: String): String = script.replace(Regex("""\s+"""), " ").trim()
-
     /** The text between the `{` that ends [opening] and its matching `}` (quoted strings skipped). */
     private fun block(script: String, opening: String): String {
         val start = script.indexOf(opening)
@@ -320,24 +311,97 @@ class RepairPageGuardTest {
         const val PAGE_PATH = "src/main/kotlin/io/github/yuriimurha/reels/transport/AndroidRepairPage.kt"
 
         /**
-         * The body of `matches()` in ig_watch.js, exactly (compared with white space collapsed): a POST, to one of the website's
-         * query paths, whose form names the watched query; the answer is the form's doc id. Any change to what the script
-         * watches must change this text too.
+         * ig_watch.js, exactly, made from `:instagram`'s names: the watched query's friendly [name], the [paths] the site may
+         * post it to, and the form fields that carry the query's name and its doc id. Any change to the script must change this
+         * text too.
          */
-        val MATCHES_BODY = """
-            if (String(method).toUpperCase() !== 'POST') return null;
-            var path;
-            try { path = new URL(url, location.href).pathname; } catch (e) { return null; }
-            if (${WebGraphQl.QUERY_PATHS.joinToString(" && ") { "path !== '/$it'" }}) return null;
-            var form = formOf(body);
-            if (!form || form.get('${WebGraphQl.Field.FRIENDLY_NAME}') !== NAME) return null;
-            return form.get('${WebGraphQl.Field.DOC_ID}');
-        """
-
-        /** How each wrapper reports: only for a request with a doc id, with the reply's status and its own text (or none). */
-        val REPORTS = listOf(
-            "if (docId) p.then(function (r) { return r.clone().text().then(function (t) { report(docId, r.status, t); }); }, function () {});",
-            "if (docId) xhr.addEventListener('loadend', function () { report(docId, xhr.status, typeof xhr.responseText === 'string' ? xhr.responseText : null); });",
-        )
+        fun knownScript(
+            name: String = WebGraphQl.SAVED_COLLECTIONS.friendlyName,
+            paths: List<String> = WebGraphQl.QUERY_PATHS,
+            friendlyNameField: String = WebGraphQl.Field.FRIENDLY_NAME,
+            docIdField: String = WebGraphQl.Field.DOC_ID,
+        ): String = """
+            (function () {
+              if (window.__igWatch) return;
+              window.__igWatch = true;
+              // The one query watched, and the paths the site may post it to.
+              var NAME = '$name';
+              var PATHS = [${paths.joinToString(", ") { "'/$it'" }}];
+              // Whether a request is a POST to one of the paths (its URL a string or a URL object, relative or not).
+              function watchedPost(url, method) {
+                return String(method).toUpperCase() === 'POST' && PATHS.indexOf(new URL(String(url), location.href).pathname) >= 0;
+              }
+              // A request body as text, through a promise: null for none, or for a kind the site never sends a query as.
+              function textOf(body) {
+                if (typeof body === 'string') return Promise.resolve(body);
+                if (body instanceof URLSearchParams) return Promise.resolve(body.toString());
+                if (body instanceof FormData) return Promise.resolve(new URLSearchParams(Array.from(body.entries())).toString());
+                if (body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return new Blob([body]).text();
+                return Promise.resolve(null);
+              }
+              // The doc id of a request whose form names the query, else null.
+              function docIdOf(text) {
+                if (text === null) return null;
+                var form = new URLSearchParams(text);
+                return form.get('$friendlyNameField') === NAME ? form.get('$docIdField') : null;
+              }
+              // The one message to the app, for a watched request that got a reply: its doc id, the status and the text (or null).
+              function report(docId, code, text) {
+                if (!docId || !(code >= 100 && code <= 599)) return;
+                window.igBridge.postMessage(JSON.stringify({ kind: 'watched', docId: docId, code: code, body: text }));
+              }
+              // Nothing below may throw into the site: each step of the watch is inside a try or a promise with a catch.
+              var origFetch = window.fetch;
+              window.fetch = function (input, init) {
+                var docId = null;
+                try {
+                  var request = input instanceof Request ? input : null;
+                  var method = (init && init.method) || (request ? request.method : 'GET');
+                  if (watchedPost(request ? request.url : input, method)) {
+                    // A Request's own body is read from a copy, before the fetch below uses it up.
+                    var text = init && init.body != null ? textOf(init.body) : (request ? request.clone().text() : Promise.resolve(null));
+                    docId = text.then(docIdOf).catch(function () { return null; });
+                  }
+                } catch (e) {}
+                var p = origFetch.apply(this, arguments);
+                if (docId) {
+                  try {
+                    // The reply is copied as soon as it arrives, before the site reads it; a fetch that fails reports nothing.
+                    Promise.all([docId, p.then(function (r) { return r.clone(); })])
+                      .then(function (both) { if (both[0]) return both[1].text().then(function (t) { report(both[0], both[1].status, t); }); })
+                      .catch(function () {});
+                  } catch (e) {}
+                }
+                return p;
+              };
+              // The reply's text by its type: as sent for text, re-serialised for JSON the browser parsed, else null.
+              function replyOf(xhr) {
+                try {
+                  if (xhr.responseType === '' || xhr.responseType === 'text') return xhr.responseText;
+                  if (xhr.responseType === 'json' && xhr.response !== null) return JSON.stringify(xhr.response);
+                } catch (e) {}
+                return null;
+              }
+              var open = XMLHttpRequest.prototype.open, send = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function (method, url) {
+                try { this.__igWatched = watchedPost(url, method); } catch (e) { this.__igWatched = false; }
+                return open.apply(this, arguments);
+              };
+              XMLHttpRequest.prototype.send = function (body) {
+                var xhr = this;
+                try {
+                  if (xhr.__igWatched) {
+                    var docId = textOf(body).then(docIdOf).catch(function () { return null; });
+                    // A request that got no reply ends with status 0, which report() refuses.
+                    xhr.addEventListener('loadend', function () {
+                      var code = xhr.status, text = replyOf(xhr);
+                      docId.then(function (id) { report(id, code, text); }).catch(function () {});
+                    }, { once: true });
+                  }
+                } catch (e) {}
+                return send.apply(this, arguments);
+              };
+            })();
+        """.trimIndent() + "\n"
     }
 }
