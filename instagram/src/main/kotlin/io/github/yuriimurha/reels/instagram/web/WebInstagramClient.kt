@@ -12,10 +12,16 @@ import okhttp3.HttpUrl
 /**
  * The real adapter (spec 4.2) over Instagram's web API, through an [InstagramTransport]. One request per call, no
  * retries: the caller paces every call through the Pacer. The transport is built lazily, on the first call that needs it.
+ *
+ * The collections come from the website's own GraphQL query ([WebGraphQl.SAVED_COLLECTIONS], spec 2026-10-09 §3.1), sent with
+ * the doc id [docIds] holds. When Instagram no longer runs that id, [collections] throws [InstagramException.StaleQuery], and
+ * only [repairCollections] (through [repair]) learns the current one.
  */
 class WebInstagramClient(
     transport: () -> InstagramTransport,
     private val cookies: CookieStore,
+    private val docIds: DocIdStore,
+    private val repair: QueryRepair,
     override val reportsSavedCollectionIds: Boolean = SAVED_COLLECTION_IDS_CONFIRMED,
 ) : InstagramClient {
     private val transport by lazy(transport)
@@ -26,8 +32,22 @@ class WebInstagramClient(
     /** [url] is built by the caller first, so an invalid id throws before the lazy transport exists. */
     private suspend fun getJson(url: HttpUrl): JsonObject = transport.get(WebEndpoints.relative(url)).jsonOrThrow()
 
-    override suspend fun collections(cursor: String?): Page<RemoteCollection> =
-        WebParsers.collectionsPage(getJson(WebEndpoints.collections(WebEndpoints.BASE, cursor)))
+    override suspend fun collections(cursor: String?): Page<RemoteCollection> {
+        val query = WebGraphQl.SAVED_COLLECTIONS
+        // Read first: a store that can't answer throws before the lazy transport exists.
+        val docId = docIds.docId(query)
+        val reply = transport.graphql(query, docId, WebGraphQl.savedCollectionsVariables(cursor))
+        return WebParsers.collectionsGraphQl(WebParsers.graphQlJsonOrThrow(reply))
+    }
+
+    /** No request of its own: the repair's page sent the query. The id is learned only once its reply parsed as a page. */
+    override suspend fun repairCollections(): Page<RemoteCollection> {
+        val query = WebGraphQl.SAVED_COLLECTIONS
+        val repaired = repair.repair(query)
+        val page = WebParsers.collectionsGraphQl(WebParsers.graphQlJsonOrThrow(repaired.reply))
+        docIds.learned(query, repaired.docId)
+        return page
+    }
 
     override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
         val url = if (collectionId == null) {
@@ -50,7 +70,10 @@ class WebInstagramClient(
     }
 
     companion object {
-        /** Spec 6.3 Q2. Flip to true only after the Adapter lab shows saved_collection_ids on saved items (P3). */
-        const val SAVED_COLLECTION_IDS_CONFIRMED = false
+        /**
+         * Spec 6.3 Q2, spike Q2 answered yes on 2026-10-09: every saved item lists its collections in `saved_collection_ids`,
+         * so sync walks All Saved once and takes the memberships from it (strategy A); the per-collection feeds are not walked.
+         */
+        const val SAVED_COLLECTION_IDS_CONFIRMED = true
     }
 }

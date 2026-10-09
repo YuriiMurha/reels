@@ -1,0 +1,45 @@
+{
+  "data": {
+    "viewer": {
+      "collections_unified_with_auto_collections": {
+        "edges": [
+          {
+            "node": {
+              "__typename": "XDTSavedCollection",
+              "collection_id": "ALL_MEDIA_AUTO_COLLECTION",
+              "collection_name": "All posts",
+              "collection_media_count": 5,
+              "cover_media": {"pk": "3100000000000000003"},
+              "cover_media_list": [{"pk": "3100000000000000003"}]
+            },
+            "cursor": "c0"
+          },
+          {
+            "node": {
+              "__typename": "XDTSavedCollection",
+              "collection_id": "17900000000000002",
+              "collection_name": "Alpha",
+              "collection_media_count": 1,
+              "cover_media": {"pk": "3100000000000000001"},
+              "cover_media_list": [{"pk": "3100000000000000001"}]
+            },
+            "cursor": "c1"
+          },
+          {
+            "node": {
+              "__typename": "XDTSavedCollection",
+              "collection_id": "17900000000000003",
+              "collection_name": "Beta",
+              "collection_media_count": 0,
+              "cover_media": null,
+              "cover_media_list": []
+            },
+            "cursor": "c2"
+          }
+        ],
+        "page_info": {"end_cursor": null, "has_next_page": false}
+      }
+    }
+  },
+  "extensions": {"is_final": true}
+}

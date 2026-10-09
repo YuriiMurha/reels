@@ -2,19 +2,25 @@ package io.github.yuriimurha.reels.instagram.lab
 
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.CookieStore
+import io.github.yuriimurha.reels.instagram.web.DocIdStore
 import io.github.yuriimurha.reels.instagram.web.InstagramTransport
+import io.github.yuriimurha.reels.instagram.web.RawReply
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
+import io.github.yuriimurha.reels.instagram.web.WebGraphQl
+import io.github.yuriimurha.reels.instagram.web.WebParsers
 import io.github.yuriimurha.reels.instagram.web.classifyReply
 import io.github.yuriimurha.reels.instagram.web.idString
 import io.github.yuriimurha.reels.instagram.web.sessionUserId
-import io.github.yuriimurha.reels.instagram.web.string
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl
 
-/** The five endpoint calls the Adapter lab can make (spec 6.2). */
+/**
+ * The five calls the Adapter lab can make (spec 6.2): four endpoint GETs, and [COLLECTIONS], the website's own GraphQL query
+ * for the collections and their names (spec 2026-10-09 §3.1).
+ */
 enum class LabCall { CURRENT_USER, COLLECTIONS, SAVED_ALL, SAVED_COLLECTION, MEDIA_INFO }
 
 /**
@@ -51,10 +57,15 @@ class LabIds(val firstCollectionId: String?, val firstMediaPk: String?) {
  * shape and a scrubbed copy, so the owner can see the real response structure without any real value leaving the
  * phone's memory. The raw body is read into a local, classified, parsed, and dropped: it is never stored, logged or
  * returned. There is no retry. The transport is built on the first call that reaches the network.
+ *
+ * [LabCall.COLLECTIONS] is one POST of the website's query with the doc id [docIds] holds; the lab never learns one. Its reply
+ * is classified by the query's own rule (a stale doc id is [InstagramException.StaleQuery]) and shown after the website's
+ * leading `for (;;);`.
  */
 class AdapterLab(
     transport: () -> InstagramTransport,
     private val cookies: CookieStore,
+    private val docIds: DocIdStore,
 ) {
     private val transport by lazy(transport)
 
@@ -68,13 +79,12 @@ class AdapterLab(
      * body of a 2xx or 5xx, is a [InstagramException.Transient].
      */
     suspend fun run(call: LabCall, arg: String?): LabResult {
-        // Built first: a missing session or a bad id throws before the lazy transport exists and before any request.
-        val url = urlFor(call, arg)
-        val reply = transport.get(WebEndpoints.relative(url))
+        val reply = send(call, arg)
+        val graphQl = call == LabCall.COLLECTIONS
         // One rule for every transport. A 3xx or 4xx whose body was cut still says what it was (a rate limit must arm the cooldown).
-        val error = classifyReply(reply)
+        val error = if (graphQl) WebParsers.classifyGraphQl(reply) else classifyReply(reply)
         if (reply.body == null && error is InstagramException.Transient) throw error
-        val body = reply.body
+        val body = if (graphQl) reply.body?.let(WebParsers::withoutGuard) else reply.body
         val json = if (body.isNullOrEmpty()) null else runCatching { Json.parseToJsonElement(body) }.getOrNull()
         val shape = when {
             reply.redirected -> "(redirect, not followed)"
@@ -96,36 +106,55 @@ class AdapterLab(
         )
     }
 
-    private fun urlFor(call: LabCall, arg: String?): HttpUrl = when (call) {
+    /**
+     * The call's one request. Everything it needs is ready before the lazy transport is asked for: a missing session or a bad
+     * id throws before the transport exists and before any request.
+     */
+    private suspend fun send(call: LabCall, arg: String?): RawReply = when (call) {
         LabCall.CURRENT_USER -> {
             // The URL carries no id, but without a session there is nothing to ask about: no request, as for the probe.
             cookies.sessionUserId() ?: throw InstagramException.LoginRequired()
-            WebEndpoints.currentUser()
+            get(WebEndpoints.currentUser())
         }
-        LabCall.COLLECTIONS -> WebEndpoints.collections(WebEndpoints.BASE, null)
-        LabCall.SAVED_ALL -> WebEndpoints.savedPosts(WebEndpoints.BASE, null)
+        LabCall.COLLECTIONS -> {
+            // The first page only, like every lab call.
+            val docId = docIds.docId(WebGraphQl.SAVED_COLLECTIONS)
+            transport.graphql(WebGraphQl.SAVED_COLLECTIONS, docId, WebGraphQl.savedCollectionsVariables(null))
+        }
+        LabCall.SAVED_ALL -> get(WebEndpoints.savedPosts(WebEndpoints.BASE, null))
         LabCall.SAVED_COLLECTION ->
-            WebEndpoints.collectionPosts(WebEndpoints.BASE, arg ?: throw InstagramException.ShapeChanged("collection_id"), null)
-        LabCall.MEDIA_INFO -> WebEndpoints.mediaInfo(WebEndpoints.BASE, arg ?: throw InstagramException.ShapeChanged("pk"))
+            get(WebEndpoints.collectionPosts(WebEndpoints.BASE, arg ?: throw InstagramException.ShapeChanged("collection_id"), null))
+        LabCall.MEDIA_INFO -> get(WebEndpoints.mediaInfo(WebEndpoints.BASE, arg ?: throw InstagramException.ShapeChanged("pk")))
     }
 
-    /** The first MEDIA collection's id, and the first saved or info item's pk, read leniently: the shape may have drifted. */
-    private fun idsOf(call: LabCall, json: JsonElement): LabIds {
-        val items = (json as? JsonObject)?.get("items") as? JsonArray ?: return LabIds(null, null)
-        val objects = items.filterIsInstance<JsonObject>()
-        return when (call) {
-            LabCall.COLLECTIONS -> LabIds(
-                objects.firstOrNull { it.string("collection_type") == "MEDIA" }?.idString("collection_id")?.takeIf(::isId),
-                null,
-            )
-            LabCall.SAVED_ALL, LabCall.SAVED_COLLECTION -> LabIds(
-                null,
-                objects.firstNotNullOfOrNull { (it["media"] as? JsonObject)?.idString("pk")?.takeIf(::isId) },
-            )
-            LabCall.MEDIA_INFO -> LabIds(null, objects.firstNotNullOfOrNull { it.idString("pk")?.takeIf(::isId) })
-            LabCall.CURRENT_USER -> LabIds(null, null)
-        }
+    /** [url] is built by the caller, so an invalid id throws before the lazy transport exists. */
+    private suspend fun get(url: HttpUrl): RawReply = transport.get(WebEndpoints.relative(url))
+
+    /**
+     * The first user collection's id (fact AUTO: [WebParsers.isUserCollectionId]), and the first saved or info item's pk, read
+     * leniently: the shape may have drifted.
+     */
+    private fun idsOf(call: LabCall, json: JsonElement): LabIds = when (call) {
+        LabCall.COLLECTIONS -> LabIds(
+            objectsIn((json as? JsonObject)?.let(WebParsers::collectionsRoot), "edges").firstNotNullOfOrNull { edge ->
+                (edge["node"] as? JsonObject)?.idString("collection_id")?.takeIf { WebParsers.isUserCollectionId(it) && isId(it) }
+            },
+            null,
+        )
+        LabCall.SAVED_ALL, LabCall.SAVED_COLLECTION -> LabIds(
+            null,
+            objectsIn(json as? JsonObject, "items").firstNotNullOfOrNull { (it["media"] as? JsonObject)?.idString("pk")?.takeIf(::isId) },
+        )
+        LabCall.MEDIA_INFO -> LabIds(
+            null,
+            objectsIn(json as? JsonObject, "items").firstNotNullOfOrNull { it.idString("pk")?.takeIf(::isId) },
+        )
+        LabCall.CURRENT_USER -> LabIds(null, null)
     }
+
+    /** The objects of the array [key] of [parent]; none when either is missing or of another type. */
+    private fun objectsIn(parent: JsonObject?, key: String): List<JsonObject> =
+        (parent?.get(key) as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
 
     /** An id is chained into a URL path later, so only plain digits count. */
     private fun isId(text: String): Boolean = text.isNotEmpty() && text.length <= 30 && text.all { it in '0'..'9' }

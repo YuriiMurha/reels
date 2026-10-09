@@ -67,11 +67,7 @@ object WebEndpoints {
 
     private fun HttpUrl.Builder.cursor(cursor: String?) = apply { cursor?.let { addQueryParameter("max_id", it) } }
 
-    /** Candidate from spec 6.2 (P4): the collection types are the ones instagrapi sends. */
-    fun collections(base: HttpUrl, cursor: String?): HttpUrl =
-        base.newBuilder().addPathSegments("api/v1/collections/list/")
-            .addQueryParameter("collection_types", "[\"ALL_MEDIA_AUTO_COLLECTION\",\"MEDIA\",\"AUDIO_AUTO_COLLECTION\"]")
-            .cursor(cursor).build()
+    // The collections and their names come from the website's GraphQL query (WebGraphQl.SAVED_COLLECTIONS), not from a URL here.
 
     fun savedPosts(base: HttpUrl, cursor: String?): HttpUrl =
         base.newBuilder().addPathSegments("api/v1/feed/saved/posts/").cursor(cursor).build()

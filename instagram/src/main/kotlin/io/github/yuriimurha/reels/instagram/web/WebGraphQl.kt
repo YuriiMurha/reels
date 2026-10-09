@@ -84,7 +84,10 @@ object WebGraphQl {
         Header.CSRF_TOKEN,
     )
 
-    /** As the website sends them; [cursor] (page 2 on) goes in as `after` (Task 1 fact CURSOR). */
+    /**
+     * As the website sends them; [cursor] (page 2 on, `page_info.end_cursor` of the page before) goes in as `after`: Task 1 fact
+     * CURSOR (assumed; verify on the phone).
+     */
     fun savedCollectionsVariables(cursor: String?): String = buildJsonObject {
         put(
             "collection_types",

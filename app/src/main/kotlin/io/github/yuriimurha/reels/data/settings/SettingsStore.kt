@@ -81,6 +81,38 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         return stringPreferencesKey("library_account_pk_$library")
     }
 
+    /**
+     * Spec 2026-10-09 §3.3: the doc id last learned for the website's GraphQL query [name] (its friendly name), one key per query
+     * (`graphql_doc_<name>`), or null for none. Read through `SettingsDocIdStore`, which falls back to the built-in id.
+     */
+    suspend fun graphqlDocId(name: String): String? = store.data.first()[graphqlDocKey(name)]
+
+    /** Null removes it, so the query goes back to its built-in id. */
+    suspend fun setGraphqlDocId(name: String, docId: String?) {
+        val key = graphqlDocKey(name)
+        store.edit { it.setOrRemove(key, docId) }
+    }
+
+    private fun graphqlDocKey(name: String): Preferences.Key<String> {
+        require(QUERY_NAME.matches(name)) { "a query's friendly name is an identifier" }
+        return stringPreferencesKey("graphql_doc_$name")
+    }
+
+    /** When the last collections repair started (epoch ms), for its 24 h limit (spec 2026-10-09 §3.3), or null for never. */
+    suspend fun collectionsRepairAt(): Long? = store.data.first()[COLLECTIONS_REPAIR_AT]
+
+    /** R3: null clears it (Forget collections query id), so the next stale reply may repair at once. */
+    suspend fun setCollectionsRepairAt(at: Long?) {
+        store.edit { it.setOrRemove(COLLECTIONS_REPAIR_AT, at) }
+    }
+
+    /** True while the collection names are the last good ones because they could not be refreshed (spec 2026-10-09 §3.3). */
+    val collectionNamesStale: Flow<Boolean> = store.data.map { it[COLLECTION_NAMES_STALE] ?: false }
+
+    suspend fun setCollectionNamesStale(stale: Boolean) {
+        store.edit { it[COLLECTION_NAMES_STALE] = stale }
+    }
+
     private fun <T> MutablePreferences.setOrRemove(key: Preferences.Key<T>, value: T?) {
         if (value == null) remove(key) else this[key] = value
     }
@@ -92,6 +124,11 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         private val SESSION_KIND = stringPreferencesKey("session_kind")
         private val SESSION_HANDLE = stringPreferencesKey("session_handle")
         private val SESSION_CHALLENGE_URL = stringPreferencesKey("session_challenge_url")
+        private val COLLECTIONS_REPAIR_AT = longPreferencesKey("collections_repair_at")
+        private val COLLECTION_NAMES_STALE = booleanPreferencesKey("collection_names_stale")
+
+        /** A GraphQL query's friendly name, as it goes into its key: letters, digits and `_`. */
+        private val QUERY_NAME = Regex("[A-Za-z0-9_]{1,100}")
 
         fun create(context: Context): SettingsStore = open(produceFile = { context.preferencesDataStoreFile("settings") })
 

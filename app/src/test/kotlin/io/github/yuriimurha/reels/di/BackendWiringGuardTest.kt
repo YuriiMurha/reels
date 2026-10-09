@@ -58,6 +58,19 @@ class BackendWiringGuardTest {
         }
     }
 
+    /**
+     * Spec 2026-10-09 §3.3: the real client and the lab send the collections query with the doc id kept in the settings (the
+     * one a repair learned), not a store of their own that would forget it.
+     */
+    @Test
+    fun theClientAndTheLabSendTheDocIdKeptInTheSettings() {
+        val container = main("di/AppContainer.kt")
+        for (call in listOf("WebInstagramClient(", "AdapterLab(")) {
+            val arguments = callArguments(container, call).single()
+            assertTrue(Regex("""\bdocIds\s*=\s*SettingsDocIdStore\(\s*settings\s*\)""").containsMatchIn(arguments), "$call: $arguments")
+        }
+    }
+
     /** No OkHttp API path is left in production: the API client factory and the JVM-test transport are `:instagram`'s, for tests. */
     @Test
     fun noOkHttpPathToInstagramsApiRemainsInProduction() {

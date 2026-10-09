@@ -6,7 +6,9 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import okhttp3.OkHttpClient
+import java.net.URLDecoder
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -15,10 +17,35 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class WebInstagramClientTest {
     private val server = MockWebServer()
     private val cookies = InMemoryCookieStore()
+
+    /** The doc id store in memory: answers [stored] (digits, as every transport needs), and a learned id replaces it. */
+    private class FakeDocIds(var stored: String = "555") : DocIdStore {
+        val learned = mutableListOf<Pair<GraphQlQuery, String>>()
+
+        override suspend fun docId(query: GraphQlQuery): String = stored
+
+        override suspend fun learned(query: GraphQlQuery, docId: String) {
+            learned += query to docId
+            stored = docId
+        }
+    }
+
+    private val docIds = FakeDocIds()
+    private var repairs = 0
+
+    /** What the fake repair answers; by default no repair is expected. */
+    private var repaired: () -> RepairedQuery = { error("no repair expected") }
+
+    private val repair = QueryRepair { query ->
+        repairs++
+        assertEquals(WebGraphQl.SAVED_COLLECTIONS, query)
+        repaired()
+    }
 
     @BeforeTest
     fun start() {
@@ -32,7 +59,7 @@ class WebInstagramClientTest {
     fun stop() = server.close()
 
     private fun client(http: () -> OkHttpClient = { HttpClientFactory.create(cookies, "test-agent") }) =
-        WebInstagramClient({ OkHttpTransport(http(), server.url("/")) }, cookies)
+        WebInstagramClient({ OkHttpTransport(http(), server.url("/")) }, cookies, docIds, repair)
 
     private fun fixture(name: String): String = javaClass.getResource("/fixtures/web/$name")!!.readText()
 
@@ -40,6 +67,17 @@ class WebInstagramClientTest {
         server.enqueue(MockResponse.Builder().code(code).body(body).build())
 
     private fun serveFixture(name: String) = serve(fixture(name))
+
+    /** The urlencoded form of a GraphQL POST, decoded. */
+    private fun form(request: RecordedRequest): Map<String, String> =
+        request.body!!.utf8().split('&').associate { field ->
+            val (name, value) = field.split('=', limit = 2)
+            URLDecoder.decode(name, Charsets.UTF_8) to URLDecoder.decode(value, Charsets.UTF_8)
+        }
+
+    private fun reply(body: String) = RawReply(200, "application/json", body)
+
+    private val staleBody = """{"errors":[{"message":"x","severity":"CRITICAL"}],"data":null}"""
 
     @Test
     fun walksSavedPagesWithMaxId() = runTest {
@@ -82,18 +120,120 @@ class WebInstagramClientTest {
     }
 
     @Test
-    fun collectionsFiltersToMediaCollections() = runTest {
-        serveFixture("collections_list.json")
+    fun collectionsUsesTheStoredDocId() = runTest {
+        serveFixture("collections_graphql.json")
         val page = client().collections(null)
-        assertEquals(2, page.items.size)
-        assertEquals(listOf("Food", "Travel"), page.items.map { it.name })
+        assertEquals(listOf("Alpha", "Beta"), page.items.map { it.name })
+        assertEquals(listOf("17900000000000002", "17900000000000003"), page.items.map { it.id })
+        assertEquals(listOf("3100000000000000001", null), page.items.map { it.coverMediaPk })
         assertNull(page.nextCursor)
-        val url = server.takeRequest().url
-        assertEquals("/api/v1/collections/list/", url.encodedPath)
-        assertEquals(
-            "[\"ALL_MEDIA_AUTO_COLLECTION\",\"MEDIA\",\"AUDIO_AUTO_COLLECTION\"]",
-            url.queryParameter("collection_types"),
-        )
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/" + WebGraphQl.PATH, request.url.encodedPath)
+        val form = form(request)
+        assertEquals("555", form[WebGraphQl.Field.DOC_ID])
+        assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, form[WebGraphQl.Field.FRIENDLY_NAME])
+        assertEquals(WebGraphQl.savedCollectionsVariables(null), form[WebGraphQl.Field.VARIABLES])
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun aLaterPageSendsItsCursorInTheVariables() = runTest {
+        serveFixture("collections_graphql.json")
+        client().collections("c1")
+        assertEquals(WebGraphQl.savedCollectionsVariables("c1"), form(server.takeRequest())[WebGraphQl.Field.VARIABLES])
+    }
+
+    @Test
+    fun aStaleReplyThrowsStaleQueryAndNeverRepairsByItself() = runTest {
+        serve(staleBody)
+        server.enqueue(MockResponse.Builder().code(404).addHeader("Content-Type", "text/html").body("<html>not here</html>").build())
+        val client = client()
+        repeat(2) {
+            val error = assertFailsWith<InstagramException.StaleQuery> { client.collections(null) }
+            assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, error.query)
+        }
+        // Sync decides whether to repair (Task 5): the client never does on its own.
+        assertEquals(0, repairs)
+        assertEquals(emptyList(), docIds.learned)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun theCollectionsReplyKeepsEveryOtherFailure() = runTest {
+        serve("""{"status":"fail"}""", code = 429)
+        serve("""{"require_login":true}""")
+        serve("{}", code = 503)
+        serve("""{"data":{"viewer":{}}}""")
+        val client = client()
+        assertFailsWith<InstagramException.RateLimited> { client.collections(null) }
+        assertFailsWith<InstagramException.LoginRequired> { client.collections(null) }
+        assertFailsWith<InstagramException.Transient> { client.collections(null) }
+        val shape = assertFailsWith<InstagramException.ShapeChanged> { client.collections(null) }
+        assertEquals("data.viewer.collections_unified_with_auto_collections", shape.fieldPath)
+        assertEquals(0, repairs)
+    }
+
+    @Test
+    fun repairCollectionsLearnsTheIdAndParsesTheSitesReply() = runTest {
+        var built = 0
+        repaired = { RepairedQuery("777", reply("for (;;);" + fixture("collections_graphql.json"))) }
+        val client = client { built++; HttpClientFactory.create(cookies, "test-agent") }
+
+        val page = client.repairCollections()
+
+        assertEquals(listOf("Alpha", "Beta"), page.items.map { it.name })
+        assertEquals(listOf(WebGraphQl.SAVED_COLLECTIONS to "777"), docIds.learned)
+        assertEquals(1, repairs)
+        // The site's own page sent the query: the app sends nothing, and builds no transport for it.
+        assertEquals(0, server.requestCount)
+        assertEquals(0, built)
+    }
+
+    @Test
+    fun theNextPageAfterARepairSendsTheLearnedId() = runTest {
+        val more = """{"data":{"viewer":{"collections_unified_with_auto_collections":{"edges":[],""" +
+            """"page_info":{"has_next_page":true,"end_cursor":"c1"}}}}}"""
+        repaired = { RepairedQuery("777", reply(more)) }
+        val client = client()
+        val first = client.repairCollections()
+        assertEquals("c1", first.nextCursor)
+
+        serveFixture("collections_graphql.json")
+        client.collections(first.nextCursor)
+        val form = form(server.takeRequest())
+        assertEquals("777", form[WebGraphQl.Field.DOC_ID])
+        assertEquals(WebGraphQl.savedCollectionsVariables("c1"), form[WebGraphQl.Field.VARIABLES])
+    }
+
+    @Test
+    fun aRepairWhoseReplyIsStaleIsAFailure() = runTest {
+        repaired = { RepairedQuery("777", reply(staleBody)) }
+        assertFailsWith<InstagramException.StaleQuery> { client().repairCollections() }
+        assertEquals(emptyList(), docIds.learned)
+        assertEquals("555", docIds.stored)
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun aRepairWhoseReplyFailsOtherwiseLearnsNothingEither() = runTest {
+        val client = client()
+        repaired = { RepairedQuery("777", reply("""{"require_login":true}""")) }
+        assertFailsWith<InstagramException.LoginRequired> { client.repairCollections() }
+        repaired = { RepairedQuery("777", reply("""{"data":{"viewer":{"collections_unified_with_auto_collections":{"edges":[]}}}}""")) }
+        assertEquals("page_info", assertFailsWith<InstagramException.ShapeChanged> { client.repairCollections() }.fieldPath)
+        assertEquals(emptyList(), docIds.learned)
+    }
+
+    @Test
+    fun aRepairThatCannotRunThrowsItsOwnReasonAndLearnsNothing() = runTest {
+        repaired = { throw InstagramException.RepairSkipped("limit") }
+        assertFailsWith<InstagramException.RepairSkipped> { client().repairCollections() }
+        repaired = { throw InstagramException.RepairFailed("no query") }
+        assertFailsWith<InstagramException.RepairFailed> { client().repairCollections() }
+        assertEquals(emptyList(), docIds.learned)
+        assertEquals(0, server.requestCount)
     }
 
     @Test
@@ -209,7 +349,7 @@ class WebInstagramClientTest {
         var built = 0
         val client = client { built++; HttpClientFactory.create(cookies, "test-agent") }
         serve("""{"form_data":{"username":"user_1"},"status":"ok"}""")
-        serveFixture("collections_list.json")
+        serveFixture("collections_graphql.json")
         client.currentUser()
         client.collections(null)
         assertEquals(1, built)
@@ -223,8 +363,8 @@ class WebInstagramClientTest {
         assertEquals(0, built)
         assertEquals(0, server.requestCount)
 
-        serveFixture("collections_list.json")
-        serveFixture("collections_list.json")
+        serveFixture("collections_graphql.json")
+        serveFixture("collections_graphql.json")
         client.collections(null)
         client.collections(null)
         // The provider runs once, on the first call, and the client is reused.
@@ -232,20 +372,23 @@ class WebInstagramClientTest {
         assertEquals(2, server.requestCount)
     }
 
+    /** Spike Q2 answered yes on 2026-10-09: every saved item lists its collections, so sync walks All Saved only (strategy A). */
     @Test
-    fun reportsSavedCollectionIdsDefaultsToFalse() {
-        assertFalse(WebInstagramClient.SAVED_COLLECTION_IDS_CONFIRMED)
-        assertFalse(client().reportsSavedCollectionIds)
+    fun reportsSavedCollectionIdsIsTrue() {
+        assertTrue(WebInstagramClient.SAVED_COLLECTION_IDS_CONFIRMED)
+        assertTrue(client().reportsSavedCollectionIds)
     }
 
     @Test
     fun reportsSavedCollectionIdsFollowsTheConstructorArgument() {
-        val on = WebInstagramClient(
+        val off = WebInstagramClient(
             { OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), server.url("/")) },
             cookies,
-            reportsSavedCollectionIds = true,
+            docIds,
+            repair,
+            reportsSavedCollectionIds = false,
         )
-        assertEquals(true, on.reportsSavedCollectionIds)
+        assertFalse(off.reportsSavedCollectionIds)
     }
 
     @Test
@@ -253,8 +396,10 @@ class WebInstagramClientTest {
         val dead = MockWebServer().apply { start() }
         val url = dead.url("/")
         dead.close()
-        val unreachable = WebInstagramClient({ OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), url) }, cookies)
+        val unreachable =
+            WebInstagramClient({ OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), url) }, cookies, docIds, repair)
         assertFailsWith<InstagramException.Transient> { unreachable.savedMedia(null, null) }
         assertFailsWith<InstagramException.Transient> { unreachable.mediaInfo("3100000000000000001") }
+        assertFailsWith<InstagramException.Transient> { unreachable.collections(null) }
     }
 }

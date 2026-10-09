@@ -17,9 +17,12 @@ import io.github.yuriimurha.reels.data.media.RealVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
+import io.github.yuriimurha.reels.data.settings.SettingsDocIdStore
 import io.github.yuriimurha.reels.data.settings.SettingsStore
+import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
 import io.github.yuriimurha.reels.instagram.web.CookieStore
+import io.github.yuriimurha.reels.instagram.web.QueryRepair
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.instagram.web.WebInstagramClient
 import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
@@ -175,12 +178,23 @@ class AppContainer(context: Context) {
      */
     private val cdnHttp: OkHttpClient by lazy { HttpMediaFetcher.client(WebSettings.getDefaultUserAgent(context)) }
 
-    /** Fake library, or real Instagram (P1). Building it builds no HTTP client: both are lazy. */
+    /**
+     * Fake library, or real Instagram (P1). Building it builds no HTTP client: both are lazy. The collections query goes out with
+     * the doc id learned last (spec 2026-10-09 §3.3). The repair is not wired yet: it says so, and sync handles that (Task 5).
+     */
     val backend: Backend by lazy {
         if (usesFake) {
             Backend.Fake()
         } else {
-            Backend.Real(WebInstagramClient({ instagramTransport }, cookieStore), HttpMediaFetcher({ cdnHttp }), instagramPacer)
+            Backend.Real(
+                WebInstagramClient(
+                    { instagramTransport }, cookieStore,
+                    docIds = SettingsDocIdStore(settings),
+                    repair = QueryRepair { throw InstagramException.RepairSkipped("not wired") },
+                ),
+                HttpMediaFetcher({ cdnHttp }),
+                instagramPacer,
+            )
         }
     }
 
@@ -188,8 +202,11 @@ class AppContainer(context: Context) {
     fun mockModeSwitch(restart: () -> Unit) =
         MockModeSwitch(usesFake, backendChoice, cancelSync = { syncScheduler.cancelAndAwait() }, restart = restart)
 
-    /** The debug Adapter lab. Built without the transport: that is only built when a lab call reaches the network. */
-    val adapterLab: AdapterLab by lazy { AdapterLab({ instagramTransport }, cookieStore) }
+    /**
+     * The debug Adapter lab. Built without the transport: that is only built when a lab call reaches the network. Its
+     * Collections call sends the doc id the real client would.
+     */
+    val adapterLab: AdapterLab by lazy { AdapterLab({ instagramTransport }, cookieStore, docIds = SettingsDocIdStore(settings)) }
 
     /**
      * Building this loads no WebView: the transport (and its page) is only built when the first request needs the probe, and
