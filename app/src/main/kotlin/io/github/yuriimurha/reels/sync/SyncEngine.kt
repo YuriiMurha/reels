@@ -254,7 +254,7 @@ class SyncEngine(
                         call(progress) { client.collections(from) }
                     } catch (e: InstagramException.StaleQuery) {
                         if (from != null) throw e
-                        log?.invoke("collections query stale")
+                        log?.invoke("collections query stale" + (e.detail?.let { " ($it)" } ?: ""))
                         repairCollections(progress) ?: return fallbackCollections() to true
                     }
                 }

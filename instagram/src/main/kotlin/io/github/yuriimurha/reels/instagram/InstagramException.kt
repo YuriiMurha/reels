@@ -15,9 +15,10 @@ sealed class InstagramException(message: String, cause: Throwable? = null) : Exc
 
     /**
      * The website no longer runs the doc id the app sent for the GraphQL query [query] (its friendly name): the current id has
-     * to be learned from the site again (spec 2026-10-09 §3.3). Never carries a doc id.
+     * to be learned from the site again (spec 2026-10-09 §3.3). Never carries a doc id. [detail] says what kind of reply it was
+     * when that was no GraphQL reply (R22: `not graphql`, `http 404`): null for a GraphQL one, the plain "the id is gone".
      */
-    class StaleQuery(val query: String) : InstagramException("stale query $query")
+    class StaleQuery(val query: String, val detail: String? = null) : InstagramException("stale query $query")
 
     /**
      * R20: a GraphQL query the transport could not send at all (the page had no tokens to send it with): nothing went out, so it

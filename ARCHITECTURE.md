@@ -625,16 +625,16 @@ current one from the site itself, on the phone, with no rebuild.
   1. the rule of every reply (`classifyReply`): a challenge, a rate limit, a logout, a redirect or a network problem keeps its
      meaning;
   2. the same markers inside the reply's GraphQL `errors` entries (`message`, `summary`, `description` and `error_type`, the
-     last read as `ErrorClassifier.classify` reads a reply's), so a throttled 200 is `RateLimited` and a login or challenge
-     reported in the body keeps its meaning too, never a repair;
-  3. a stale query, `StaleQuery` (it carries the friendly name only): a 2xx GraphQL reply (one with a `data` key, whatever
-     its value, or GraphQL `errors` entries) without `data.viewer` (`data` null, empty or another query's, or `errors` and no
-     `data`), with `errors` or without them (R17: so a doc id that names another persisted query, planted or not, is repaired
-     within a day instead of being sent again on every sync), or a 400 or 404 that is not JSON (STALE, assumed, to be
-     confirmed on the phone). Only a new doc id fixes that, so it is never a shape change, never retried and never arms a
-     cooldown. A 2xx that is no GraphQL reply at all (R22: an error envelope of the site's such as `{"error":1357004,...}`, a
-     bare `{"status":"fail"}` or `{"status":"ok"}`) says nothing about the doc id: it keeps its shape change and never starts
-     a repair;
+     last read as `ErrorClassifier.classify` reads a reply's; R22: and an entry that is a plain string), so a throttled 200 is
+     `RateLimited` and a login or challenge reported in the body keeps its meaning too, never a repair;
+  3. a stale query, `StaleQuery` (it carries the friendly name, and no doc id): a 2xx JSON reply without `data.viewer` (`data`
+     null, absent, empty or another query's), with `errors` or without them (R17: so a doc id that names another persisted
+     query, planted or not, is repaired within a day instead of being sent again on every sync), or a 400 or 404 that is not
+     JSON (STALE, assumed, to be confirmed on the phone). Only a new doc id fixes that, so it is never a shape change, never
+     retried and never arms a cooldown. R22: a 2xx that is no GraphQL reply at all (no `data` key, no GraphQL `errors`
+     entries: an error envelope of the site's such as `{"error":1675030,...}`, or a bare status) stays stale too, since it may
+     be exactly how the site answers an outdated id and stopping every sync would be worse than one repair a day; but the
+     `StaleQuery` says so (`detail` `not graphql`, or `http <code>` for the non-JSON 400/404), and the log shows it;
   4. a reply whose `data` has `viewer` is never stale: with `errors` and no root it is `Transient` (a 2xx execution error,
      which follows the existing retry), with neither it is `ShapeChanged` at the root path.
 - **The parser.** The nodes of `edges`, in order, less the automatic collections: the owner's own have a `collection_id` of
@@ -752,7 +752,8 @@ current one from the site itself, on the phone, with no rebuild.
   write says "Couldn't forget the collections query id" under the button.
 - **Debug log** (tag `InstagramHttp`, debug builds only, never a doc id, handle, URL, token or body):
   `GRAPHQL PolarisProfileSavedTabContentQuery -> <code> (<ms> ms)` per query (with the error summary line for a non-2xx
-  reply; `no tokens` for a query the page could not send), `collections query stale` when the first page is stale or
+  reply; `no tokens` for a query the page could not send), `collections query stale` when the first page is stale (`collections query stale (not graphql)` or `(http <code>)` when
+  the stale reply was no GraphQL reply, R22) or
   `collections query forced` when Forget armed the repair, then the repairer's `repair: start` or `repair: failed (<reason>)`
   (`limit`, `no handle`, `http <code>`, `login page`, `challenge page`, `no query`, `page error`), and the engine's
   `repair: learned new id` once the client has parsed the site's reply and kept its id (D-I2: never before), or, when the
@@ -769,7 +770,7 @@ current one from the site itself, on the phone, with no rebuild.
   - A names query the page could not send (no tokens, R20) costs one run-budget unit and no request, is never retried, and
     keeps the page: no extra home load.
   - A repair is one desktop page view of the owner's own Saved page (the site's own requests, about 30, unpaced like the home
-    page load), at most once per 24 h, and only after a rejected id (R17/R22: a 2xx GraphQL names reply without `data.viewer`) or a tap
+    page load), at most once per 24 h, and only after a rejected id (R17: any 2xx names reply without `data.viewer`) or a tap
     of Forget. It costs one run-budget unit and one request-log entry even when the 24 h limit refuses it (the Pacer counts
     and records before the repairer's limit is checked), so a sync within a day of a repair that meets another stale id
     spends two units on the names: the stale request and the refused repair. Over-counting only. A forced repair replaces the

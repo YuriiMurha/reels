@@ -269,10 +269,25 @@ class WebInstagramClientTest {
         val stale = assertFailsWith<InstagramException.StaleQuery> { client.repairCollections { heard += it } }
         assertEquals(listOf<InstagramException>(stale), heard)
 
+        for ((message, type) in listOf("login_required" to InstagramException.LoginRequired::class, "challenge_required" to InstagramException.ChallengeRequired::class)) {
+            heard.clear()
+            repaired = { RepairedQuery("777", reply("""{"errors":[{"message":"$message"}],"data":null}""")) }
+            val failure = assertFailsWith<InstagramException> { client.repairCollections { heard += it } }
+            assertTrue(type.isInstance(failure), "$message: $failure")
+            assertEquals(listOf(failure), heard)
+        }
+
         heard.clear()
         repaired = { throw InstagramException.RepairSkipped("limit") }
         assertFailsWith<InstagramException.RepairSkipped> { client.repairCollections { heard += it } }
         assertEquals(emptyList(), heard, "the repair's own refusal is not the reply's")
+
+        // The repair page's own landing on a 429 or a login page (the repairer throws, having logged it): not the reply's either.
+        repaired = { throw InstagramException.RateLimited() }
+        assertFailsWith<InstagramException.RateLimited> { client.repairCollections { heard += it } }
+        repaired = { throw InstagramException.LoginRequired() }
+        assertFailsWith<InstagramException.LoginRequired> { client.repairCollections { heard += it } }
+        assertEquals(emptyList(), heard, "the repair's own failures are never the reply's")
 
         repaired = { RepairedQuery("777", reply(fixture("collections_graphql.json"))) }
         client.repairCollections { heard += it }

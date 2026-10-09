@@ -351,10 +351,9 @@ class WebParsersTest {
     }
 
     /**
-     * Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. R17, as
-     * R22 narrows it: a 2xx GraphQL reply without `data.viewer` is stale with or without `errors`, so a doc id that names another
-     * query (planted, say) is repaired within a day instead of being sent again on every sync. A GraphQL reply is one that has a
-     * `data` key or GraphQL `errors`.
+     * Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. R17: a 2xx
+     * JSON reply without `data.viewer` is stale with or without `errors`, so a doc id that names another query (planted, say) is
+     * repaired within a day instead of being sent again on every sync. A GraphQL reply's stale query says nothing more.
      */
     @Test
     fun classifySavedCollectionsCallsFactStalesReplyAStaleQuery() {
@@ -373,6 +372,10 @@ class WebParsersTest {
             graphQl("<html><body>Sorry, this page isn't available.</body></html>", code = 404, contentType = "text/html"),
             graphQl("Bad request", code = 400, contentType = "text/plain"),
         )
+        for (reply in stale.dropLast(2)) {
+            val error = assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(reply), reply.body)
+            assertEquals(null, error.detail, "a GraphQL reply's stale query: ${reply.body}")
+        }
         for (reply in stale) {
             val error = assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(reply), reply.body)
             assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, error.query)
@@ -382,28 +385,46 @@ class WebParsersTest {
     }
 
     /**
-     * R22: a 2xx that is not a GraphQL reply at all (no `data` key, no GraphQL `errors`) says nothing about the doc id: an error
-     * envelope of the site's, or a bare status. It is a shape change with its own path, never a stale query, so it never starts a
-     * desktop repair nor reads as "Instagram changed the id" in the log.
+     * R22: a 2xx that is no GraphQL reply at all (no `data` key, no GraphQL `errors` entries), an error envelope of the site's
+     * or a bare status, says nothing certain about the doc id; it might be exactly how the site answers an outdated one. It
+     * stays a stale query (R17: one repair a day at most, else the last names; never a stopped sync), but says what it was, so
+     * the log can tell "Instagram changed the id" from "Instagram answered something else"; and so does a non-JSON 400/404.
      */
     @Test
-    fun aReplyWithoutDataOrGraphQlErrorsIsNeverStale() {
-        val envelopes = listOf(
-            graphQl("for (;;);" + """{"__ar":1,"error":1357004,"errorSummary":"Sorry, something went wrong","payload":null}"""),
+    fun aStaleQueryThatIsNoGraphQlReplySaysWhatItWas() {
+        val notGraphQl = listOf(
+            graphQl("for (;;);" + """{"__ar":1,"error":1675030,"errorSummary":"Query error","payload":null}"""),
             graphQl("""{"error":1357004,"errorSummary":"x"}"""),
             graphQl("""{"status":"fail","message":"Sorry, something went wrong"}"""),
             graphQl("""{"status":"fail"}"""),
             graphQl("""{"status":"ok"}"""),
             graphQl("{}"),
             graphQl("""{"errors":[]}"""),
-            graphQl("""{"errors":["not an object"]}"""),
             graphQl("""{"errors":{"message":"x"}}"""),
         )
-        for (reply in envelopes) {
-            val error = WebParsers.classifySavedCollections(reply)
-            assertIs<InstagramException.ShapeChanged>(error, reply.body)
-            assertIs<InstagramException.ShapeChanged>(assertFailsWith<InstagramException> { WebParsers.savedCollectionsJsonOrThrow(reply) })
+        for (reply in notGraphQl) {
+            val error = assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(reply), reply.body)
+            assertEquals("not graphql", error.detail, reply.body)
         }
+        val html = graphQl("<html><body>Sorry, this page isn't available.</body></html>", code = 404, contentType = "text/html")
+        assertEquals("http 404", assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(html)).detail)
+        val text = graphQl("Bad request", code = 400, contentType = "text/plain")
+        assertEquals("http 400", assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(text)).detail)
+    }
+
+    /** R22: an `errors` entry written as a plain string keeps its meaning too: a throttle is never a stale query, so no repair. */
+    @Test
+    fun aPlainStringErrorEntryKeepsItsMeaning() {
+        assertIs<InstagramException.RateLimited>(
+            WebParsers.classifySavedCollections(graphQl("""{"errors":["Please wait a few minutes before you try again."],"data":null}""")),
+        )
+        assertIs<InstagramException.LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"errors":["login_required"]}""")))
+        assertIs<InstagramException.ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"errors":["challenge_required"]}""")))
+        assertEquals(
+            "not graphql",
+            assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(graphQl("""{"errors":["something else"]}"""))).detail,
+            "a string entry is no GraphQL error object: an envelope of another kind",
+        )
     }
 
     /** R12 (a): an `errors` entry that names a rate limit, a logout or a challenge is that, never a stale query. */

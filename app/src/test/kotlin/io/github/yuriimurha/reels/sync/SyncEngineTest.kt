@@ -1441,13 +1441,19 @@ class SyncEngineTest {
             return pageFor(cursor)
         }
 
-        /** As the real client: a scripted failure other than the repair's own ([InstagramException.RepairUnavailable]) is the reply's. */
+        /**
+         * Whether a scripted failure is the site's reply's (true) or the repair's own, e.g. its page landing on a 429 or a login page
+         * (false). [InstagramException.RepairUnavailable] is always the repair's own.
+         */
+        var failureIsTheReplys = true
+
+        /** As the real client: only a failure of the site's reply is reported to [onReplyFailure]. */
         override suspend fun repairCollections(onReplyFailure: (InstagramException) -> Unit): Page<RemoteCollection> {
             events += "repair"
             return try {
                 repair()
             } catch (e: InstagramException) {
-                if (e !is InstagramException.RepairUnavailable) onReplyFailure(e)
+                if (failureIsTheReplys && e !is InstagramException.RepairUnavailable) onReplyFailure(e)
                 throw e
             }
         }
@@ -1572,11 +1578,14 @@ class SyncEngineTest {
         runSync(engine, SyncMode.QUICK)
         client.staleAt = setOf(null)
         client.repair = { throw InstagramException.RateLimited() }
+        client.failureIsTheReplys = false // the repair page itself got the 429; the repairer has logged it
+        engineLog.clear()
 
         val run = runSync(engine, SyncMode.QUICK)
 
         assertEquals(SyncStatus.STOPPED_RATE_LIMIT, run.status)
         assertEquals("Instagram is limiting requests", run.lastError)
+        assertEquals(listOf("collections query stale"), engineLog, "the engine adds no line for the repair's own failure")
         assertNotNull(cooldowns.activeUntil(), "the Pacer armed the cooldown")
         assertEquals(listOf(false), namesStale, "a rate limit is no failed repair: the notice is left alone")
         val calls = client.fake.calls.size + client.events.size
@@ -1602,6 +1611,8 @@ class SyncEngineTest {
             val client = ScriptedNames(smallClient())
             client.staleAt = setOf(null)
             client.repair = { throw case.failure }
+            // A login or challenge here is the repair page's own landing; the unreadable reply is the site's reply.
+            client.failureIsTheReplys = case.failure is InstagramException.ShapeChanged
 
             val run = runSync(engine(client), SyncMode.QUICK)
 
@@ -1853,6 +1864,9 @@ class SyncEngineTest {
     private class NamesSite(var current: String, var name: String) : InstagramTransport {
         val sent = mutableListOf<String>()
 
+        /** How this site answers an id it no longer runs: a GraphQL error by default. */
+        var staleBody = """{"errors":[{"message":"unknown query"}],"data":null}"""
+
         fun reply(): String =
             """{"data":{"viewer":{"collections_unified_with_auto_collections":{"edges":[""" +
                 """{"node":{"collection_id":"ALL_MEDIA_AUTO_COLLECTION","collection_name":"All posts"}},""" +
@@ -1863,7 +1877,7 @@ class SyncEngineTest {
 
         override suspend fun graphql(query: GraphQlQuery, docId: String, variables: String): RawReply {
             sent += docId
-            val body = if (docId == current) reply() else """{"errors":[{"message":"unknown query"}],"data":null}"""
+            val body = if (docId == current) reply() else staleBody
             return RawReply(200, "application/json", body)
         }
     }
@@ -2142,6 +2156,47 @@ class SyncEngineTest {
             assertEquals(null, settings.graphqlDocId(query), "nothing is learned from a reply that stopped the run")
             db.deleteLibrary()
         }
+    }
+
+    /**
+     * R22: a site that answers an outdated id with an error envelope (no GraphQL reply at all) still gets its repair and the run
+     * goes on: never "Adapter needs repair" on every sync. The log says what the stale reply was, so a reader can tell it from
+     * the GraphQL "unknown query".
+     */
+    @Test
+    fun anEnvelopeForAnOutdatedIdRepairsAndSaysSo() = runTest {
+        val query = WebGraphQl.SAVED_COLLECTIONS.friendlyName
+        val site = NamesSite(current = "777", name = "Alpha")
+        site.staleBody = "for (;;);" + """{"__ar":1,"error":1675030,"errorSummary":"Query error","payload":null}"""
+        settings.setGraphqlDocId(query, null)
+        settings.setCollectionsRepairAt(null)
+        val repairer = QueryRepairer(
+            settings,
+            handle = { "tester" },
+            createPage = {
+                object : RepairPage {
+                    override suspend fun watch(url: String, friendlyName: String, timeoutMs: Long) = WatchedQuery(site.current, 200, site.reply())
+
+                    override fun destroy() = Unit
+                }
+            },
+            now = { DAY + testScheduler.currentTime },
+            main = StandardTestDispatcher(testScheduler),
+            log = { engineLog += it },
+        )
+        val web = WebInstagramClient({ site }, InMemoryCookieStore(), SettingsDocIdStore(settings), repairer)
+        val client = object : InstagramClient by smallClient() {
+            override suspend fun collections(cursor: String?) = web.collections(cursor)
+
+            override suspend fun repairCollections(onReplyFailure: (InstagramException) -> Unit) = web.repairCollections(onReplyFailure)
+        }
+
+        val run = runSync(engine(client), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status, "${run.lastError}")
+        assertEquals(listOf("collections query stale (not graphql)", "repair: start", "repair: learned new id"), engineLog)
+        assertEquals("777", settings.graphqlDocId(query))
+        assertEquals(mapOf("17900000000000002" to "Alpha"), names())
     }
 
     /**

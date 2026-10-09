@@ -585,7 +585,8 @@ page that a cancelled request ran into, `cancelled`, ...). Other lines can appea
 closed after 5 minutes without a request), `page closed (owner needed)` (closed at once because the session expired or
 needs verification, or the login screen opened to fix that), and `transport reset failed: <Class>` or `transport close
 failed: <Class>` (the page could not be closed; the class name only), `collections query stale` (Instagram no longer runs the
-stored names query id) or `collections query forced` (Forget asked for a repair), then `repair: start`,
+stored names query id; `collections query stale (not graphql)` or `(http <code>)` when it answered with an error envelope
+or a non-JSON page instead of a GraphQL error, which still repairs once a day but is worth pasting) or `collections query forced` (Forget asked for a repair), then `repair: start`,
 `repair: learned new id` or `repair: failed (<reason>)` (the repair page's one attempt; never an id, a handle or a page). No
 cookie, token or header is logged: the app never sees them. One `GET` or `GRAPHQL` line is one call: at most one API
 request; a line without an HTTP status sent none (it ended before the request, or the page's request failed; `no tokens`
