@@ -147,4 +147,24 @@ class WebEndpointsTest {
         assertFailsWith<InstagramException.ShapeChanged> { WebEndpoints.mediaInfo(WebEndpoints.BASE, "9".repeat(31)) }
         assertFailsWith<InstagramException.ShapeChanged> { WebEndpoints.collectionPosts(WebEndpoints.BASE, "1 ", null) }
     }
+
+    /** The repair page's one URL (spec 2026-10-09 §3.3): the account's own Saved page, on the home page's origin. */
+    @Test
+    fun theSavedPageIsTheHandlesOwnOnTheHomeOrigin() {
+        val handle = "test" + "." + "user_1"
+        assertEquals("https://www.instagram.com/test.user_1/saved/", WebEndpoints.savedPage(handle))
+        for (good in listOf("a", "x".repeat(30), "a.b_c9", "_.9", "_", "A.")) {
+            assertEquals(WebEndpoints.HOME_URL + good + "/saved/", WebEndpoints.savedPage(good), good)
+        }
+    }
+
+    /** Only a handle of Instagram's shape goes into it: nothing that adds a path, a query, a fragment or another host. */
+    @Test
+    fun aHandleOfAnyOtherShapeHasNoSavedPage() {
+        val bad = listOf(
+            "", ".", "..", "...", "a/b", "../x", "a?b", "a#b", "a b", "a%2Fb", "a\n", "\tab", "x".repeat(31), "ä", "é", "ß",
+            "Ж", "١٢", "a@b.com", "a:b", "a\\b", "a-b",
+        )
+        for (handle in bad) assertNull(WebEndpoints.savedPage(handle), "'$handle'")
+    }
 }

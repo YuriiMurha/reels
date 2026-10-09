@@ -17,6 +17,10 @@ interface CollectionDao {
     @Query("SELECT * FROM collection WHERE removedAt IS NULL AND id != '$ALL_SAVED_ID' ORDER BY position")
     suspend fun liveCollectionsNow(): List<CollectionEntity>
 
+    /** The row of [id], live or marked removed, or null when there is none. */
+    @Query("SELECT * FROM collection WHERE id = :id")
+    suspend fun collection(id: String): CollectionEntity?
+
     @Query("UPDATE collection SET removedAt = :at WHERE id NOT IN (:keep) AND id != '$ALL_SAVED_ID' AND removedAt IS NULL")
     suspend fun markRemovedExcept(keep: List<String>, at: Long)
 

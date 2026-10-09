@@ -1466,7 +1466,7 @@ class SyncEngineTest {
         assertEquals(mapOf("c1" to "Workouts", "c2" to "Recipes", "c3" to "Travel"), names())
         assertMembershipsMatch(client.fake.library, listOf("c1", "c2", "c3"))
         assertEquals(listOf(false), namesStale, "the names are fresh: no notice")
-        assertEquals(listOf("collections query stale"), engineLog)
+        assertEquals(listOf("collections query stale", "repair: learned new id"), engineLog)
         assertEquals(
             client.fake.calls.size + client.events.size,
             run.requestsUsed,
@@ -1521,11 +1521,13 @@ class SyncEngineTest {
      */
     @Test
     fun aRepairThatGivesNoNamesIsNeverRetriedInTheSameRun() = runTest {
-        for (failure in listOf(
-            InstagramException.StaleQuery(WebGraphQl.SAVED_COLLECTIONS.friendlyName),
-            InstagramException.Transient(),
-            InstagramException.RepairSkipped("no handle"),
-            InstagramException.RepairFailed("page error"),
+        // What the engine logs of each (D-I2): a reply it could not use; a refusal or a failure the repairer logged itself.
+        for ((failure, line) in listOf(
+            InstagramException.StaleQuery(WebGraphQl.SAVED_COLLECTIONS.friendlyName) to "repair: failed (reply stale)",
+            InstagramException.Transient() to "repair: failed (reply transient)",
+            InstagramException.ShapeChanged("edges[0].node.collection_id") to "repair: failed (shape edges[0].node.collection_id)",
+            InstagramException.RepairSkipped("no handle") to null,
+            InstagramException.RepairFailed("page error") to null,
         )) {
             val client = ScriptedNames(smallClient())
             val engine = engine(client)
@@ -1534,10 +1536,12 @@ class SyncEngineTest {
             client.staleAt = setOf(null)
             client.repair = { throw failure }
             val feedCallsBefore = client.fake.calls.size
+            engineLog.clear()
 
             val run = runSync(engine, SyncMode.QUICK)
 
             assertEquals(SyncStatus.DONE, run.status, "$failure")
+            assertEquals(listOfNotNull("collections query stale", line), engineLog, "$failure")
             assertEquals(listOf("collections:null", "collections:null", "repair"), client.events, "$failure: one repair, no retry")
             assertEquals(before, liveCollections(), "$failure")
             assertEquals(true, namesStale.last(), "$failure")
@@ -1571,19 +1575,20 @@ class SyncEngineTest {
         assertEquals(calls, client.fake.calls.size + client.events.size, "nothing is sent during the cooldown")
     }
 
-    /** A login or challenge page, or a site reply of another shape, stops the run as the same answer from an API call would. */
+    /**
+     * A login or challenge page stops the run as the same answer from an API call would. R14: a site reply of another shape is a
+     * failed repair, not "Adapter needs repair": the sync goes on with the last names and the notice.
+     */
     @Test
-    fun aRepairThatLandsOnTheOwnersProblemStopsTheRun() = runTest {
-        class Case(val failure: InstagramException, val status: SyncStatus, val error: String, val signal: String?)
+    fun aRepairThatLandsOnTheOwnersProblemStopsTheRunButAnUnreadableReplyFallsBack() = runTest {
+        class Case(val failure: InstagramException, val status: SyncStatus, val error: String?, val signal: String?, val notice: List<Boolean>)
         for (case in listOf(
-            Case(InstagramException.LoginRequired(), SyncStatus.STOPPED_LOGIN, "Session expired", "login@5"),
-            Case(InstagramException.ChallengeRequired(null), SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification", "challenge:null@5"),
-            Case(
-                InstagramException.ShapeChanged("data.viewer.collections_unified_with_auto_collections"), SyncStatus.STOPPED_SHAPE,
-                "Adapter needs repair: data.viewer.collections_unified_with_auto_collections", null,
-            ),
+            Case(InstagramException.LoginRequired(), SyncStatus.STOPPED_LOGIN, "Session expired", "login@5", emptyList()),
+            Case(InstagramException.ChallengeRequired(null), SyncStatus.STOPPED_CHALLENGE, "Instagram wants verification", "challenge:null@5", emptyList()),
+            Case(InstagramException.ShapeChanged("data.viewer.collections_unified_with_auto_collections"), SyncStatus.DONE, null, null, listOf(true)),
         )) {
             signals.events.clear()
+            namesStale.clear()
             val client = ScriptedNames(smallClient())
             client.staleAt = setOf(null)
             client.repair = { throw case.failure }
@@ -1593,9 +1598,15 @@ class SyncEngineTest {
             assertEquals(case.status, run.status, "${case.failure}")
             assertEquals(case.error, run.lastError)
             assertEquals(listOfNotNull("ok:test_account@5", case.signal), signals.events)
-            assertEquals(listOf("currentUser"), client.fake.calls, "no feed request after it")
+            if (case.status == SyncStatus.DONE) {
+                assertEquals(listOf("currentUser", "saved:all:null"), client.fake.calls.take(2), "the walk runs: ${client.fake.calls}")
+            } else {
+                assertEquals(listOf("currentUser"), client.fake.calls, "no feed request after it")
+            }
+            assertEquals(case.notice, namesStale, "${case.failure}: a stop raises no notice, a fallback does")
+            assertEquals(listOf("collections:null", "repair"), client.events, "one repair, never retried")
+            db.deleteLibrary()
         }
-        assertEquals(emptyList(), namesStale, "no notice: the names were neither refreshed nor given up on")
     }
 
     /** The repair is a request like any other: inside the Pacer's gate, so never during a cooldown another lane armed. */
@@ -1848,6 +1859,102 @@ class SyncEngineTest {
         assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
         assertEquals(listOf("777", "0", "777"), site.sent)
         assertEquals(1, pages, "no second repair")
+    }
+
+    /**
+     * D-I2: one repair's debug lines, the repairer's and the engine's, in the order the app's one log gets them, over the real
+     * client and repairer. "learned new id" comes only once the client has parsed the site's reply and kept its id; a reply it
+     * can't use says why (R14: a reply of another shape is a failed repair too), and nothing is learned from it.
+     */
+    @Test
+    fun aRepairSaysLearnedOnlyOnceTheIdIsLearned() = runTest {
+        val query = WebGraphQl.SAVED_COLLECTIONS.friendlyName
+        val site = NamesSite(current = "777", name = "Alpha")
+        val stale = """{"errors":[{"message":"unknown query"}],"data":null}"""
+        val noEdges = """{"data":{"viewer":{"collections_unified_with_auto_collections":{"page_info":{"has_next_page":false}}}}}"""
+        class Case(val body: String?, val last: String, val learned: String?, val notice: Boolean)
+        for (case in listOf(
+            Case(site.reply(), "repair: learned new id", "777", notice = false),
+            Case(stale, "repair: failed (reply stale)", null, notice = true),
+            Case(noEdges, "repair: failed (shape edges)", null, notice = true),
+            Case(null, "repair: failed (reply transient)", null, notice = true),
+        )) {
+            engineLog.clear()
+            namesStale.clear()
+            settings.setGraphqlDocId(query, null) // the built-in id, which this site no longer runs
+            settings.setCollectionsRepairAt(null)
+            val repairer = QueryRepairer(
+                settings,
+                handle = { "tester" },
+                createPage = {
+                    object : RepairPage {
+                        override suspend fun watch(url: String, friendlyName: String, timeoutMs: Long) = WatchedQuery(site.current, 200, case.body)
+
+                        override fun destroy() = Unit
+                    }
+                },
+                now = { DAY + testScheduler.currentTime },
+                main = StandardTestDispatcher(testScheduler),
+                log = { engineLog += it },
+            )
+            val web = WebInstagramClient({ site }, InMemoryCookieStore(), SettingsDocIdStore(settings), repairer)
+            val fake = smallClient()
+            val client = object : InstagramClient by fake {
+                override suspend fun collections(cursor: String?) = web.collections(cursor)
+
+                override suspend fun repairCollections() = web.repairCollections()
+            }
+
+            val run = runSync(engine(client), SyncMode.QUICK)
+
+            assertEquals(SyncStatus.DONE, run.status, "${case.body}: ${run.lastError}")
+            assertEquals(listOf("collections query stale", "repair: start", case.last), engineLog)
+            assertEquals(case.learned, settings.graphqlDocId(query))
+            assertEquals(listOf(case.notice), namesStale)
+            db.deleteLibrary()
+        }
+    }
+
+    /**
+     * A collection the last good listing no longer had (marked removed), seen again on items while the names can't be
+     * refreshed, comes back under the name it had, never as a new "Collection N".
+     */
+    @Test
+    fun aRemovedCollectionSeenAgainOnItemsComesBackUnderItsOwnName() = runTest {
+        val client = ScriptedNames(smallClient())
+        val library = client.fake.library
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        client.names = library.collections.filter { it.id != "c3" } // the site stopped listing c3
+        runSync(engine, SyncMode.QUICK)
+        assertEquals(mapOf("c1" to "Workouts", "c2" to "Recipes"), names(), "precondition: c3 is marked removed")
+        assertEquals(1, removedCollectionCount())
+
+        client.staleAt = setOf(null) // and the repair fails: the items' own collection ids bring c3 back
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+
+        assertEquals(mapOf("c1" to "Workouts", "c2" to "Recipes", "c3" to "Travel"), names(), "its stored name, not a placeholder")
+        assertEquals(listOf("c1", "c2", "c3"), liveCollections().map { it.id }, "placed after the last collection")
+        assertEquals(0, removedCollectionCount())
+        assertMembershipsMatch(library, listOf("c1", "c2", "c3"))
+    }
+
+    /** Its stored name only while no live collection has it: a placeholder name a newer placeholder took is numbered afresh. */
+    @Test
+    fun aRevivedPlaceholderNeverSharesItsNameWithALiveOne() = runTest {
+        val client = ScriptedNames(smallClient())
+        db.collectionDao().upsert(
+            listOf(
+                CollectionEntity("c1", "Workouts", coverPk = null, position = 0),
+                CollectionEntity("c2", "Collection 1", coverPk = null, position = 1),
+                CollectionEntity("c3", "Collection 1", coverPk = null, position = 2, removedAt = 1L),
+            ),
+        )
+        client.staleAt = setOf(null)
+
+        assertEquals(SyncStatus.DONE, runSync(engine(client), SyncMode.QUICK).status)
+
+        assertEquals(mapOf("c1" to "Workouts", "c2" to "Collection 1", "c3" to "Collection 2"), names())
     }
 
     private class ThrowingSignals : SessionSignals {

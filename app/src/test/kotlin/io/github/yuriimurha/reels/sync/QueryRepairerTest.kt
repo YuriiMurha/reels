@@ -4,6 +4,7 @@ import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.web.RepairedQuery
 import io.github.yuriimurha.reels.instagram.web.WebGraphQl
+import io.github.yuriimurha.reels.testutil.KotlinSource
 import io.github.yuriimurha.reels.transport.PageHttpError
 import io.github.yuriimurha.reels.transport.RepairLanding
 import io.github.yuriimurha.reels.transport.RepairPage
@@ -72,6 +73,7 @@ class QueryRepairerTest {
     private fun TestScope.repairer(
         page: () -> RepairPage,
         handle: String? = this@QueryRepairerTest.handle,
+        now: Long = NOW,
     ) = QueryRepairer(
         settings,
         handle = { handle },
@@ -79,7 +81,7 @@ class QueryRepairerTest {
             pagesCreated++
             page()
         },
-        now = { NOW },
+        now = { now },
         main = StandardTestDispatcher(testScheduler),
         log = { lines += it },
     )
@@ -115,12 +117,26 @@ class QueryRepairerTest {
         assertEquals(NOW, settings.collectionsRepairAt())
     }
 
-    /** A last attempt dated in the future (a clock set back) refuses too: the limit never lets two repairs closer than a day. */
+    /**
+     * A last attempt dated in the future (a clock set back) refuses too, and is moved back to now: the limit never lets two
+     * repairs closer than a day, and never stalls them longer than a day either, however far ahead the date was.
+     */
     @Test
-    fun anAttemptDatedInTheFutureRefusesToo() = runTest {
-        settings.setCollectionsRepairAt(NOW + HOUR)
-        assertFailsWith<InstagramException.RepairSkipped> { repairer({ FakePage { watched() } }).repair(WebGraphQl.SAVED_COLLECTIONS) }
+    fun anAttemptDatedInTheFutureRefusesAndCountsFromNow() = runTest {
+        settings.setCollectionsRepairAt(NOW + 30 * DAY)
+        val refused = assertFailsWith<InstagramException.RepairSkipped> { repairer({ FakePage { watched() } }).repair(WebGraphQl.SAVED_COLLECTIONS) }
+        assertEquals("collections repair unavailable: limit", refused.message)
         assertEquals(0, pagesCreated)
+        assertEquals(NOW, settings.collectionsRepairAt(), "the future date is clamped to now")
+        assertEquals(listOf("repair: failed (limit)"), lines)
+
+        assertFailsWith<InstagramException.RepairSkipped> {
+            repairer({ FakePage { watched() } }, now = NOW + DAY - 1).repair(WebGraphQl.SAVED_COLLECTIONS)
+        }
+        assertEquals(0, pagesCreated, "still within a day of the clamp")
+        assertEquals(NOW, settings.collectionsRepairAt(), "a date in the past is never moved")
+        repairer({ FakePage { watched() } }, now = NOW + DAY).repair(WebGraphQl.SAVED_COLLECTIONS)
+        assertEquals(1, pagesCreated, "a day after the clamp, not a day after the future date")
     }
 
     @Test
@@ -217,7 +233,8 @@ class QueryRepairerTest {
             assertEquals(reply, repaired.reply.body)
             assertFalse(repaired.reply.redirected)
         }
-        assertEquals(List(3) { listOf("repair: start", "repair: learned new id") }.flatten(), lines)
+        // Nothing is learned here: the client parses the reply, and only the engine says "learned new id", once it has.
+        assertEquals(List(3) { "repair: start" }, lines)
     }
 
     /** A body the page could not read stays unreadable: the client classifies it, and learns nothing from it. */
@@ -284,6 +301,38 @@ class QueryRepairerTest {
         }
     }
 
+    /** C-M4: a page that fails to destroy (a WebView whose renderer is gone, say) never hides how the watch ended. */
+    @Test
+    fun aDestroyThatThrowsKeepsTheOutcome() = runTest {
+        class BrokenDestroy(answer: suspend () -> WatchedQuery?) : RepairPage {
+            private val page = FakePage(answer)
+            var destroys = 0
+
+            override suspend fun watch(url: String, friendlyName: String, timeoutMs: Long) = page.watch(url, friendlyName, timeoutMs)
+
+            override fun destroy() {
+                destroys++
+                throw IllegalStateException("the renderer is gone")
+            }
+        }
+        val good = BrokenDestroy { watched() }
+        assertEquals("777", repairer({ good }).repair(WebGraphQl.SAVED_COLLECTIONS).docId)
+        assertEquals(1, good.destroys)
+
+        val endings = listOf<Pair<suspend () -> WatchedQuery?, (Throwable?) -> Boolean>>(
+            Pair({ null }, { it is InstagramException.RepairFailed && it.message!!.endsWith(": no query") }),
+            Pair({ throw PageHttpError(429) }, { it is InstagramException.RateLimited }),
+            Pair({ throw RepairLanding.Login }, { it is InstagramException.LoginRequired }),
+        )
+        for ((answer, check) in endings) {
+            settings.setCollectionsRepairAt(null)
+            val page = BrokenDestroy(answer)
+            val thrown = runCatching { repairer({ page }).repair(WebGraphQl.SAVED_COLLECTIONS) }.exceptionOrNull()
+            assertTrue(check(thrown), "got $thrown")
+            assertEquals(1, page.destroys)
+        }
+    }
+
     @Test
     fun aCancelledRepairStillDestroysItsPageAndIsNotAFailure() = runTest {
         val watching = CompletableDeferred<Unit>()
@@ -341,13 +390,29 @@ class QueryRepairerTest {
         repairer({ FakePage { WatchedQuery("123456789", 200, secretBody) } }).repair(WebGraphQl.SAVED_COLLECTIONS)
         settings.setCollectionsRepairAt(null)
         runCatching { repairer({ FakePage { WatchedQuery("123456789", 404, secretBody) } }).repair(WebGraphQl.SAVED_COLLECTIONS) }
-        val allowed = Regex("""repair: (start|learned new id|failed \((limit|no handle|http \d{3}|login page|challenge page|no query|page error)\))""")
+        val allowed = Regex("""repair: (start|failed \((limit|no handle|http \d{3}|login page|challenge page|no query|page error)\))""")
         assertTrue(lines.isNotEmpty() && lines.all(allowed::matches), "$lines")
         for (secret in listOf("123456789", handle, "private", "instagram.com")) assertFalse(lines.any { secret in it }, secret)
+    }
+
+    /**
+     * D-C1: the Saved page's URL is `:instagram`'s ([io.github.yuriimurha.reels.instagram.web.WebEndpoints.savedPage]), so the
+     * repairer spells no Instagram URL, path or handle rule of its own (repo CLAUDE.md: Instagram's endpoints live in one module).
+     */
+    @Test
+    fun theRepairerBuildsNoInstagramUrlOfItsOwn() {
+        val file = File("src/main/kotlin/io/github/yuriimurha/reels/sync/QueryRepairer.kt")
+        assertTrue(file.isFile, "unit tests must run from the app module directory")
+        val code = KotlinSource.code(file.readText())
+        assertEquals(1, Regex("""WebEndpoints\.savedPage\(""").findAll(code).count(), "the URL comes from WebEndpoints.savedPage")
+        for (banned in listOf("HOME_URL", "saved/", "instagram.com", "Regex(", "A-Za-z")) {
+            assertFalse(banned in code, "QueryRepairer.kt spells `$banned`")
+        }
     }
 
     private companion object {
         const val NOW = 1_800_000_000_000L
         const val HOUR = 3_600_000L
+        const val DAY = 86_400_000L
     }
 }

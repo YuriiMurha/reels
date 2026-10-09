@@ -350,7 +350,11 @@ class WebParsersTest {
         assertEquals("3100000000000000009", alphaWithCover("3100000000000000009"))
     }
 
-    /** Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. */
+    /**
+     * Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. R17: a 2xx
+     * JSON reply without `data.viewer` is stale with or without `errors`, so a doc id that names another query (planted, say)
+     * is repaired within a day instead of being sent again on every sync.
+     */
     @Test
     fun classifySavedCollectionsCallsFactStalesReplyAStaleQuery() {
         val stale = listOf(
@@ -359,6 +363,14 @@ class WebParsersTest {
             graphQl("""{"errors":[{"message":"x"}],"data":{}}"""),
             graphQl("""{"errors":[{"message":"x"}],"data":null,"status":"fail"}"""),
             graphQl("for (;;);" + """{"errors":[{"message":"x","summary":"y","description":"z"}],"data":null}"""),
+            // R17: no errors at all.
+            graphQl("""{"data":{}}"""),
+            graphQl("""{"data":null}"""),
+            graphQl("{}"),
+            graphQl("""{"errors":[]}"""),
+            graphQl("""{"data":{"other_query_root":{"edges":[]}}}"""),
+            graphQl("""{"status":"fail"}"""),
+            graphQl("""{"data":{}}""", code = 204),
             graphQl("<html><body>Sorry, this page isn't available.</body></html>", code = 404, contentType = "text/html"),
             graphQl("Bad request", code = 400, contentType = "text/plain"),
         )
@@ -439,9 +451,10 @@ class WebParsersTest {
         assertNull(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"x"}],""" + reply(alpha).removePrefix("{"))))
     }
 
+    /** The query ran (`data.viewer` is there) but gave no root and no error: a reply of another shape, never stale (R12, R17). */
     @Test
-    fun classifySavedCollectionsCallsDataWithoutTheRootOrErrorsAShapeChange() {
-        for (body in listOf("""{"data":{"viewer":{}}}""", """{"data":{"viewer":null}}""", """{"data":{}}""", "{}", """{"errors":[]}""")) {
+    fun classifySavedCollectionsCallsAViewerWithoutTheRootOrErrorsAShapeChange() {
+        for (body in listOf("""{"data":{"viewer":{}}}""", """{"data":{"viewer":null}}""", """{"data":{"viewer":{"other":1}},"errors":[]}""")) {
             assertEquals(
                 "data.viewer.collections_unified_with_auto_collections",
                 assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl(body)), body).fieldPath,

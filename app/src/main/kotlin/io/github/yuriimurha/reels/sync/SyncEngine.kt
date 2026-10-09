@@ -267,18 +267,27 @@ class SyncEngine(
     /**
      * The run's one repair of the names query: through [call] like any request (one run-budget unit, inside the Pacer's gate, so
      * never during a cooldown nor under a session that is gone), but never retried, since a second attempt could only be
-     * refused by the repair's own 24 h limit. Null when it gave no names: refused or failed ([InstagramException.RepairUnavailable]),
-     * a reply of the site's own that is itself stale (nothing was learned), or one that failed for a moment. Anything else (a
-     * rate limit, a login or challenge page, a reply of another shape) goes on as from any request.
+     * refused by the repair's own 24 h limit. Null when it gave no names: refused or failed ([InstagramException.RepairUnavailable],
+     * which the repairer logs itself), or a reply of the site's own that the client could not use, so it learned nothing from it:
+     * itself stale, failed for a moment, or (R14) of another shape. A rate limit, a login or a challenge page goes on as from any
+     * request. Debug log: `repair: learned new id` once the client returns, i.e. once it has parsed the reply and kept its doc id
+     * (D-I2), else `repair: failed (reply stale|reply transient|shape <field path>)`; the path holds field names and indices only.
      */
     private suspend fun repairCollections(progress: Progress): Page<RemoteCollection>? = try {
-        call(progress, retry = false) { client.repairCollections() }
+        call(progress, retry = false) { client.repairCollections().also { log?.invoke("repair: learned new id") } }
     } catch (e: InstagramException.RepairUnavailable) {
         null
     } catch (e: InstagramException.StaleQuery) {
-        null
+        unusableRepair("reply stale")
     } catch (e: InstagramException.Transient) {
-        null
+        unusableRepair("reply transient")
+    } catch (e: InstagramException.ShapeChanged) {
+        unusableRepair("shape ${e.fieldPath}")
+    }
+
+    private fun unusableRepair(reason: String): Nothing? {
+        log?.invoke("repair: failed ($reason)")
+        return null
     }
 
     /**
@@ -319,13 +328,21 @@ class SyncEngine(
      * Only while the names are the last good ones ([fetchCollections]): a collection an item is saved in that was never named
      * gets a [placeholderName] numbered one past the highest live placeholder (so numbering goes on across runs, in the order
      * the feed first shows them), placed after the last collection, and is [known] from then on, so its memberships are
-     * written like any other's. A later good listing gives it the website's name.
+     * written like any other's. A later good listing gives it the website's name. One a good listing marked removed is not
+     * new: its row comes back (cover kept) under the name it had, unless that is a placeholder name a live collection has
+     * taken since, which is numbered afresh, so no two collections share one.
      */
     private suspend fun addPlaceholder(id: String, known: MutableSet<String>) {
         val live = collectionDao.liveCollectionsNow()
         val number = (live.mapNotNull { placeholderNumber(it.name) }.maxOrNull() ?: 0) + 1
         val position = (live.maxOfOrNull { it.position } ?: -1) + 1
-        collectionDao.upsert(listOf(CollectionEntity(id, placeholderName(number), coverPk = null, position = position)))
+        val removed = collectionDao.collection(id)?.takeIf { it.removedAt != null }
+        val storedName = removed?.name?.takeUnless { name -> placeholderNumber(name) != null && live.any { it.name == name } }
+        collectionDao.upsert(
+            listOf(
+                CollectionEntity(id, storedName ?: placeholderName(number), coverPk = removed?.coverPk, position = position),
+            ),
+        )
         known += id
     }
 

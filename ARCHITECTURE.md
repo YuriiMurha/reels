@@ -39,8 +39,9 @@ A debug build starts in Mock mode (the fake library); a release build always use
 ## How it fits together
 
 - `:instagram` (pure Kotlin/JVM) is the only place that knows Instagram: endpoints, header constants, pagination, JSON
-  fields. `:app` reaches it through the `InstagramClient` contract; it builds no Instagram URL and parses no Instagram
-  JSON, and the hidden page's landing rule (which paths mean "log in" or "verify") is `WebEndpoints.landingOf`. A few small
+  fields. `:app` reaches it through the `InstagramClient` contract; it builds no Instagram URL (the repair page's Saved URL
+  is `WebEndpoints.savedPage`, with the handle rule) and parses no Instagram JSON, and the hidden page's landing rule (which
+  paths mean "log in" or "verify") is `WebEndpoints.landingOf`. A few small
   things in `:app` do repeat Instagram's names, as named exceptions:
   - `ig_fetch.js` (the hidden page's script): the three constant header values, which `WebViewTransportTest` pins to
     `WebHeaders`, and the names it needs to build the site's own request, the header names, the `csrftoken` cookie and the
@@ -219,7 +220,8 @@ Pure Kotlin/JVM.
   application ones: only a network interceptor sees a 503 or a 421 before OkHttp's own follow-up logic can re-send it, and
   the MockWebServer test of the 421 cannot tell the difference (its 421 is not on a coalesced connection).
 - **Where Instagram strings live.** `WebEndpoints` owns every Instagram URL and host the app needs (the home and login
-  pages, the API base and each endpoint, the login host allowlist and its dot-boundary matcher `isLoginPage`) and `WebSessionCookies` the
+  pages, the API base and each endpoint, the account's own Saved page the repair loads, `savedPage(handle)`, which is null for
+  a handle not of Instagram's shape, the login host allowlist and its dot-boundary matcher `isLoginPage`) and `WebSessionCookies` the
   exact Set-Cookie values and origin for a pasted session and its rollback, so `:app` spells no Instagram URL or cookie
   attribute out.
 - **`ErrorClassifier`** maps one response to a typed failure, in this precedence:

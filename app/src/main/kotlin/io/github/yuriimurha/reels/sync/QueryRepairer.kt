@@ -25,12 +25,14 @@ import kotlin.coroutines.cancellation.CancellationException
  *
  * **In this order:**
  * 1. The limit: at most one attempt per [REPAIR_INTERVAL_MS], kept in [settings] (`collections_repair_at`). A last attempt less
- *    than a day ago, or dated in the future (a clock set back), refuses with [InstagramException.RepairSkipped]: no page.
- * 2. The account's own [handle], only of Instagram's shape ([HANDLE], and not dots alone): nothing else ever goes into the URL.
- *    None, or any other shape, refuses with [InstagramException.RepairSkipped] and no page.
+ *    than a day ago refuses with [InstagramException.RepairSkipped]: no page. One dated in the future (a clock set back) refuses
+ *    too, and is moved back to now first, so the next attempt waits a day from now and never longer.
+ * 2. The account's own Saved page, from its [handle] ([WebEndpoints.savedPage], which takes only a handle of Instagram's shape):
+ *    no handle, or one of any other shape, refuses with [InstagramException.RepairSkipped] and no page.
  * 3. The attempt is recorded before anything loads, so a repair that crashes half way still counts against the limit.
- * 4. One page, made on [main] (a WebView is main-thread only), loads `<home>/<handle>/saved/` and watches for at most
- *    [REPAIR_TIMEOUT_MS] (the load included); it is destroyed however the watch ends, cancellation included.
+ * 4. One page, made on [main] (a WebView is main-thread only), loads that Saved page and watches for at most
+ *    [REPAIR_TIMEOUT_MS] (the load included); it is destroyed however the watch ends, cancellation included, and a destroy that
+ *    throws never hides how the watch ended.
  *
  * **What the watch's ending means:** the site's own reply with a 2xx status is a [RepairedQuery] (the caller parses it and only
  * then learns the id). A 429, as an error page or as the watched reply, is [InstagramException.RateLimited], so the Pacer arms
@@ -38,9 +40,10 @@ import kotlin.coroutines.cancellation.CancellationException
  * (no URL). Anything else is [InstagramException.RepairFailed]: another error status (nothing is learned from one), no request
  * seen in time, or a page that failed or could not be made at all (a WebView without desktop mode refuses to construct).
  *
- * **Debug log** ([log], debug builds only): `repair: start`, `repair: learned new id` or `repair: failed (<reason>)`, the reason
- * one of `limit`, `no handle`, `http <code>`, `login page`, `challenge page`, `no query`, `page error`. Never the doc id, the
- * handle, the URL or anything of a reply.
+ * **Debug log** ([log], debug builds only): `repair: start`, or `repair: failed (<reason>)`, the reason one of `limit`,
+ * `no handle`, `http <code>`, `login page`, `challenge page`, `no query`, `page error`. Never the doc id, the handle, the URL or
+ * anything of a reply. `repair: learned new id` is not this class's to say: the sync engine says it once the client has parsed
+ * the reply and kept its id (D-I2).
  */
 class QueryRepairer(
     private val settings: SettingsStore,
@@ -52,13 +55,19 @@ class QueryRepairer(
     private val log: ((String) -> Unit)? = null,
 ) : QueryRepair {
     override suspend fun repair(query: GraphQlQuery): RepairedQuery {
+        val now = now()
         val last = settings.collectionsRepairAt()
-        if (last != null && now() - last < REPAIR_INTERVAL_MS) fail("limit", InstagramException.RepairSkipped("limit"))
-        val handle = handle()?.takeIf(::isHandle) ?: fail("no handle", InstagramException.RepairSkipped("no handle"))
-        settings.setCollectionsRepairAt(now())
+        if (last != null && last > now) {
+            // A clock set back: the limit counts from now, so it never stalls repairs for longer than a day.
+            settings.setCollectionsRepairAt(now)
+            fail("limit", InstagramException.RepairSkipped("limit"))
+        }
+        if (last != null && now - last < REPAIR_INTERVAL_MS) fail("limit", InstagramException.RepairSkipped("limit"))
+        val url = handle()?.let { WebEndpoints.savedPage(it) } ?: fail("no handle", InstagramException.RepairSkipped("no handle"))
+        settings.setCollectionsRepairAt(now)
         log?.invoke("repair: start")
         val outcome = try {
-            withContext(main) { watch(WebEndpoints.HOME_URL + "$handle/saved/", query) }
+            withContext(main) { watch(url, query) }
         } catch (e: PageHttpError) {
             throw httpError(e.code)
         } catch (e: RepairLanding) {
@@ -76,7 +85,6 @@ class QueryRepairer(
         }
         val watched = outcome ?: fail("no query", InstagramException.RepairFailed("no query"))
         if (watched.code !in 200..299) throw httpError(watched.code)
-        log?.invoke("repair: learned new id")
         return RepairedQuery(watched.docId, RawReply(watched.code, contentType = null, body = watched.body))
     }
 
@@ -86,7 +94,9 @@ class QueryRepairer(
         try {
             return page.watch(url, query.friendlyName, REPAIR_TIMEOUT_MS)
         } finally {
-            page.destroy()
+            // A page that fails to destroy (its renderer gone, say) is unreachable from here anyway; never let that hide the
+            // watch's own outcome.
+            runCatching { page.destroy() }
         }
     }
 
@@ -101,17 +111,11 @@ class QueryRepairer(
         throw failure
     }
 
-    /** Instagram's handle shape, and never only dots (`.` and `..` are path segments, not a profile). */
-    private fun isHandle(value: String): Boolean = HANDLE.matches(value) && value.any { it != '.' }
-
     companion object {
         /** At most one repair per this long (spec 2026-10-09 §3.3). */
         const val REPAIR_INTERVAL_MS = 86_400_000L
 
         /** A repair's whole watch, the page load included. */
         const val REPAIR_TIMEOUT_MS = 45_000L
-
-        /** An Instagram handle: letters, digits, `.` and `_`, 1 to 30 of them. */
-        private val HANDLE = Regex("[A-Za-z0-9._]{1,30}")
     }
 }
