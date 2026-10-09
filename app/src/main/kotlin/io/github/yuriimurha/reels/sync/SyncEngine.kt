@@ -313,7 +313,7 @@ class SyncEngine(
 
     /** Why a repaired reply was of no use, for the debug log: a kind, or a shape change's path (field names and indices only). */
     private fun replyFailure(e: InstagramException): String = when (e) {
-        is InstagramException.StaleQuery -> "reply stale"
+        is InstagramException.StaleQuery -> "reply stale" + (e.detail?.let { ", $it" } ?: "")
         is InstagramException.Transient -> "reply transient"
         is InstagramException.ShapeChanged -> "shape ${e.fieldPath}"
         is InstagramException.RateLimited -> "reply rate limit"

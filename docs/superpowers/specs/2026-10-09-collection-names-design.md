@@ -171,8 +171,9 @@ result):
   Forget is off while a run is RUNNING.
 - **R22.** R17 stays: a 2xx that is no GraphQL reply (no `data` key, no GraphQL `errors`: an error envelope, a bare status)
   is still stale, since it may be how the site answers an outdated id and stopping every sync would be worse than one repair
-  a day; the `StaleQuery` and the log now say so (`not graphql`, `http <code>`). A plain-string `errors` entry is read for
-  the rate-limit, login and challenge markers too. A repaired reply that reports a rate limit, a logout or a challenge logs
+  a day; the `StaleQuery` and the log now say so (`not graphql`, `http <code>`). The reply's other error text (a plain-string `errors`
+  entry, an `errors` that is a string or one object, an envelope's `errorSummary`/`errorDescription`) is read for the
+  rate-limit, login and challenge markers too. A repaired reply that reports a rate limit, a logout or a challenge logs
   `repair: failed (reply rate limit|reply login|reply challenge)` before the run stops.
 - **Phone facts (5).** The rollout settles AUTO and a real repair. STALE stays assumed (Forget sends no wrong id any more,
   R18), and CURSOR stays unverified until the account has more than 12 collection edges, the automatic ones included.

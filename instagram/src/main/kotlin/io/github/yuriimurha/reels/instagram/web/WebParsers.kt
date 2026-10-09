@@ -24,7 +24,7 @@ internal object WebParsers {
     /** What the website puts before some JSON replies so they can't be run as a script. It is not part of the JSON. */
     private const val FOR_LOOP_GUARD = "for (;;);"
 
-    /** HTTP statuses whose non-JSON reply fact STALE reads as a stale query ([isStale]). */
+    /** HTTP statuses whose non-JSON reply fact STALE reads as a stale query ([staleQuery]). */
     private val STALE_HTTP_CODES = setOf(400, 404)
 
     /** [body] without a leading [FOR_LOOP_GUARD]. */
@@ -48,14 +48,27 @@ internal object WebParsers {
     private fun graphQlErrors(json: JsonObject?): List<JsonObject> =
         (json?.get("errors") as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
 
-    /** The entries of the reply's `errors` array that are plain strings (R22): no GraphQL error object, but a message all the same. */
-    private fun stringErrors(json: JsonObject?): List<String> =
-        (json?.get("errors") as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
+    /**
+     * R22: the reply's other error text, no GraphQL error object but a message all the same: the `errors` array's plain-string
+     * entries, an `errors` that is a bare string or a single object (its `message`, `summary`, `description`), and an error
+     * envelope's own `errorSummary` and `errorDescription`.
+     */
+    private fun otherErrorTexts(json: JsonObject?): List<String> {
+        if (json == null) return emptyList()
+        val errors = json["errors"]
+        val inErrors = when (errors) {
+            is JsonArray -> errors.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
+            is JsonObject -> listOfNotNull(errors.string("message"), errors.string("summary"), errors.string("description"))
+            is JsonPrimitive -> listOfNotNull(errors.takeIf { it.isString }?.content)
+            else -> emptyList()
+        }
+        return inErrors + listOfNotNull(json.string("errorSummary"), json.string("errorDescription"))
+    }
 
     /**
      * R12 (a): what the reply's own GraphQL errors say, read like any reply's message ([ErrorClassifier.markedFailure] over each
      * entry's `message`, `summary`, `description` and, as [ErrorClassifier.classify] reads a reply, `error_type`; and, R22, over
-     * an entry that is a plain string): a challenge, a rate limit or a logout reported in the body of a 2xx.
+     * the reply's other error text, [otherErrorTexts]): a challenge, a rate limit or a logout reported in the body of a 2xx.
      */
     private fun inBandFailure(errors: List<JsonObject>, strings: List<String>): InstagramException? =
         ErrorClassifier.markedFailure(
@@ -108,7 +121,7 @@ internal object WebParsers {
         if (classified != null && classified !is ShapeChanged) return classified
         val json = body?.let(::parseObject)
         val errors = graphQlErrors(json)
-        inBandFailure(errors, stringErrors(json))?.let { return it }
+        inBandFailure(errors, otherErrorTexts(json))?.let { return it }
         staleQuery(reply.code, classified, json, errors)?.let { return it }
         val root = json?.let(::savedCollectionsRoot)
         if (reply.code in 200..299 && json != null && queryRan(json) && root == null && errors.isNotEmpty()) {

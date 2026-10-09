@@ -427,6 +427,33 @@ class WebParsersTest {
         )
     }
 
+    /**
+     * R22: an error envelope's own text (`errorSummary`, `errorDescription`), and an `errors` that is a bare string or a single
+     * object, are read for the same markers: a throttle, a logout or a challenge sent that way keeps its meaning, never a repair.
+     */
+    @Test
+    fun anEnvelopesOwnTextKeepsItsMeaning() {
+        val wait = "Please wait a few minutes before you try again."
+        for (body in listOf(
+            "for (;;);" + """{"__ar":1,"error":1675004,"errorSummary":"Rate limit exceeded","errorDescription":"$wait"}""",
+            """{"error":1,"errorSummary":"$wait"}""",
+            """{"errors":"$wait"}""",
+            """{"errors":{"message":"$wait"}}""",
+            """{"errors":{"description":"$wait"},"data":null}""",
+        )) {
+            assertIs<InstagramException.RateLimited>(WebParsers.classifySavedCollections(graphQl(body)), body)
+        }
+        assertIs<InstagramException.LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"error":1357001,"errorSummary":"login_required"}""")))
+        assertIs<InstagramException.ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"errors":{"message":"challenge_required"}}""")))
+        assertEquals(
+            "not graphql",
+            assertIs<InstagramException.StaleQuery>(
+                WebParsers.classifySavedCollections(graphQl("""{"error":1675030,"errorSummary":"Query error","errorDescription":"Error performing query."}""")),
+            ).detail,
+            "an envelope whose text names nothing known stays a stale query",
+        )
+    }
+
     /** R12 (a): an `errors` entry that names a rate limit, a logout or a challenge is that, never a stale query. */
     @Test
     fun anInBandRateLimitLoginOrChallengeKeepsItsMeaning() {

@@ -1608,6 +1608,7 @@ class SyncEngineTest {
         )) {
             signals.events.clear()
             namesStale.clear()
+            engineLog.clear()
             val client = ScriptedNames(smallClient())
             client.staleAt = setOf(null)
             client.repair = { throw case.failure }
@@ -1615,6 +1616,10 @@ class SyncEngineTest {
             client.failureIsTheReplys = case.failure is InstagramException.ShapeChanged
 
             val run = runSync(engine(client), SyncMode.QUICK)
+
+            // The repairer logs its page's own landing; the engine adds a line only for the site's reply.
+            val replyLine = (case.failure as? InstagramException.ShapeChanged)?.let { "repair: failed (shape ${it.fieldPath})" }
+            assertEquals(listOfNotNull("collections query stale", replyLine), engineLog, "${case.failure}")
 
             assertEquals(case.status, run.status, "${case.failure}")
             assertEquals(case.error, run.lastError)
@@ -2070,6 +2075,7 @@ class SyncEngineTest {
         for (case in listOf(
             Case(site.reply(), "repair: learned new id", "777", notice = false),
             Case(stale, "repair: failed (reply stale)", null, notice = true),
+            Case("""{"error":1675030,"errorSummary":"Query error"}""", "repair: failed (reply stale, not graphql)", null, notice = true),
             Case(noEdges, "repair: failed (shape edges)", null, notice = true),
             Case(null, "repair: failed (reply transient)", null, notice = true),
         )) {

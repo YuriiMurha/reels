@@ -625,7 +625,8 @@ current one from the site itself, on the phone, with no rebuild.
   1. the rule of every reply (`classifyReply`): a challenge, a rate limit, a logout, a redirect or a network problem keeps its
      meaning;
   2. the same markers inside the reply's GraphQL `errors` entries (`message`, `summary`, `description` and `error_type`, the
-     last read as `ErrorClassifier.classify` reads a reply's; R22: and an entry that is a plain string), so a throttled 200 is
+     last read as `ErrorClassifier.classify` reads a reply's; R22: and the reply's other error text, a plain-string entry, an
+     `errors` that is a bare string or one object, an envelope's `errorSummary` and `errorDescription`), so a throttled 200 is
      `RateLimited` and a login or challenge reported in the body keeps its meaning too, never a repair;
   3. a stale query, `StaleQuery` (it carries the friendly name, and no doc id): a 2xx JSON reply without `data.viewer` (`data`
      null, absent, empty or another query's), with `errors` or without them (R17: so a doc id that names another persisted
@@ -757,7 +758,7 @@ current one from the site itself, on the phone, with no rebuild.
   `collections query forced` when Forget armed the repair, then the repairer's `repair: start` or `repair: failed (<reason>)`
   (`limit`, `no handle`, `http <code>`, `login page`, `challenge page`, `no query`, `page error`), and the engine's
   `repair: learned new id` once the client has parsed the site's reply and kept its id (D-I2: never before), or, when the
-  client could not use it, `repair: failed (reply stale)`, `repair: failed (reply transient)`,
+  client could not use it, `repair: failed (reply stale)` (`reply stale, not graphql` for an envelope), `repair: failed (reply transient)`,
   `repair: failed (shape <field path>)` (field names and indices only), or, for a reply that itself reports a rate limit, a
   logout or a challenge (R12, in its GraphQL `errors`; the run then stops with its banner), `repair: failed (reply rate
   limit)`, `repair: failed (reply login)` or `repair: failed (reply challenge)`. The client hands the engine only its reply's
