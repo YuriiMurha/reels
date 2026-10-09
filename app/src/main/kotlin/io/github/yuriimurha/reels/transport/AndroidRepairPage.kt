@@ -51,6 +51,9 @@ import kotlin.math.roundToInt
  * path it moved to by itself (`pushState`), else `null`. A page whose renderer died stays dead: a later watch fails at once.
  * The page goes nowhere but [allowedOrigin].
  *
+ * R16: its chrome client is [HiddenPageChromeClient], as on [AndroidWebPage]: the site's own console (this page's URL holds the
+ * owner's handle, and the site logs signed CDN URLs) never reaches the system log.
+ *
  * Throws on construction when this WebView cannot do any of it (`USER_AGENT_METADATA`, `USER_AGENT_METADATA_FORM_FACTORS`,
  * `DOCUMENT_START_SCRIPT` or `WEB_MESSAGE_LISTENER` unsupported, or its version unknown) or cannot be created at all.
  *
@@ -71,6 +74,7 @@ class AndroidRepairPage(
     init {
         try {
             enableScripting()
+            webView.webChromeClient = HiddenPageChromeClient()
             enterDesktopMode(context)
             val script = context.applicationContext.assets.open(SCRIPT).bufferedReader().use { it.readText() }
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {

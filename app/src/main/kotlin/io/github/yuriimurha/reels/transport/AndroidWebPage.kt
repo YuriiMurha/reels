@@ -35,6 +35,9 @@ import java.io.IOException
  * A main-frame document answered with an HTTP error (a 429 page, a 503) fails [load] with [PageHttpError], and a dead
  * renderer ([WebViewClient.onRenderProcessGone]) marks the page gone: [currentUrl] is null and [onGone] fires.
  *
+ * R16: its chrome client is [HiddenPageChromeClient], so the site's own console never reaches the system log and its dialogs
+ * and permission requests are cancelled or denied on purpose.
+ *
  * Throws on construction when this WebView can't post messages (`WEB_MESSAGE_LISTENER` unsupported) or can't be created at
  * all (no WebView provider); [WebViewTransport] turns either into `Transient`.
  *
@@ -54,6 +57,7 @@ class AndroidWebPage(
     init {
         try {
             enableScripting()
+            webView.webChromeClient = HiddenPageChromeClient()
             if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
                 // Installed before any load, so the page has window.igBridge from its first script on.
                 WebViewCompat.addWebMessageListener(webView, BRIDGE, setOf(allowedOrigin)) { _, message, sourceOrigin, isMainFrame, _ ->

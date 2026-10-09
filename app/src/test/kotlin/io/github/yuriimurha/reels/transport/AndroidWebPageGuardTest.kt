@@ -67,6 +67,33 @@ class AndroidWebPageGuardTest {
         assertChannelIsClosed(source())
     }
 
+    /** R16: the hidden pages' one chrome client keeps the site's console out of logcat and answers its dialogs on purpose. */
+    @Test
+    fun theHiddenPagesChromeClientIsQuiet() {
+        ChromeClientPin.assertQuietClient(ChromeClientPin.clientSource())
+    }
+
+    /** R16: this page installs it, in its init, before any load. */
+    @Test
+    fun thePageInstallsTheQuietChromeClient() {
+        ChromeClientPin.assertInstalled(source(), "AndroidWebPage.kt")
+    }
+
+    /** The two pins above fail for each way of making the console loud again, on mutants of the real sources. */
+    @Test
+    fun eachWayOfMakingThePageLoudFailsItsPin() {
+        val client = ChromeClientPin.clientSource()
+        for ((what, mutant) in ChromeClientPin.clientMutants(client)) {
+            assertTrue(mutant != client, "the mutant '$what' did not change the source")
+            assertFailsWith<AssertionError>(what) { ChromeClientPin.assertQuietClient(mutant) }
+        }
+        val page = source()
+        for ((what, mutant) in ChromeClientPin.pageMutants(page)) {
+            assertTrue(mutant != page, "the mutant '$what' did not change the source")
+            assertFailsWith<AssertionError>(what) { ChromeClientPin.assertInstalled(mutant, "AndroidWebPage.kt") }
+        }
+    }
+
     /** The scan itself: the guard really fails for each way of opening the channel, so a pass above means something. */
     @Test
     fun eachWayOfOpeningTheChannelFailsThePin() {

@@ -182,6 +182,21 @@ class RepairPageGuardTest {
         assertOriginIsTheAdaptersOwn(page())
     }
 
+    /**
+     * R16: the repair page loads the owner's own Saved page (its URL holds the handle) and the site logs signed CDN URLs: it
+     * installs the same quiet chrome client as the transport's page ([ChromeClientPin]; the class itself is pinned in
+     * [AndroidWebPageGuardTest]), in its init, before any load.
+     */
+    @Test
+    fun thePageInstallsTheQuietChromeClient() {
+        ChromeClientPin.assertInstalled(page(), "AndroidRepairPage.kt")
+        val real = page()
+        for ((what, mutant) in ChromeClientPin.pageMutants(real)) {
+            assertTrue(mutant != real, "the mutant '$what' did not change the source")
+            assertFailsWith<AssertionError>(what) { ChromeClientPin.assertInstalled(mutant, "AndroidRepairPage.kt") }
+        }
+    }
+
     /** The page pins themselves, on mutants made from the real source: each fails the pin it is aimed at, checked alone. */
     @Test
     fun eachWayOfOpeningThePageFailsItsPin() {
