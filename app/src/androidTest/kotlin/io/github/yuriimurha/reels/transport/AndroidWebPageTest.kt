@@ -478,8 +478,8 @@ class AndroidWebPageTest {
     }
 
     /**
-     * A page without both tokens sends nothing: the call is `Transient` with no request made, and the page is dropped (the next
-     * call loads the home page again).
+     * A page without both tokens sends nothing: the call is `QueryNotSent` with no request made (R20: never retried), and the page
+     * is kept (a GET needs no tokens), so the next call loads nothing again.
      */
     @Test
     fun aPageWithoutTokensSendsNothing() {
@@ -495,13 +495,13 @@ class AndroidWebPageTest {
             val transport = transport(site)
 
             val first = runBlocking { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}") } }
-            assertTrue("$what: expected Transient: $first", first.exceptionOrNull() is InstagramException.Transient)
+            assertTrue("$what: expected QueryNotSent: $first", first.exceptionOrNull() is InstagramException.QueryNotSent)
             val second = runBlocking { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}") } }
-            assertTrue("$what: expected Transient: $second", second.exceptionOrNull() is InstagramException.Transient)
+            assertTrue("$what: expected QueryNotSent: $second", second.exceptionOrNull() is InstagramException.QueryNotSent)
 
             assertEquals("$what: no POST was made", emptyList<RecordedRequest>(), site.requests().filter { it.method == "POST" })
             assertEquals("$what: nothing reached the GraphQL path", 0, site.requestsTo(GRAPHQL).size)
-            assertEquals("$what: the page was dropped, so the second call loaded the site again", 2, site.requestsTo("/").size)
+            assertEquals("$what: the page was kept, so the second call loaded nothing", 1, site.requestsTo("/").size)
             runBlocking { transport.reset() } // this round's page; tearDown resets only the last transport
         }
     }

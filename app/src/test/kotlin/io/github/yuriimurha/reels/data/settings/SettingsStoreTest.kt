@@ -1,5 +1,6 @@
 package io.github.yuriimurha.reels.data.settings
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -177,23 +178,49 @@ class SettingsStoreTest {
     }
 
     /**
-     * "Forget collections query id": the stored id becomes "0" (digits, so it is sent, and never one the site runs, so the next
-     * use is stale and repairs), and the repair limit is cleared, so that repair is not refused by the last one's 24 h.
+     * R18/R21: "Forget collections query id" arms one forced repair (`collections_force_repair`) and clears the repair limit, in
+     * ONE edit, so that repair is not refused by the last one's 24 h. It never stores a made-up id: the doc id in use is
+     * untouched until a repair learns a new one, and nothing depends on how Instagram answers a wrong one.
      */
     @Test
-    fun forgettingTheCollectionsQueryIdStoresZeroAndClearsTheRepairLimit() = runTest {
+    fun forgetArmsOneForcedRepairAndClearsTheRepairLimitInOneEdit() = runTest {
         val file = File(tmp.root, "settings.preferences_pb")
-        val settings = open(file, now = 1L)
+        val edits = CountingStore(PreferenceDataStoreFactory.create(scope = scope) { file })
+        val settings = SettingsStore(edits)
         val name = WebGraphQl.SAVED_COLLECTIONS.friendlyName
         settings.setGraphqlDocId(name, "777")
         settings.setCollectionsRepairAt(5_000L)
+        assertEquals(false, settings.collectionsForceRepair(), "not armed until Forget")
+        edits.updates = 0
 
         settings.forgetCollectionsQueryId()
 
-        assertEquals("0", settings.graphqlDocId(name))
-        assertEquals("0", SettingsDocIdStore(settings).docId(WebGraphQl.SAVED_COLLECTIONS), "the id the next query is sent with")
+        assertEquals(1, edits.updates, "one atomic edit")
+        assertEquals(true, settings.collectionsForceRepair())
         assertNull(settings.collectionsRepairAt())
-        assertEquals(setOf(stringPreferencesKey("graphql_doc_$name")), readKeys(file), "nothing else is written")
+        assertEquals("777", settings.graphqlDocId(name), "the id in use is untouched")
+        assertEquals("777", SettingsDocIdStore(settings).docId(WebGraphQl.SAVED_COLLECTIONS))
+        assertEquals(
+            setOf(stringPreferencesKey("graphql_doc_$name"), booleanPreferencesKey("collections_force_repair")),
+            readKeys(file),
+            "on disk as collections_force_repair, and nothing else is written",
+        )
+
+        settings.clearCollectionsForceRepair()
+        assertEquals(false, settings.collectionsForceRepair(), "a one-shot")
+        assertEquals(setOf(stringPreferencesKey("graphql_doc_$name")), readKeys(file), "cleared means removed")
+    }
+
+    /** Counts the edits made through it. */
+    private class CountingStore(private val inner: DataStore<Preferences>) : DataStore<Preferences> {
+        var updates = 0
+
+        override val data get() = inner.data
+
+        override suspend fun updateData(transform: suspend (t: Preferences) -> Preferences): Preferences {
+            updates++
+            return inner.updateData(transform)
+        }
     }
 
     @Test

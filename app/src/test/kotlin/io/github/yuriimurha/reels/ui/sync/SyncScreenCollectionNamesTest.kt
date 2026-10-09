@@ -2,6 +2,9 @@ package io.github.yuriimurha.reels.ui.sync
 
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -9,6 +12,9 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.yuriimurha.reels.data.db.SyncMode
+import io.github.yuriimurha.reels.data.db.SyncRunEntity
+import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.settings.SettingsStore
@@ -37,6 +43,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
+import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
@@ -103,18 +110,38 @@ class SyncScreenCollectionNamesTest {
     private fun shown(text: String) = compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
 
     @Test
-    fun theRealBackendOffersForgetAndATapForgets() {
+    fun theRealBackendOffersForgetAndATapArmsOneRepair() {
         runBlocking {
             settings.setGraphqlDocId(query, "777")
             settings.setCollectionsRepairAt(1_000L)
         }
         show(realBackend = true)
         awaitUntil { shown("Forget collections query id") }
+        // On once the latest run has been read (there is none).
+        awaitUntil { compose.onAllNodes(hasText("Forget collections query id") and isEnabled()).fetchSemanticsNodes().isNotEmpty() }
 
         compose.onNodeWithText("Forget collections query id").performScrollTo().assertIsEnabled().performClick()
 
-        awaitUntil { runBlocking { settings.graphqlDocId(query) } == "0" }
+        awaitUntil { runBlocking { settings.collectionsForceRepair() } }
         assertNull(runBlocking { settings.collectionsRepairAt() })
+        assertEquals("777", runBlocking { settings.graphqlDocId(query) }, "no made-up id is stored")
+    }
+
+    /** R21: while the latest run is RUNNING the button is there but off. */
+    @Test
+    fun theForgetButtonIsOffWhileARunIsRunning() {
+        runBlocking {
+            db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = 1L))
+            settings.setCollectionsRepairAt(1_000L)
+        }
+        show(realBackend = true)
+        awaitUntil { shown("Syncing") } // the running run has been read
+
+        compose.onNodeWithText("Forget collections query id").performScrollTo().assertIsNotEnabled().performClick()
+
+        compose.waitForIdle()
+        assertEquals(false, runBlocking { settings.collectionsForceRepair() })
+        assertEquals(1_000L, runBlocking { settings.collectionsRepairAt() }, "the running repair's attempt record is kept")
     }
 
     @Test

@@ -20,6 +20,13 @@ sealed class InstagramException(message: String, cause: Throwable? = null) : Exc
     class StaleQuery(val query: String) : InstagramException("stale query $query")
 
     /**
+     * R20: a GraphQL query the transport could not send at all (the page had no tokens to send it with): nothing went out, so it
+     * says nothing about the doc id or the session. Never retried (it is not [Transient]): the sync falls back to the last names
+     * at once. The reason is a fixed text of the app's own, never a value from a page.
+     */
+    class QueryNotSent(reason: String) : InstagramException("query not sent: $reason")
+
+    /**
      * The collections repair could not run or did not find the query; sync falls back to the last names. The reason is a fixed
      * text of the app's own, never a value from a page or a reply.
      */

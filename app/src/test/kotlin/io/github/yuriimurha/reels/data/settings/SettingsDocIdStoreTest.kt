@@ -55,12 +55,12 @@ class SettingsDocIdStoreTest {
         assertEquals(builtIn, store.docId(query))
     }
 
-    /** Task 5's Forget action stores a digit id known to be wrong: it is sent as it is, so the site rejects it. */
+    /** The store never judges an id of the website's shape: one the site no longer runs is sent as it is, and the site says so. */
     @Test
     fun aStoredDigitIdIsSentEvenWhenItIsWrong() = runTest {
         val settings = settings()
-        settings.setGraphqlDocId(query.friendlyName, "0")
-        assertEquals("0", SettingsDocIdStore(settings).docId(query))
+        settings.setGraphqlDocId(query.friendlyName, "1")
+        assertEquals("1", SettingsDocIdStore(settings).docId(query))
     }
 
     /** R8: both transports refuse a doc id that is not digits, so one must never be answered (or stored). */

@@ -67,7 +67,15 @@ class SyncEngine(
      * false when a listing succeeds. The real backend passes the settings' flag; the fake one never fails a listing.
      */
     private val setNamesStale: suspend (Boolean) -> Unit = {},
-    /** Debug builds only: `collections query stale`. Never a doc id or anything of a reply. */
+    /**
+     * R18/R21: whether the Developer action "Forget collections query id" armed one forced repair. Read when a run lists the
+     * names; the real backend passes the settings' flag, the fake one the default (it has no query to repair, and must never
+     * spend the real library's flag).
+     */
+    private val repairForced: suspend () -> Boolean = { false },
+    /** Spends that flag: called inside the request lambda, i.e. only once the Pacer has granted the forced repair's attempt. */
+    private val clearRepairForced: suspend () -> Unit = {},
+    /** Debug builds only: `collections query stale|forced`, `repair: ...`. Never a doc id or anything of a reply. */
     private val log: ((String) -> Unit)? = null,
 ) {
     companion object {
@@ -223,11 +231,13 @@ class SyncEngine(
      * The account's collections with their names, and whether they are the last good ones instead (spec 2026-10-09 §3.3).
      *
      * The website's names query, page by page. A stale reply to the FIRST page (the site no longer runs the doc id) gets the run's
-     * one repair ([repairCollections]), whose page then continues the listing. When the names can't be had (the repair refused,
-     * failed or itself stale, or a stale LATER page, which is a broken answer and never repaired), the run goes on with the
-     * last names ([fallbackCollections]; the second value is true). A rate limit, a login or challenge, or a reply of another
-     * shape stops the run as from any request. R13: a cursor already seen in this listing (A, B, A) is a shape change, before
-     * the cycle eats the run's budget.
+     * one repair ([repairCollections]), whose page then continues the listing. R18: when Forget armed a forced repair
+     * ([repairForced], read once, for the first page), the first page is that repair instead, with no query sent at all. When the
+     * names can't be had (the repair refused, failed or unusable, a stale LATER page, which is a broken answer and never
+     * repaired, or R20 a query the page could not send, on any page), the run goes on with the last names
+     * ([fallbackCollections]; the second value is true). A rate limit, a login or challenge, or a names reply of another shape
+     * stops the run as from any request. R13: a cursor already seen in this listing (A, B, A) is a shape change, before the cycle
+     * eats the run's budget.
      */
     private suspend fun fetchCollections(progress: Progress): Pair<List<CollectionEntity>, Boolean> {
         val remote = mutableListOf<RemoteCollection>()
@@ -236,18 +246,26 @@ class SyncEngine(
         try {
             do {
                 val from = cursor
-                val page = try {
-                    call(progress) { client.collections(from) }
-                } catch (e: InstagramException.StaleQuery) {
-                    if (from != null) throw e
-                    log?.invoke("collections query stale")
-                    repairCollections(progress) ?: return fallbackCollections() to true
+                val page = if (from == null && repairForced()) {
+                    log?.invoke("collections query forced")
+                    repairCollections(progress, forced = true) ?: return fallbackCollections() to true
+                } else {
+                    try {
+                        call(progress) { client.collections(from) }
+                    } catch (e: InstagramException.StaleQuery) {
+                        if (from != null) throw e
+                        log?.invoke("collections query stale")
+                        repairCollections(progress) ?: return fallbackCollections() to true
+                    }
                 }
                 remote += page.items
                 cursor = page.nextCursor
                 if (cursor != null && !visited.add(cursor)) throw InstagramException.ShapeChanged("page_info.end_cursor")
             } while (cursor != null)
         } catch (e: InstagramException.StaleQuery) {
+            return fallbackCollections() to true
+        } catch (e: InstagramException.QueryNotSent) {
+            // R20: nothing went out (the page had no tokens), so there is nothing to repair, and a retry would find the same page.
             return fallbackCollections() to true
         }
         // An empty list over a library that has collections is a broken answer, not an account that deleted them all: marking
@@ -272,9 +290,14 @@ class SyncEngine(
      * itself stale, failed for a moment, or (R14) of another shape. A rate limit, a login or a challenge page goes on as from any
      * request. Debug log: `repair: learned new id` once the client returns, i.e. once it has parsed the reply and kept its doc id
      * (D-I2), else `repair: failed (reply stale|reply transient|shape <field path>)`; the path holds field names and indices only.
+     * A [forced] repair spends Forget's flag inside the request lambda (R21): only once the Pacer has granted the attempt, so a
+     * cooldown, a budget or a session refusal keeps it for the next sync, and the repairer's own refusals spend it.
      */
-    private suspend fun repairCollections(progress: Progress): Page<RemoteCollection>? = try {
-        call(progress, retry = false) { client.repairCollections().also { log?.invoke("repair: learned new id") } }
+    private suspend fun repairCollections(progress: Progress, forced: Boolean = false): Page<RemoteCollection>? = try {
+        call(progress, retry = false) {
+            if (forced) clearRepairForced()
+            client.repairCollections().also { log?.invoke("repair: learned new id") }
+        }
     } catch (e: InstagramException.RepairUnavailable) {
         null
     } catch (e: InstagramException.StaleQuery) {

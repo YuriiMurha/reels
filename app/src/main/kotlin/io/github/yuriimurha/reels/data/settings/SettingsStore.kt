@@ -12,7 +12,6 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
-import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import io.github.yuriimurha.reels.sync.pacing.Cooldowns
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -102,22 +101,30 @@ class SettingsStore(private val store: DataStore<Preferences>) {
     /** When the last collections repair started (epoch ms), for its 24 h limit (spec 2026-10-09 §3.3), or null for never. */
     suspend fun collectionsRepairAt(): Long? = store.data.first()[COLLECTIONS_REPAIR_AT]
 
-    /** R3: null clears it (Forget collections query id), so the next stale reply may repair at once. */
+    /** R3: null clears it, so the next repair is not refused by the last one's 24 h. */
     suspend fun setCollectionsRepairAt(at: Long?) {
         store.edit { it.setOrRemove(COLLECTIONS_REPAIR_AT, at) }
     }
 
     /**
-     * The Developer action "Forget collections query id" (spec 2026-10-09 §3.3), in one write: the collections query's stored
-     * doc id becomes [FORGOTTEN_DOC_ID], so its next use is stale and repairs, and the repair limit is cleared, so that repair is
-     * not refused for having run in the last 24 h.
+     * The Developer action "Forget collections query id" (spec 2026-10-09 §3.3; R18, R21), in one edit: it arms one forced
+     * repair (`collections_force_repair`), so the next real sync skips the names query and repairs, and clears the repair limit,
+     * so that repair is not refused for having run in the last 24 h. It stores no made-up doc id: the one in use stays until a
+     * repair learns a new one, and nothing depends on how Instagram answers a wrong id.
      */
     suspend fun forgetCollectionsQueryId() {
-        val key = graphqlDocKey(WebGraphQl.SAVED_COLLECTIONS.friendlyName)
         store.edit {
-            it[key] = FORGOTTEN_DOC_ID
+            it[COLLECTIONS_FORCE_REPAIR] = true
             it.remove(COLLECTIONS_REPAIR_AT)
         }
+    }
+
+    /** Whether Forget armed a forced repair that no sync has spent yet (R18). Read by the real sync engine only. */
+    suspend fun collectionsForceRepair(): Boolean = store.data.first()[COLLECTIONS_FORCE_REPAIR] ?: false
+
+    /** Spends the forced repair: the sync engine calls it once the Pacer has granted the repair's attempt (R21). */
+    suspend fun clearCollectionsForceRepair() {
+        store.edit { it.remove(COLLECTIONS_FORCE_REPAIR) }
     }
 
     /** True while the collection names are the last good ones because they could not be refreshed (spec 2026-10-09 §3.3). */
@@ -140,9 +147,7 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         private val SESSION_CHALLENGE_URL = stringPreferencesKey("session_challenge_url")
         private val COLLECTIONS_REPAIR_AT = longPreferencesKey("collections_repair_at")
         private val COLLECTION_NAMES_STALE = booleanPreferencesKey("collection_names_stale")
-
-        /** What Forget stores: digits (so it is sent, R8), and never a doc id the website runs. */
-        internal const val FORGOTTEN_DOC_ID = "0"
+        private val COLLECTIONS_FORCE_REPAIR = booleanPreferencesKey("collections_force_repair")
 
         /** A GraphQL query's friendly name, as it goes into its key: letters, digits and `_`. */
         private val QUERY_NAME = Regex("[A-Za-z0-9_]{1,100}")

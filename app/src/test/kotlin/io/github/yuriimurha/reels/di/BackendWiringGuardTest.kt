@@ -118,6 +118,26 @@ class BackendWiringGuardTest {
         assertFalse("settings" in fake, "Mock mode's engine writes no setting: $fake")
     }
 
+    /**
+     * R18/R21: Forget's one-shot flag is the real library's. Only the real engine reads (and clears) it; Mock mode's engine gets
+     * the defaults' answer, "not forced", and touches no setting. `BackendSelectionTest` runs Mock mode with the flag set.
+     */
+    @Test
+    fun onlyTheRealEngineReadsTheForcedRepairFlag() {
+        val container = main("di/AppContainer.kt")
+        val engine = callArguments(container, "SyncEngine(").single()
+        assertTrue(Regex("""\brepairForced\s*=\s*repairForced\b""").containsMatchIn(engine), "the engine's flag: $engine")
+        assertTrue(Regex("""\bclearRepairForced\s*=\s*clearRepairForced\b""").containsMatchIn(engine), "the engine's clear: $engine")
+        val real = Regex("""is Backend\.Real\s*->\s*\{([^}]*)}""").find(container)?.groupValues?.get(1)
+        assertTrue(real != null && Regex("""repairForced\s*=\s*settings::collectionsForceRepair\b""").containsMatchIn(real), "Backend.Real's flag: $real")
+        assertTrue(real != null && Regex("""clearRepairForced\s*=\s*settings::clearCollectionsForceRepair\b""").containsMatchIn(real), "Backend.Real's clear: $real")
+        val fake = container.substringAfter("is Backend.Fake ->").substringBefore("is Backend.Real ->")
+        assertTrue(Regex("""repairForced\s*=\s*\{\s*false\s*}""").containsMatchIn(fake), "Backend.Fake is never forced: $fake")
+        assertTrue(Regex("""clearRepairForced\s*=\s*\{\s*}""").containsMatchIn(fake), "Backend.Fake clears nothing: $fake")
+        assertFalse("settings" in fake, "Mock mode's engine reads no setting: $fake")
+        assertEquals(1, Regex("""collectionsForceRepair\b""").findAll(container).count(), "the flag is read nowhere else in the container")
+    }
+
     /** No OkHttp API path is left in production: the API client factory and the JVM-test transport are `:instagram`'s, for tests. */
     @Test
     fun noOkHttpPathToInstagramsApiRemainsInProduction() {

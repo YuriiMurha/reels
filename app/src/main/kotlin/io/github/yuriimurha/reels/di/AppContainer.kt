@@ -242,12 +242,16 @@ class AppContainer(context: Context) {
         val sessionUsable: suspend (epoch: Int) -> RunSession
         val beforeRun: suspend () -> Unit
         val setNamesStale: suspend (Boolean) -> Unit
+        val repairForced: suspend () -> Boolean
+        val clearRepairForced: suspend () -> Unit
         when (backend) {
             is Backend.Fake -> {
                 signals = SessionSignals.None
                 sessionUsable = { RunSession.USABLE } // the fake library has no session
                 beforeRun = { } // and no transport: Mock mode never touches it
                 setNamesStale = { } // its names never go stale, and the notice is the real library's
+                repairForced = { false } // nor does it read (or spend) Forget's flag, which is the real library's
+                clearRepairForced = { }
             }
             is Backend.Real -> {
                 signals = session
@@ -258,6 +262,9 @@ class AppContainer(context: Context) {
                 beforeRun = ::allowNewInstagramAttempts
                 // The Sync screen's "Couldn't refresh collection names" (spec 2026-10-09 §3.3).
                 setNamesStale = settings::setCollectionNamesStale
+                // R18/R21: the one forced repair "Forget collections query id" arms, spent once the Pacer grants it.
+                repairForced = settings::collectionsForceRepair
+                clearRepairForced = settings::clearCollectionsForceRepair
             }
         }
         return SyncEngine(
@@ -267,6 +274,8 @@ class AppContainer(context: Context) {
             libraryAccount = libraryAccount,
             beforeRun = beforeRun,
             setNamesStale = setNamesStale,
+            repairForced = repairForced,
+            clearRepairForced = clearRepairForced,
             log = debugLog,
         )
     }

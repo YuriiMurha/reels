@@ -195,27 +195,39 @@ class SyncViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), null)
 
     /**
-     * Off until the latest run has loaded, and while it is RUNNING. A restart then could leave WorkManager holding a run
-     * of this library for a process that runs the other one (R67), and a run the screen hasn't seen yet may be one. Like
-     * [loadedRun] it forgets its value once the screen has been gone for the grace period, so a returning screen never
-     * shows the old "enabled" before the run has been read again.
+     * True once the latest run has loaded and while it is not RUNNING. Like [loadedRun] it forgets its value once the screen has
+     * been gone for the grace period, so a returning screen never shows the old "enabled" before the run has been read again.
      */
-    val mockSwitchEnabled: StateFlow<Boolean> = loadedRun.map { it != null && it.run?.status != SyncStatus.RUNNING }
+    private val noRunRunning: StateFlow<Boolean> = loadedRun.map { it != null && it.run?.status != SyncStatus.RUNNING }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), false)
+
+    /** True once the latest run has been read and it is not RUNNING. */
+    private fun noRunRunningNow(): Boolean = loadedRun.value.let { it != null && it.run?.status != SyncStatus.RUNNING }
+
+    /**
+     * Off until the latest run has loaded, and while it is RUNNING ([noRunRunning]). A restart then could leave WorkManager
+     * holding a run of this library for a process that runs the other one (R67), and a run the screen hasn't seen yet may be one.
+     */
+    val mockSwitchEnabled: StateFlow<Boolean> = noRunRunning
 
     private var mockChange: Job? = null
 
     /** Changes the mode and restarts the app. Refused while the run is loading or RUNNING, and while a change is under way. */
     fun setMockMode(useFake: Boolean) {
         val switch = mockSwitch ?: return
-        val loaded = loadedRun.value ?: return
-        if (loaded.run?.status == SyncStatus.RUNNING) return
+        if (!noRunRunningNow()) return
         if (mockChange?.isActive == true) return
         mockChange = viewModelScope.launch(io) { switch.change(useFake) }
     }
 
     /** Whether the Developer section offers "Forget collections query id" (the real backend only). */
     val canForgetQueryId: Boolean = forgetCollectionsQueryId != null
+
+    /**
+     * R21: like the Mock mode switch, Forget is off until the latest run has loaded and while it is RUNNING: a tap during a repair
+     * would erase that repair's attempt record, and one right after a run's own repair would arm a second within minutes.
+     */
+    val forgetQueryIdEnabled: StateFlow<Boolean> = noRunRunning
 
     private val mutableDeveloperMessage = MutableStateFlow<String?>(null)
 
@@ -225,12 +237,13 @@ class SyncViewModel(
     private var forgetJob: Job? = null
 
     /**
-     * Forgets the collections query's doc id and the repair's 24 h limit, so the next sync's names query is stale and repairs
-     * once. Sends nothing. A tap while one is being written is ignored; a write that fails is said on the screen
-     * ([developerMessage], no exception text), never thrown.
+     * Arms one forced repair and clears the repair's 24 h limit (R18), so the next sync skips the names query and repairs once.
+     * Sends nothing. Refused while the run is loading or RUNNING ([forgetQueryIdEnabled]); a tap while one is being written is
+     * ignored; a write that fails is said on the screen ([developerMessage], no exception text), never thrown.
      */
     fun forgetQueryId() {
         val forget = forgetCollectionsQueryId ?: return
+        if (!noRunRunningNow()) return
         if (forgetJob?.isActive == true) return
         forgetJob = viewModelScope.launch {
             mutableDeveloperMessage.value = null

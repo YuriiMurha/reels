@@ -117,13 +117,16 @@ class SyncEngineTest {
         eviction: MediaEviction = MediaEviction { },
         sessionUsable: suspend (Int) -> RunSession = { RunSession.USABLE },
         beforeRun: suspend () -> Unit = {},
+        repairForced: suspend () -> Boolean = { false },
+        clearRepairForced: suspend () -> Unit = {},
     ): SyncEngine {
         clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
             eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account, beforeRun = beforeRun,
-            setNamesStale = { namesStale += it }, log = { engineLog += it },
+            setNamesStale = { namesStale += it }, repairForced = repairForced, clearRepairForced = clearRepairForced,
+            log = { engineLog += it },
         )
     }
 
@@ -1808,8 +1811,9 @@ class SyncEngineTest {
 
     /**
      * Review Focus 5, the owner's check on the phone: Forget collections query id, then one sync. The real client, doc-id store
-     * and repairer over the real settings, with a fake site and a fake page: the forgotten id is sent once, rejected, one repair
-     * runs although one ran an hour ago, the site's id is learned, and the next sync sends it with no repair.
+     * and repairer over the real settings, with a fake site and a fake page (R18/R21): the next sync sends no names query at all,
+     * one repair runs although one ran an hour ago, the site's id is learned, and the next sync sends it with no repair. Every
+     * id ever sent is one the site runs.
      */
     @Test
     fun forgetThenSyncRepairsExactlyOnce() = runTest {
@@ -1828,6 +1832,7 @@ class SyncEngineTest {
             },
             now = { DAY + testScheduler.currentTime },
             main = StandardTestDispatcher(testScheduler),
+            log = { engineLog += it },
         )
         val web = WebInstagramClient({ site }, InMemoryCookieStore(), SettingsDocIdStore(settings), repairer)
         val fake = smallClient()
@@ -1840,25 +1845,141 @@ class SyncEngineTest {
         settings.setSession(SessionState.Valid("tester").toStored())
         settings.setGraphqlDocId(query, "777")
         settings.setCollectionsRepairAt(DAY - 3_600_000L) // a repair ran an hour ago
-        val engine = engine(client)
+        val engine = engine(client, repairForced = settings::collectionsForceRepair, clearRepairForced = settings::clearCollectionsForceRepair)
         assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
         assertEquals(listOf("777"), site.sent)
         assertEquals(mapOf("17900000000000002" to "Alpha"), names())
 
         settings.forgetCollectionsQueryId()
         site.name = "Beta"
+        engineLog.clear()
         val run = runSync(engine, SyncMode.QUICK)
 
         assertEquals(SyncStatus.DONE, run.status, "${run.lastError}")
-        assertEquals(listOf("777", "0"), site.sent, "the forgotten id once; the repair's page sent the query itself")
+        assertEquals(listOf("777"), site.sent, "no names query: the repair's page sent the query itself")
         assertEquals(1, pages, "exactly one repair")
+        assertEquals(listOf("collections query forced", "repair: start", "repair: learned new id"), engineLog)
         assertEquals("777", settings.graphqlDocId(query), "the site's id is learned")
+        assertEquals(false, settings.collectionsForceRepair(), "a one-shot")
         assertEquals(mapOf("17900000000000002" to "Beta"), names(), "the names from the site's own reply")
         assertEquals(listOf(false, false), namesStale)
 
         assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
-        assertEquals(listOf("777", "0", "777"), site.sent)
+        assertEquals(listOf("777", "777"), site.sent, "only ids the site runs, ever")
         assertEquals(1, pages, "no second repair")
+    }
+
+    /** R18: an armed Forget skips the names query and goes straight to the run's one repair, clearing the flag as it starts. */
+    @Test
+    fun anArmedForgetRepairsOnceWithoutAskingTheQuery() = runTest {
+        val client = ScriptedNames(smallClient())
+        var forced = true
+        var forcedWhenTheRepairRan: Boolean? = null
+        client.repair = {
+            forcedWhenTheRepairRan = forced
+            Page(client.fake.library.collections, null)
+        }
+
+        val run = runSync(engine(client, repairForced = { forced }, clearRepairForced = { forced = false }), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.DONE, run.status)
+        assertEquals(listOf("repair"), client.events, "no names request, one repair")
+        assertEquals(false, forcedWhenTheRepairRan, "cleared once the Pacer granted the attempt, before it ran")
+        assertEquals(listOf("collections query forced", "repair: learned new id"), engineLog)
+        assertEquals(mapOf("c1" to "Workouts", "c2" to "Recipes", "c3" to "Travel"), names())
+        assertEquals(listOf(false), namesStale)
+        assertEquals(client.fake.calls.size + 1, run.requestsUsed, "the repair is one run-budget unit, like the query it replaces")
+    }
+
+    /** R21: a Pacer refusal (here a cooldown another lane armed) sends nothing and leaves the flag set, for the next sync. */
+    @Test
+    fun theForcedRepairSurvivesACooldownRefusal() = runTest {
+        val cooldowns = InMemoryCooldownStore()
+        val client = ScriptedNames(smallClient())
+        client.repair = { Page(client.fake.library.collections, null) }
+        val coolingAfterTheCheck = object : InstagramClient by client {
+            override suspend fun currentUser(): Account = client.currentUser().also { cooldowns.onRateLimited(testScheduler.currentTime) }
+        }
+        var forced = true
+
+        val run = runSync(engine(coolingAfterTheCheck, cooldowns = cooldowns, repairForced = { forced }, clearRepairForced = { forced = false }), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.STOPPED_RATE_LIMIT, run.status)
+        assertEquals("Cooling down", run.lastError)
+        assertEquals(emptyList(), client.events, "no repair and no names request")
+        assertTrue(forced, "the flag is kept for the next sync")
+    }
+
+    /** And a refusal by the session gate: a logout that lands just before the forced repair keeps it armed too. */
+    @Test
+    fun theForcedRepairSurvivesASessionRefusal() = runTest {
+        var stored = RunSession.USABLE
+        val client = ScriptedNames(smallClient())
+        client.repair = { Page(client.fake.library.collections, null) }
+        var forced = true
+        val readFlag: suspend () -> Boolean = {
+            stored = RunSession.NOT_USABLE // a logout lands right now
+            forced
+        }
+
+        val run = runSync(engine(client, sessionUsable = { stored }, repairForced = readFlag, clearRepairForced = { forced = false }), SyncMode.QUICK)
+
+        assertEquals(SyncStatus.STOPPED_LOGIN, run.status)
+        assertEquals(emptyList(), client.events)
+        assertTrue(forced)
+    }
+
+    /** The repairer's own refusals ("no handle", the limit) come after the Pacer granted the attempt: the flag is spent. */
+    @Test
+    fun theForcedRepairIsSpentByTheRepairersOwnRefusal() = runTest {
+        for (refusal in listOf(InstagramException.RepairSkipped("no handle"), InstagramException.RepairSkipped("limit"))) {
+            val client = ScriptedNames(smallClient())
+            client.repair = { throw refusal }
+            var forced = true
+            namesStale.clear()
+
+            val run = runSync(engine(client, repairForced = { forced }, clearRepairForced = { forced = false }), SyncMode.QUICK)
+
+            assertEquals(SyncStatus.DONE, run.status, "the sync goes on with the last names")
+            assertEquals(listOf("repair"), client.events)
+            assertFalse(forced, "${refusal.message}: cleared")
+            assertEquals(listOf(true), namesStale)
+            db.deleteLibrary()
+        }
+    }
+
+    /**
+     * R20: a page without tokens sends no names query (`QueryNotSent`): it is never retried (no extra budget unit), the run keeps
+     * the last names and walks the feed. On a later page too.
+     */
+    @Test
+    fun aNamesQueryThatCouldNotBeSentFallsBackAtOnce() = runTest {
+        val client = ScriptedNames(smallClient())
+        val library = client.fake.library
+        val engine = engine(client)
+        runSync(engine, SyncMode.QUICK)
+        val before = liveCollections()
+        for (pageFor in listOf<(String?) -> Page<RemoteCollection>>(
+            { throw InstagramException.QueryNotSent("no tokens") },
+            { cursor -> if (cursor == null) Page(library.collections.take(1), "p2") else throw InstagramException.QueryNotSent("no tokens") },
+        )) {
+            client.pageFor = pageFor
+            client.events.clear()
+            namesStale.clear()
+            val feedCallsBefore = client.fake.calls.size
+            library.addNewSaves(1, setOf("c1"))
+
+            val run = runSync(engine, SyncMode.QUICK)
+
+            assertEquals(SyncStatus.DONE, run.status, "${run.lastError}")
+            assertFalse(client.events.any { it == "repair" }, "no repair")
+            assertEquals(client.events.distinct(), client.events, "each names page asked once: never retried")
+            assertEquals(before, liveCollections(), "the last names")
+            assertEquals(listOf(true), namesStale)
+            val feed = client.fake.calls.drop(feedCallsBefore)
+            assertTrue(feed.any { it.startsWith("saved:all") }, "the walk runs: $feed")
+            assertEquals(feed.size + client.events.size, run.requestsUsed, "no budget unit beyond the requests made")
+        }
     }
 
     /**

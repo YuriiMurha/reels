@@ -1774,8 +1774,12 @@ class WebViewTransportTest {
         assertEquals(emptyList(), loginPages.created.single().evaluated)
     }
 
+    /**
+     * R20: a page without tokens sent no query (-2). That is `QueryNotSent`, not `Transient`, so it is never retried (the names
+     * fall back at once), and the page is KEPT: a GET needs no tokens, and dropping it would only cost a home-page load.
+     */
     @Test
-    fun aPageWithoutTokensIsTransientAndDropped() = runTest {
+    fun aPageWithoutTokensIsQueryNotSentAndKept() = runTest {
         val pages = Pages()
         val transport = transport(pages)
         val pending = graphQlCall(transport)
@@ -1783,17 +1787,35 @@ class WebViewTransportTest {
         val page = pages.created.single()
         page.post("""{"id":1,"code":-2,"contentType":null,"body":null,"redirected":false}""")
 
-        assertIs<InstagramException.Transient>(pending.await().exceptionOrNull())
-        assertTrue(page.destroyed)
-        // Dropped by a failure: no idle timer, and the page still counts towards the limit.
-        assertEquals(0, pendingIdleTimers())
+        val notSent = assertIs<InstagramException.QueryNotSent>(pending.await().exceptionOrNull())
+        assertEquals("query not sent: no tokens", notSent.message)
+        assertFalse(page.destroyed)
+        assertEquals(1, pendingIdleTimers(), "a kept page has its idle timer")
 
+        // The same page serves the next call, a GET or a GraphQL one.
+        val get = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        page.post(reply(2))
+        assertEquals(200, get.await().getOrThrow().code)
         val next = graphQlCall(transport)
         runCurrent()
-        assertEquals(2, pages.created.size)
-        assertEquals(listOf(SCRIPT, graphQlOf(2)), pages.created.last().evaluated)
-        pages.created.last().post(reply(2))
+        assertEquals(1, pages.created.size)
+        assertEquals(graphQlOf(3), page.evaluated.last())
+        page.post(reply(3))
         assertEquals(200, next.await().getOrThrow().code)
+    }
+
+    /** -2 means "no tokens" only for a GraphQL call; a GET's script never posts it, so for one it is just no status at all. */
+    @Test
+    fun aNoTokensCodeOnAGetIsANetworkError() = runTest {
+        val pages = Pages()
+        val transport = transport(pages)
+        val pending = call(transport, "api/v1/feed/saved/posts/")
+        runCurrent()
+        pages.created.single().post("""{"id":1,"code":-2,"contentType":null,"body":null,"redirected":false}""")
+
+        assertIs<InstagramException.Transient>(pending.await().exceptionOrNull())
+        assertFalse(pages.created.single().destroyed)
     }
 
     /** The page's own allow-list refused the name (-3): the Kotlin and script lists disagree. Transient; the page is fine. */
@@ -1839,7 +1861,7 @@ class WebViewTransportTest {
         val noTokens = async { runCatching { transport.graphql(WebGraphQl.SAVED_COLLECTIONS, docId, variables) } }
         runCurrent()
         pages.created.single().post("""{"id":3,"code":-2,"contentType":null,"body":null,"redirected":false}""")
-        assertIs<InstagramException.Transient>(noTokens.await().exceptionOrNull())
+        assertIs<InstagramException.QueryNotSent>(noTokens.await().exceptionOrNull())
 
         assertEquals(
             listOf(

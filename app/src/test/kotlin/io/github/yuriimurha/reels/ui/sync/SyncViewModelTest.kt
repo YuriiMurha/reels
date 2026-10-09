@@ -195,20 +195,28 @@ class SyncViewModelTest {
 
     // ---- Spec 2026-10-09 §3.3: Forget collections query id, and the names notice ----
 
+    /** The screen is up and the latest run has been read, so Forget is on (when no run is RUNNING). */
+    private suspend fun kotlinx.coroutines.test.TestScope.forgetReady(viewModel: SyncViewModel) {
+        backgroundScope.launch { viewModel.forgetQueryIdEnabled.collect {} }
+        viewModel.forgetQueryIdEnabled.first { it }
+    }
+
     @Test
-    fun forgetQueryIdStoresAnIdTheSiteNeverRunsAndClearsTheRepairLimit() = runTest {
+    fun forgetQueryIdArmsOneForcedRepairAndClearsTheRepairLimit() = runTest {
         val viewModel = viewModel(realCollections = true)
         val query = WebGraphQl.SAVED_COLLECTIONS.friendlyName
         settings.setGraphqlDocId(query, "777")
         settings.setCollectionsRepairAt(START - 60_000)
         assertTrue(viewModel.canForgetQueryId)
+        forgetReady(viewModel)
 
         viewModel.forgetQueryId()
         advanceUntilIdle()
-        awaitStored { settings.graphqlDocId(query) == "0" }
+        awaitStored { settings.collectionsForceRepair() }
 
-        assertEquals("0", settings.graphqlDocId(query), "so the next use is stale and repairs")
+        assertTrue(settings.collectionsForceRepair(), "so the next sync repairs once")
         assertNull(settings.collectionsRepairAt(), "so that repair is not refused by the last one's 24 h")
+        assertEquals("777", settings.graphqlDocId(query), "no made-up id is stored")
         assertNull(viewModel.developerMessage.value)
         assertEquals(0, probe.calls, "it sends nothing")
     }
@@ -222,14 +230,14 @@ class SyncViewModelTest {
     @Test
     fun withoutTheActionForgetDoesNothing() = runTest {
         val viewModel = viewModel()
-        settings.setGraphqlDocId(WebGraphQl.SAVED_COLLECTIONS.friendlyName, "777")
         settings.setCollectionsRepairAt(START)
         assertFalse(viewModel.canForgetQueryId)
+        forgetReady(viewModel)
 
         viewModel.forgetQueryId()
         advanceUntilIdle()
 
-        assertEquals("777", settings.graphqlDocId(WebGraphQl.SAVED_COLLECTIONS.friendlyName))
+        assertFalse(settings.collectionsForceRepair())
         assertEquals(START, settings.collectionsRepairAt())
     }
 
@@ -237,20 +245,50 @@ class SyncViewModelTest {
     @Test
     fun aForgetThatCannotBeWrittenIsSaidOnTheScreen() = runTest {
         val viewModel = viewModel(realCollections = true)
-        settings.setGraphqlDocId(WebGraphQl.SAVED_COLLECTIONS.friendlyName, "777")
+        forgetReady(viewModel)
         storageFailure = java.io.IOException("disk full at /data/user/0")
 
         viewModel.forgetQueryId()
         advanceUntilIdle()
 
         assertEquals("Couldn't forget the collections query id", viewModel.developerMessage.value)
-        assertEquals("777", settings.graphqlDocId(WebGraphQl.SAVED_COLLECTIONS.friendlyName))
+        assertFalse(settings.collectionsForceRepair())
 
         storageFailure = null
         viewModel.forgetQueryId()
         advanceUntilIdle()
-        awaitStored { settings.graphqlDocId(WebGraphQl.SAVED_COLLECTIONS.friendlyName) == "0" }
+        awaitStored { settings.collectionsForceRepair() }
         assertNull(viewModel.developerMessage.value, "a tap that works clears it")
+    }
+
+    /**
+     * R21: Forget is off while the latest run is RUNNING (a tap mid-repair would erase its attempt record) and until that run has
+     * been read, like the Mock mode switch; a tap then does nothing.
+     */
+    @Test
+    fun forgetIsOffWhileARunIsRunningAndUntilTheRunHasLoaded() = runTest {
+        val viewModel = viewModel(realCollections = true)
+        settings.setCollectionsRepairAt(START)
+        assertFalse(viewModel.forgetQueryIdEnabled.value, "nothing has been read yet")
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        assertFalse(settings.collectionsForceRepair(), "refused before the run has loaded")
+
+        backgroundScope.launch { viewModel.forgetQueryIdEnabled.collect {} }
+        viewModel.forgetQueryIdEnabled.first { it }
+        val id = db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START))
+        viewModel.forgetQueryIdEnabled.first { !it }
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        assertFalse(settings.collectionsForceRepair(), "refused while RUNNING")
+        assertEquals(START, settings.collectionsRepairAt(), "the running repair's attempt record is kept")
+
+        db.syncDao().updateRun(db.syncDao().run(id)!!.copy(status = SyncStatus.DONE))
+        viewModel.forgetQueryIdEnabled.first { it }
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        awaitStored { settings.collectionsForceRepair() }
+        assertNull(settings.collectionsRepairAt())
     }
 
     @Test

@@ -76,8 +76,10 @@ import kotlin.time.TimeSource
  * out, a call that times out, and a page that throws all drop the page: a stuck page is never reused. A dead renderer
  * ([WebPage.onGone]) drops it and fails a call in flight at once. A network failure inside the page (`code == -1`) is
  * [InstagramException.Transient] and keeps it. A GraphQL call on a page that has no tokens to send it with (`code == -2`, no
- * request made) is [InstagramException.Transient] and drops the page; a name outside the script's own list or a doc id that
- * is not digits only (`code == -3`, no request made either) is [InstagramException.Transient] and keeps it.
+ * request made) is [InstagramException.QueryNotSent] (R20: never retried) and keeps the page, since a GET needs no tokens and
+ * dropping it would only cost a home-page load; a name outside the script's own list or a doc id that is not digits only
+ * (`code == -3`, no request made either) is [InstagramException.Transient] and keeps it. Only a GraphQL call reads -2 so; for
+ * a GET (whose script never posts it) it is no status at all, like -1.
  *
  * **A cancelled caller** always ends with its own `CancellationException`, never with another exception (one thrown by a
  * cancelled coroutine fails its parent scope, the viewer's `collectLatest` say). Cancelled while the page LOADS (R104), it
@@ -135,7 +137,7 @@ class WebViewTransport(
         require(isPath(pathAndQuery)) { "not a path on the Instagram origin" }
         return withContext(main) {
             logged("GET ${pathAndQuery.replace(DIGIT_RUN, "<n>")}") {
-                call { id -> "window.__igFetch && window.__igFetch($id,${JsonPrimitive(pathAndQuery)})" }
+                call(graphQl = false) { id -> "window.__igFetch && window.__igFetch($id,${JsonPrimitive(pathAndQuery)})" }
             }
         }
     }
@@ -151,7 +153,7 @@ class WebViewTransport(
         require(WebGraphQl.isDocId(docId)) { "not a doc id" }
         return withContext(main) {
             logged("GRAPHQL ${query.friendlyName}") {
-                call { id ->
+                call(graphQl = true) { id ->
                     "window.__igGraphQl && window.__igGraphQl($id,${JsonPrimitive(query.friendlyName)},${JsonPrimitive(docId)},${JsonPrimitive(variables)})"
                 }
             }
@@ -202,8 +204,8 @@ class WebViewTransport(
         }
     }
 
-    /** One call in the page: [invocation] is the script that makes it, given the call's id. */
-    private suspend fun call(invocation: (id: Long) -> String): RawReply {
+    /** One call in the page: [invocation] is the script that makes it, given the call's id; [graphQl] says which kind it is. */
+    private suspend fun call(graphQl: Boolean, invocation: (id: Long) -> String): RawReply {
         // First, before the page is created or looked at: a call that arrives while another loads the page must not use it.
         if (busy) throw Failed("busy", InstagramException.Transient())
         busy = true
@@ -242,7 +244,7 @@ class WebViewTransport(
                 throw Failed("timeout", InstagramException.Transient())
             }
             return when (answer) {
-                is Answer.Reply -> toReply(answer.message)
+                is Answer.Reply -> toReply(answer.message, graphQl)
                 Answer.Destroyed -> throw Failed("page destroyed", InstagramException.Transient())
             }
         } finally {
@@ -402,13 +404,11 @@ class WebViewTransport(
         waiting?.let { it.reply.complete(Answer.Destroyed) }
     }
 
-    private fun toReply(message: PageMessage): RawReply = when {
+    private fun toReply(message: PageMessage, graphQl: Boolean): RawReply = when {
         message.redirected -> RawReply(0, null, null, redirected = true)
-        // The page has no tokens to send a GraphQL query with: it is not a page to use, so the next call loads a fresh one.
-        message.code == NO_TOKENS -> {
-            dropPage()
-            throw Failed("no tokens", InstagramException.Transient())
-        }
+        // R20: the page has no tokens to send a GraphQL query with, so nothing was sent. Not retried, and the page is kept: a GET
+        // needs no tokens, and a fresh page would cost a home-page load to find out whether it has them.
+        graphQl && message.code == NO_TOKENS -> throw Failed("no tokens", InstagramException.QueryNotSent("no tokens"))
         // The page's own checks refused the call (a name outside its list, a doc id that is not digits): nothing was sent, and the
         // page is fine.
         message.code == REFUSED_QUERY -> throw Failed("refused query", InstagramException.Transient())

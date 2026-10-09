@@ -78,6 +78,7 @@ class DeveloperSectionTest {
         mockSwitchEnabled: Boolean = true,
         labEnabled: Boolean = true,
         canForget: Boolean = false,
+        forgetEnabled: Boolean = true,
         message: String? = null,
     ) = compose.setContent {
         ReelsTheme {
@@ -88,6 +89,7 @@ class DeveloperSectionTest {
                 onOpenLab = { opened++ },
                 labEnabled = labEnabled,
                 onForgetQueryId = if (canForget) ({ forgotten++ }) else null,
+                forgetEnabled = forgetEnabled,
                 message = message,
             )
         }
@@ -99,6 +101,14 @@ class DeveloperSectionTest {
         show(canForget = true, labEnabled = false)
         compose.onNodeWithText("Forget collections query id").assertIsEnabled().performClick()
         assertEquals(1, forgotten)
+    }
+
+    /** R21: while a run is RUNNING (or the run has not loaded yet) the screen turns it off, like the Mock mode switch. */
+    @Test
+    fun aForgetTheScreenTurnedOffCannotBeTapped() {
+        show(canForget = true, forgetEnabled = false)
+        compose.onNodeWithText("Forget collections query id").assertIsNotEnabled().performClick()
+        assertEquals(0, forgotten)
     }
 
     @Test

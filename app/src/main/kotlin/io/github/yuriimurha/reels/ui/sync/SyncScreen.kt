@@ -92,6 +92,7 @@ fun SyncScreen(
     val sessionMessage by viewModel.sessionMessage.collectAsStateWithLifecycle()
     val pasteError by viewModel.pasteError.collectAsStateWithLifecycle()
     val mockSwitchEnabled by viewModel.mockSwitchEnabled.collectAsStateWithLifecycle()
+    val forgetQueryIdEnabled by viewModel.forgetQueryIdEnabled.collectAsStateWithLifecycle()
     val realPacerNote by viewModel.realPacerNote.collectAsStateWithLifecycle()
     val storageMessage by viewModel.storageMessage.collectAsStateWithLifecycle()
     val developerMessage by viewModel.developerMessage.collectAsStateWithLifecycle()
@@ -153,6 +154,7 @@ fun SyncScreen(
                         onOpenLab = onOpenLab,
                         labEnabled = sessionState is SessionState.Valid,
                         onForgetQueryId = if (viewModel.canForgetQueryId) viewModel::forgetQueryId else null,
+                        forgetEnabled = forgetQueryIdEnabled,
                         message = developerMessage,
                     )
                 }
