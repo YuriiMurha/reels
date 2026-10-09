@@ -202,3 +202,34 @@ Six small commits on `claude/hardening`; each started with a failing test. Every
 - **Next, the owner's phone.** Wait out any cooldown, then follow the README box "After the collection names update": one Sync,
   the names on the grid, **Forget collections query id**, one more Sync, and paste the `InstagramHttp` lines. `TODO.md` lists
   what that settles.
+
+## 2026-10-09: collection names, final review fixes
+
+A final review in four lenses (security, concurrency, tests by mutation, plan/docs/pacing) and a refute pass; rulings R14 to R21.
+Fixed in four commits and documented in a fifth:
+
+- **The repair** builds no Instagram URL in `:app` any more: `WebEndpoints.savedPage(handle)` owns the Saved page's URL and the
+  handle rule (D-C1). A site reply of another shape is a failed repair, so the sync keeps the last names (R14). The log says
+  `repair: learned new id` only once the client has parsed the reply and kept the id (D-I2), else
+  `repair: failed (reply stale|reply transient|shape …)`. A last attempt dated in the future is moved back to now, so a clock set
+  back never stalls repairs longer than a day; a page whose `destroy()` throws no longer hides how the watch ended (C-M4); a
+  collection a good listing had marked removed comes back under its old name, not as a new "Collection N". A 2xx names reply
+  without `data.viewer` is stale with or without errors (R17).
+- **Forget collections query id** no longer stores a made-up id (D-I4, R18, R21): it arms a persisted one-shot forced repair; the
+  next sync sends no names query (`collections query forced`) and repairs once; the flag is spent only once the Pacer grants the
+  attempt, is read by the real backend only, and the button is off while a run is going. A page without tokens is
+  `QueryNotSent`: never retried, the page kept, the last names (C-M2, R20).
+- **The hidden pages' console** stays out of the system log: both pages install one chrome client that handles console messages
+  and cancels or denies dialogs and permission requests (S-M1, R16). The emulator shows a plain WebView's console reaching logcat
+  and the hidden pages' never doing so.
+- **Tests** close the mutation review's gaps (where the page script's form and headers may go, a failing notice store, the built-in
+  id, placeholder numbers and places, a blank id, names kept with their white space) and drop or rename three tests that checked
+  only their own helpers. In-band GraphQL errors read `error_type` too, and Delete library clears the names notice (C-M5).
+- **Pacing.** No rate, budget, gap or concurrency was raised. Forget's sync sends one request fewer; a page without tokens costs one
+  run-budget unit and no request instead of up to five units and three home-page loads; R17 can start a repair (at most one per
+  24 h) where a run used to stop. The site is loaded at most 3 home loads per user action, plus at most one repair page view per
+  24 h or per Forget; during a repair the idle mobile page and the desktop repair page are both live for at most 45 s, with no
+  API call overlapping (R19).
+- **What the phone rollout settles.** AUTO and a real repair. STALE stays assumed (Forget no longer sends a wrong id), and CURSOR
+  stays unverified until the account has more than 12 collection edges, the automatic ones included.
+- No agent contacted Instagram: fakes, MockWebServer and the emulator's local servers only, the emulator in Mock mode.

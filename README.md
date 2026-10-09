@@ -315,10 +315,10 @@ Don't reinstall or clear the app's data to skip it.
    ```
 
 3. **One sync.** Open **Sync** and tap **Sync** once, then leave it until it ends. On an empty library it fetches everything
-   (a few requests for a small account). Then print the log:
+   (a few requests for a small account). Then print the log and keep a copy of it on the Desktop:
 
    ```bash
-   adb -d logcat -d -s InstagramHttp
+   adb -d logcat -d -s InstagramHttp > ~/Desktop/reels-names-step3.txt && cat ~/Desktop/reels-names-step3.txt
    ```
 
    **Expect** `GET api/v1/accounts/edit/web_form_data/ -> 200`, one `GRAPHQL PolarisProfileSavedTabContentQuery -> 200 (... ms)`
@@ -326,25 +326,63 @@ Don't reinstall or clear the app's data to skip it.
    lines, and no `feed/collection` line. The phase line goes "Checking session", "Listing collections", "Syncing All Saved",
    and the run ends with no banner and no "Couldn't refresh collection names". If Instagram has already changed the names
    query, this step shows `collections query stale`, `repair: start` and `repair: learned new id` instead: that is the
-   repair working, so go on to step 4.
+   repair working, so go on to step 4 and then **skip step 5** (a second repair minutes later would only load the site's
+   pages once more): do step 5b.
 4. **Check the collection names on the grid.** Open **Reels** (the **Saved** home). **Look for:** All Saved, Uncategorized
-   and each of your collections under its Instagram name (not "Collection 1"), each with its count, and each collection's
-   grid holding the posts you know are in it. If the collections exist but are **empty** while All Saved has items, the
-   `collection_id` the names query sends is not in the same format as the `saved_collection_ids` on the items: stop here, do
-   not run a Full sync, and paste the log (step 6).
-5. **Forget collections query id, then one sync.** On **Sync**, scroll to **Developer** and tap **Forget collections query
-   id** once. It sends nothing: it only makes the app's stored id one Instagram does not run, so the next names query is
-   rejected. Then tap **Sync** once and wait. The repair loads your Saved page in a hidden desktop-mode page, so "Listing
-   collections" can take up to 45 seconds. Print the log again with the command from step 3 (it was not cleared, so step 3's
-   lines come first and the new ones are at the end). **Expect** a new `GRAPHQL` line for the names query (note its code: it
-   is how Instagram answers an id it no longer runs), then `collections query stale`, `repair: start` and
-   `repair: learned new id`, then the saved-feed `GET` lines; the run ends with no banner and the **Saved** screen shows the
-   same names as in step 4. If the log says `repair: failed (<reason>)` instead, the sync still ends on the names it already
-   had and Sync says "Couldn't refresh collection names": that is the fallback working. Don't tap **Forget** again to retry before you have pasted the log, because every repair loads the
-   site's pages once more.
-6. **Paste the log** from step 5's command into a Claude session, with what the screens showed (the **Saved** cards' names
-   and counts, and any banner or notice on Sync). The lines are safe to paste: only paths, codes and times, never a cookie,
-   a token, a doc id or a page.
+   and each of your collections under its Instagram name (not "Collection 1"), each with its count, each collection's grid
+   holding the posts you know are in it, and **no** "All posts" card and no audio card (Instagram's automatic collections are
+   left out). If the collections exist but are **empty** while All Saved has items, the `collection_id` the names query sends
+   is not in the same format as the `saved_collection_ids` on the items: stop here, do not run a Full sync, and paste the log
+   (step 6).
+5. **Forget collections query id, then one sync.** Clear the log first:
+
+   ```bash
+   adb -d logcat -c
+   ```
+
+   On **Sync**, scroll to **Developer** and tap **Forget collections query id** once (it is greyed out while a sync is
+   running). It sends nothing: it only tells the next sync to skip the names query and learn the query's id from the site
+   instead. Then tap **Sync** once and wait. The repair loads your Saved page in a hidden desktop-mode page, so "Listing
+   collections" can take up to 45 seconds. Then print the log and keep a copy:
+
+   ```bash
+   adb -d logcat -d -s InstagramHttp > ~/Desktop/reels-names-step5.txt && cat ~/Desktop/reels-names-step5.txt
+   ```
+
+   **Expect** the session check's `GET` line, then `collections query forced`, `repair: start` and
+   `repair: learned new id` (and no `GRAPHQL` line before them: the names came from the site's own request), then the
+   saved-feed `GET` lines. The run ends with no banner, Sync shows **no** "Couldn't refresh collection names", and the
+   **Saved** screen shows the same names as in step 4. If the log says `repair: failed (<reason>)` instead: for
+   `login page`, `challenge page` or `http 429` the run stops with its banner (the session needs you, or a cooldown started,
+   as for any request: see [When a run stops](#when-a-run-stops-the-red-banner-on-sync)); for any other reason (`limit`,
+   `no handle`, `no query`, `page error`, `http <code>`, `reply stale`, `reply transient`, `shape ...`) the sync still ends
+   on the names it already had and Sync says "Couldn't refresh collection names": that is the fallback working. Either way,
+   don't tap **Forget** again to retry before you have pasted the log, because every repair loads the site's pages once more.
+
+**5b. One more sync,** with the id the repair learned. Clear the log first:
+
+```bash
+adb -d logcat -c
+```
+
+Then tap **Sync** once, wait for it to end, and print the log and keep a copy:
+
+```bash
+adb -d logcat -d -s InstagramHttp > ~/Desktop/reels-names-step5b.txt && cat ~/Desktop/reels-names-step5b.txt
+```
+
+**Expect** one `GRAPHQL PolarisProfileSavedTabContentQuery -> 200` line and no `collections query stale` or
+`collections query forced` line: the learned id works and nothing is repaired.
+
+6. **Paste the logs** into a Claude session, with what the screens showed (the **Saved** cards' names and counts, and any
+   banner or notice on Sync). This prints the copies kept above, in order (a step you skipped has no file and is left out):
+
+   ```bash
+   cat ~/Desktop/reels-names-step3.txt ~/Desktop/reels-names-step5.txt ~/Desktop/reels-names-step5b.txt 2>/dev/null
+   ```
+
+   The lines are safe to paste: only paths, codes and times, never a cookie, a token, a doc id or a page. Delete the three
+   files from the Desktop once you have pasted them.
 
 If any step answers 429 (Sync says "Instagram is limiting requests", or the log says `-> 429` or `repair: failed (http 429)`),
 **wait**: the cooldown banner on Sync shows how long. Don't tap again to retry, and paste the log first.
@@ -547,12 +585,15 @@ page that a cancelled request ran into, `cancelled`, ...). Other lines can appea
 closed after 5 minutes without a request), `page closed (owner needed)` (closed at once because the session expired or
 needs verification, or the login screen opened to fix that), and `transport reset failed: <Class>` or `transport close
 failed: <Class>` (the page could not be closed; the class name only), `collections query stale` (Instagram no longer runs the
-stored names query id), and `repair: start`, `repair: learned new id` or `repair: failed (<reason>)` (the repair page's one
-attempt; never an id, a handle or a page). No cookie, token or header is logged: the app never
-sees them. One `GET` line is one call: at most one API request; a line without an HTTP status sent none (it ended before
-the request, or the page's request failed). The browser may re-send a GET after a dropped
-connection, as it would for the website itself, and the app does not see that. The hidden page's own load of instagram.com,
-thumbnails and videos are not in this log. A release build logs nothing.
+stored names query id) or `collections query forced` (Forget asked for a repair), then `repair: start`,
+`repair: learned new id` or `repair: failed (<reason>)` (the repair page's one attempt; never an id, a handle or a page). No
+cookie, token or header is logged: the app never sees them. One `GET` or `GRAPHQL` line is one call: at most one API
+request; a line without an HTTP status sent none (it ended before the request, or the page's request failed; `no tokens`
+means the page could not send the names query). A repair is one call too, with no `GET` or `GRAPHQL` line of its own: count
+one for each `repair: start`, and one for a `repair: failed (limit)` or `repair: failed (no handle)`, which loaded nothing
+but still counts. The browser may re-send a GET or the GraphQL POST after a dropped connection, as it would for the website
+itself, and the app does not see that. The hidden page's own load of instagram.com, the repair page's view of your Saved
+page, thumbnails and videos are not in this log. A release build logs nothing.
 
 ### M2: session
 
@@ -574,7 +615,7 @@ thumbnails and videos are not in this log. A release build logs nothing.
   page sends the mobile website's `1217981644879628`. The WebView's own `X-Requested-With: io.github.yuriimurha.reels` header
   was seen on the emulator on every request the WebView makes itself, and the app cannot turn it off.) How to look:
   - If an error message appears, is it in your phone's language?
-  - Does any tap show up twice in logcat (two `GET` lines for one request)?
+  - Does any tap show up twice in logcat (two `GET` or `GRAPHQL` lines for one request)?
   - If you hit a checkpoint: did the `sessionid` change during it?
 
 ### M3: Adapter lab and the seven spike questions
@@ -610,8 +651,9 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 - [ ] **QUICK sync.** Tap **Sync** on the empty real library. **Look for:** the phase moves through "Checking
   session", "Listing collections" and "Syncing All Saved" (no phase for a single collection: they are not walked one by
   one); logcat shows one request every
-  4–12 s and a longer pause (60–180 s) after every 15–30; **Requests in 24 h** rises by about the number of `GET`
-  lines in logcat; the run ends with no banner (or pauses at "Run budget reached, tap Resume": tap
+  4–12 s and a longer pause (60–180 s) after every 15–30; **Requests in 24 h** rises by about the number of `GET` and
+  `GRAPHQL` lines in logcat, plus one per repair the run tried (`repair: start`, `repair: failed (limit)` or
+  `repair: failed (no handle)`); the run ends with no banner (or pauses at "Run budget reached, tap Resume": tap
   **Resume**); the grid has thumbnails. **Report:** the Sync screen's counters at the end (Collections, New items,
   Items seen, Thumbnails cached, Failures, Requests, Requests in 24 h), how long it took, and any banner.
 - [ ] **Cancel and resume.** During a run tap **Cancel**, then **Resume**. **Look for:** it carries on from where it
@@ -858,7 +900,8 @@ The text after the colon says what broke. Nothing was deleted by any of these.
 - **`more_available` or `next_max_id`**: a page didn't say whether more pages follow, or said "more" with no cursor.
   The app treats that as a broken answer rather than the end of the feed.
 - **`data.viewer.collections_unified_with_auto_collections`, `edges…`, `page_info…`**: the collection names query's answer
-  isn't the shape the app expects. Run the Adapter lab's **Collections** and paste the result and the log.
+  isn't the shape the app expects. Run the Adapter lab's **Collections** and paste the result and the log. (A repair's answer
+  of another shape does not stop the run: it keeps the last names, see [collection names](#sync-collection-names).)
 - **`page_info.end_cursor`**: a page of collections said there was more but gave no cursor, or its cursor was the one the
   app sent (the second page was asked for with a variable the site ignores), or a cursor came round again. Nothing was
   deleted; paste the log.
@@ -869,16 +912,23 @@ The text after the colon says what broke. Nothing was deleted by any of these.
 
 ### Sync: collection names
 
-- **"Couldn't refresh collection names"** (on Sync, under **Library**): the names query was rejected and the app could not
-  learn the current id (or may not try: a repair runs at most once in 24 hours). The sync went on: your collections kept
-  their last names, nothing was removed, and a collection that an item lists but the app has never named is called
-  **"Collection 1"**, **"Collection 2"**, and so on. The next sync that gets the names renames them and the notice goes. To
-  see why, run `adb -d logcat -d -s InstagramHttp` and read the `repair: failed (<reason>)` line: `limit` (a repair ran less
-  than 24 hours ago), `no handle` (the app doesn't know the account's handle), `http <code>` (Instagram answered the Saved
-  page with an error), `login page` or `challenge page` (the account needs you: see "When a run stops"), `no query` (the
-  Saved page didn't send the query within 45 seconds) or `page error` (this phone's WebView can't make the repair page, or it
-  failed). Paste the log. Waiting a day and tapping **Sync** is the retry; a debug build's **Forget collections query id**
-  (Sync → Developer) re-arms one repair at once, once per tap.
+- **"Couldn't refresh collection names"** (on Sync, under **Library**): the app could not get the names, and could not
+  learn the names query's current id (or may not try: a repair runs at most once in 24 hours). The sync went on: your
+  collections kept their last names, nothing was removed, and a collection that an item lists but the app has never named is
+  called **"Collection 1"**, **"Collection 2"**, and so on (one that a sync had marked removed comes back under its old
+  name). The next sync that gets the names renames them and the notice goes, and **Delete library** clears it too. To see
+  why, run `adb -d logcat -d -s InstagramHttp` and read the last lines about the names:
+  - `GRAPHQL PolarisProfileSavedTabContentQuery -> no tokens`: the hidden page had nothing to send the names query with, so
+    nothing was sent and no repair was tried;
+  - `repair: failed (<reason>)` with the reason `limit` (a repair ran less than 24 hours ago), `no handle` (the app doesn't
+    know the account's handle), `http <code>` (Instagram answered the Saved page with an error), `no query` (the Saved page
+    didn't send the query within 45 seconds), `page error` (this phone's WebView can't make the repair page, or it failed),
+    `reply stale` or `reply transient` (the site's own answer could not be used either) or `shape <path>` (the site's own
+    answer was not the shape the app expects). A `login page`, `challenge page` or `http 429` reason is no fallback: the run
+    stops with its banner ([When a run stops](#when-a-run-stops-the-red-banner-on-sync)).
+
+  Paste the log. Waiting a day and tapping **Sync** is the retry; a debug build's **Forget collections query id**
+  (Sync → Developer) arms one repair for the next sync, outside the 24 hours, once per tap.
 - **A collection still called "Collection N" after a sync with no notice**: Instagram sent that collection with an empty name,
   and the app shows a placeholder rather than a blank. Paste the log.
 
@@ -900,7 +950,8 @@ limit), so the app stopped downloading thumbnails for the rest of that run. The 
 - **Sync, Full sync, Resume:** a run is going, a cooldown is active, or the session isn't "Logged in as @handle" (with
   Mock mode off).
 - **Mock mode switch:** a run is going, or the screen hasn't read the latest run yet.
-- **Forget collections query id (Sync → Developer):** shown only with Mock mode off; it needs no session.
+- **Forget collections query id (Sync → Developer):** shown only with Mock mode off; it needs no session. Greyed out while a
+  run is going, or while the screen hasn't read the latest run yet.
 - **Adapter lab (Sync → Developer):** the session isn't "Logged in as @handle". In the lab, **First collection** and
   **Media info** also wait for an id from **Collections** and **All Saved**, and every button waits while a call is out.
 - **Delete library:** a run is going.
@@ -910,8 +961,9 @@ limit), so the app stopped downloading thumbnails for the rest of that run. The 
 "Log in on the Sync screen to use the lab." (no valid session). A line under the buttons, "`<button>`: `<text>`", names the
 call that failed: "Cooling down after a rate limit" or "The 24-hour request budget is used up" (nothing was sent),
 "Unexpected Instagram response at `<path>`" (note the path), "Instagram is limiting requests" (a cooldown has started: stop
-tapping), "The call failed", or "Couldn't save the scrubbed copy". **Collections** showing the classification `StaleQuery` means Instagram no longer runs
-the stored names query id: the lab doesn't repair it, a Sync does.
+tapping), "query not sent: no tokens" (**Collections** only: the hidden page had nothing to send the query with, so nothing
+was sent), "The call failed", or "Couldn't save the scrubbed copy". **Collections** showing the classification `StaleQuery`
+means Instagram no longer runs the stored names query id: the lab doesn't repair it, a Sync does.
 
 ### The viewer: messages over a video
 

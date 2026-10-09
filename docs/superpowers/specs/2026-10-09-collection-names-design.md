@@ -156,6 +156,21 @@ result):
   only without `data.viewer`); a 2xx execution error with `data.viewer` is `Transient`.
 - **R13.** The sync keeps a set of cursors already seen while it lists the collections; a repeated one is
   `ShapeChanged("page_info.end_cursor")`, as is a page whose next cursor is the one it was asked with.
+- **R14.** A repaired reply the client cannot parse (a shape change) is a failed repair: the sync goes on with the last names.
+- **R15.** Task 6's review was folded into the final review's docs lens.
+- **R16.** Both hidden pages install one chrome client that keeps the site's console out of the system log and cancels or
+  denies its dialogs and permission requests.
+- **R17.** A 2xx names reply without `data.viewer` is stale with or without `errors` (3.1's rule widened), so a doc id that
+  names another query is repaired within a day.
+- **R18.** "Forget collections query id" (3.3) no longer stores a wrong id: it arms a persisted one-shot forced repair and
+  clears the repair limit; the next sync sends no names query and repairs once.
+- **R19.** The mobile page is not closed for a repair: for at most 45 s the idle mobile page and the desktop repair page are
+  both live, with no API call overlapping (3.3's "never while an API call runs" still holds).
+- **R20.** A names query the page could not send (no tokens) is `QueryNotSent`: never retried, the page kept, the last names.
+- **R21.** The forced repair's flag is spent once the Pacer grants the attempt, it is read by the real backend only, and
+  Forget is off while a run is RUNNING.
+- **Phone facts (5).** The rollout settles AUTO and a real repair. STALE stays assumed (Forget sends no wrong id any more,
+  R18), and CURSOR stays unverified until the account has more than 12 collection edges, the automatic ones included.
 - **Also, in 2 and 4.** The names query costs one request per 12 collections (the automatic ones count), not "one for one".
   A repair the 24 h limit refuses still costs one run-budget unit and one request-log entry. And with strategy A a Sync
   (QUICK) records an item's collections only for the pages it walks, so an older saved item newly added to a collection is
