@@ -351,9 +351,10 @@ class WebParsersTest {
     }
 
     /**
-     * Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. R17: a 2xx
-     * JSON reply without `data.viewer` is stale with or without `errors`, so a doc id that names another query (planted, say)
-     * is repaired within a day instead of being sent again on every sync.
+     * Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. R17, as
+     * R22 narrows it: a 2xx GraphQL reply without `data.viewer` is stale with or without `errors`, so a doc id that names another
+     * query (planted, say) is repaired within a day instead of being sent again on every sync. A GraphQL reply is one that has a
+     * `data` key or GraphQL `errors`.
      */
     @Test
     fun classifySavedCollectionsCallsFactStalesReplyAStaleQuery() {
@@ -363,13 +364,11 @@ class WebParsersTest {
             graphQl("""{"errors":[{"message":"x"}],"data":{}}"""),
             graphQl("""{"errors":[{"message":"x"}],"data":null,"status":"fail"}"""),
             graphQl("for (;;);" + """{"errors":[{"message":"x","summary":"y","description":"z"}],"data":null}"""),
-            // R17: no errors at all.
+            // R17: no errors at all, but a `data` that is not this query's.
             graphQl("""{"data":{}}"""),
             graphQl("""{"data":null}"""),
-            graphQl("{}"),
-            graphQl("""{"errors":[]}"""),
             graphQl("""{"data":{"other_query_root":{"edges":[]}}}"""),
-            graphQl("""{"status":"fail"}"""),
+            graphQl("""{"data":{"other_query_root":{"edges":[]}},"status":"ok"}"""),
             graphQl("""{"data":{}}""", code = 204),
             graphQl("<html><body>Sorry, this page isn't available.</body></html>", code = 404, contentType = "text/html"),
             graphQl("Bad request", code = 400, contentType = "text/plain"),
@@ -379,6 +378,31 @@ class WebParsersTest {
             assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, error.query)
             assertFalse(WebGraphQl.SAVED_COLLECTIONS.builtInDocId in error.message.orEmpty(), "a StaleQuery never carries a doc id")
             assertIs<InstagramException.StaleQuery>(assertFailsWith<InstagramException> { WebParsers.savedCollectionsJsonOrThrow(reply) })
+        }
+    }
+
+    /**
+     * R22: a 2xx that is not a GraphQL reply at all (no `data` key, no GraphQL `errors`) says nothing about the doc id: an error
+     * envelope of the site's, or a bare status. It is a shape change with its own path, never a stale query, so it never starts a
+     * desktop repair nor reads as "Instagram changed the id" in the log.
+     */
+    @Test
+    fun aReplyWithoutDataOrGraphQlErrorsIsNeverStale() {
+        val envelopes = listOf(
+            graphQl("for (;;);" + """{"__ar":1,"error":1357004,"errorSummary":"Sorry, something went wrong","payload":null}"""),
+            graphQl("""{"error":1357004,"errorSummary":"x"}"""),
+            graphQl("""{"status":"fail","message":"Sorry, something went wrong"}"""),
+            graphQl("""{"status":"fail"}"""),
+            graphQl("""{"status":"ok"}"""),
+            graphQl("{}"),
+            graphQl("""{"errors":[]}"""),
+            graphQl("""{"errors":["not an object"]}"""),
+            graphQl("""{"errors":{"message":"x"}}"""),
+        )
+        for (reply in envelopes) {
+            val error = WebParsers.classifySavedCollections(reply)
+            assertIs<InstagramException.ShapeChanged>(error, reply.body)
+            assertIs<InstagramException.ShapeChanged>(assertFailsWith<InstagramException> { WebParsers.savedCollectionsJsonOrThrow(reply) })
         }
     }
 

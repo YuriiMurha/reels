@@ -233,3 +233,20 @@ Fixed in four commits and documented in a fifth:
 - **What the phone rollout settles.** AUTO and a real repair. STALE stays assumed (Forget no longer sends a wrong id), and CURSOR
   stays unverified until the account has more than 12 collection edges, the automatic ones included.
 - No agent contacted Instagram: fakes, MockWebServer and the emulator's local servers only, the emulator in Mock mode.
+
+## 2026-10-09: the stale rule counts only GraphQL replies; a repaired reply that stops the run says why
+
+Two follow-ups the final review of the collection-names change parked (PR #8):
+
+- **R22, the stale rule narrowed.** R17 had made any 2xx JSON names reply without `data.viewer` a stale query, so a 2xx
+  error envelope of the site's (`{"error":1357004,...}` after `for (;;);`), a bare `{"status":"fail"}` or even
+  `{"status":"ok"}` would read as "Instagram changed the id" and start a desktop repair (at most once a day). Now only a
+  GraphQL reply (one with a `data` key, whatever its value, or GraphQL `errors` entries) can be stale; the others keep their
+  shape change. A doc id that names another query still repairs within a day (that reply carries `data`).
+- **The missing log line.** A repaired reply that itself reports a rate limit, a logout or a challenge (in its GraphQL
+  `errors`) stopped the run correctly, but the debug log ended at `repair: start`. The client now hands the engine its
+  reply's failures (`repairCollections(onReplyFailure)`), and the engine logs `repair: failed (reply rate limit|reply
+  login|reply challenge)` (and the earlier `reply stale|reply transient|shape ...`) from that one place.
+- Pacing: fewer repairs than before (an error envelope no longer starts one); rates, budgets and concurrency unchanged.
+- Tests: `./gradlew check` 1282 (3 new: the envelopes that are never stale, the reply-failure callback, the log line on a
+  stopping repaired reply).

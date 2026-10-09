@@ -287,30 +287,39 @@ class SyncEngine(
      * never during a cooldown nor under a session that is gone), but never retried, since a second attempt could only be
      * refused by the repair's own 24 h limit. Null when it gave no names: refused or failed ([InstagramException.RepairUnavailable],
      * which the repairer logs itself), or a reply of the site's own that the client could not use, so it learned nothing from it:
-     * itself stale, failed for a moment, or (R14) of another shape. A rate limit, a login or a challenge page goes on as from any
-     * request. Debug log: `repair: learned new id` once the client returns, i.e. once it has parsed the reply and kept its doc id
-     * (D-I2), else `repair: failed (reply stale|reply transient|shape <field path>)`; the path holds field names and indices only.
-     * A [forced] repair spends Forget's flag inside the request lambda (R21): only once the Pacer has granted the attempt, so a
-     * cooldown, a budget or a session refusal keeps it for the next sync, and the repairer's own refusals spend it.
+     * itself stale, failed for a moment, or (R14) of another shape. A rate limit, a login or a challenge goes on as from any
+     * request, the repaired reply's own (R12, in its GraphQL errors) included. Debug log: `repair: learned new id` once the
+     * client returns, i.e. once it has parsed the reply and kept its doc id (D-I2); else, for a reply the client could not use,
+     * `repair: failed (<why>)` ([replyFailure]), whether the run then goes on with the last names or stops. The repairer logs the
+     * repair's own failures (its page landing on a login, a 429 page, ...). A [forced] repair spends Forget's flag inside the
+     * request lambda (R21): only once the Pacer has granted the attempt, so a cooldown, a budget or a session refusal keeps it for
+     * the next sync, and the repairer's own refusals spend it.
      */
     private suspend fun repairCollections(progress: Progress, forced: Boolean = false): Page<RemoteCollection>? = try {
         call(progress, retry = false) {
             if (forced) clearRepairForced()
-            client.repairCollections().also { log?.invoke("repair: learned new id") }
+            client.repairCollections(onReplyFailure = { log?.invoke("repair: failed (${replyFailure(it)})") })
+                .also { log?.invoke("repair: learned new id") }
         }
     } catch (e: InstagramException.RepairUnavailable) {
         null
     } catch (e: InstagramException.StaleQuery) {
-        unusableRepair("reply stale")
+        null
     } catch (e: InstagramException.Transient) {
-        unusableRepair("reply transient")
+        null
     } catch (e: InstagramException.ShapeChanged) {
-        unusableRepair("shape ${e.fieldPath}")
+        null
     }
 
-    private fun unusableRepair(reason: String): Nothing? {
-        log?.invoke("repair: failed ($reason)")
-        return null
+    /** Why a repaired reply was of no use, for the debug log: a kind, or a shape change's path (field names and indices only). */
+    private fun replyFailure(e: InstagramException): String = when (e) {
+        is InstagramException.StaleQuery -> "reply stale"
+        is InstagramException.Transient -> "reply transient"
+        is InstagramException.ShapeChanged -> "shape ${e.fieldPath}"
+        is InstagramException.RateLimited -> "reply rate limit"
+        is InstagramException.LoginRequired -> "reply login"
+        is InstagramException.ChallengeRequired -> "reply challenge"
+        else -> "reply ${e::class.simpleName}"
     }
 
     /**

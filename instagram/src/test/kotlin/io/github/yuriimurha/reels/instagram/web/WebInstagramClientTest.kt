@@ -254,6 +254,31 @@ class WebInstagramClientTest {
         assertEquals(emptyList(), docIds.learned)
     }
 
+    /** The caller hears a failure of the site's reply, before it is thrown, and only that: never a success, never the repair's own. */
+    @Test
+    fun onlyAFailureOfTheSitesReplyIsReportedAsOne() = runTest {
+        val heard = mutableListOf<InstagramException>()
+        val client = client()
+
+        repaired = { RepairedQuery("777", reply("""{"errors":[{"message":"Please wait a few minutes before you try again."}],"data":null}""")) }
+        val limited = assertFailsWith<InstagramException.RateLimited> { client.repairCollections { heard += it } }
+        assertEquals(listOf<InstagramException>(limited), heard)
+
+        heard.clear()
+        repaired = { RepairedQuery("777", reply(staleBody)) }
+        val stale = assertFailsWith<InstagramException.StaleQuery> { client.repairCollections { heard += it } }
+        assertEquals(listOf<InstagramException>(stale), heard)
+
+        heard.clear()
+        repaired = { throw InstagramException.RepairSkipped("limit") }
+        assertFailsWith<InstagramException.RepairSkipped> { client.repairCollections { heard += it } }
+        assertEquals(emptyList(), heard, "the repair's own refusal is not the reply's")
+
+        repaired = { RepairedQuery("777", reply(fixture("collections_graphql.json"))) }
+        client.repairCollections { heard += it }
+        assertEquals(emptyList(), heard, "a good reply reports nothing")
+    }
+
     @Test
     fun aRepairThatCannotRunThrowsItsOwnReasonAndLearnsNothing() = runTest {
         repaired = { throw InstagramException.RepairSkipped("limit") }

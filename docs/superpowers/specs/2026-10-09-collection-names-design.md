@@ -169,6 +169,9 @@ result):
 - **R20.** A names query the page could not send (no tokens) is `QueryNotSent`: never retried, the page kept, the last names.
 - **R21.** The forced repair's flag is spent once the Pacer grants the attempt, it is read by the real backend only, and
   Forget is off while a run is RUNNING.
+- **R22.** R17 counts only a GraphQL reply (one with a `data` key or GraphQL `errors`): a 2xx error envelope or bare status
+  without either keeps its shape change and starts no repair. A repaired reply that reports a rate limit, a logout or a
+  challenge logs `repair: failed (reply rate limit|reply login|reply challenge)` before the run stops.
 - **Phone facts (5).** The rollout settles AUTO and a real repair. STALE stays assumed (Forget sends no wrong id any more,
   R18), and CURSOR stays unverified until the account has more than 12 collection edges, the automatic ones included.
 - **Also, in 2 and 4.** The names query costs one request per 12 collections (the automatic ones count), not "one for one".
