@@ -44,13 +44,29 @@ class SettingsStoreTest {
     // The persisted key names are part of the on-disk schema, so they are spelled out here rather than shared.
     private val cooldownUntil = longPreferencesKey("cooldown_until")
     private val lastRateLimitAt = longPreferencesKey("last_rate_limit_at")
+    private val collectionsRepairAt = longPreferencesKey("collections_repair_at")
 
     @Test
     fun theFallbackHoldsAOneHourCooldownAndTheRateLimitThatStartedIt() {
         val fallback = SettingsStore.corruptionFallback(now = 5_000_000L)
         assertEquals(5_000_000L + 3_600_000L, fallback[cooldownUntil], "1 h from now (spec 7.3)")
         assertEquals(5_000_000L, fallback[lastRateLimitAt], "so a rate limit within 24 h escalates")
-        assertEquals(2, fallback.asMap().size, "nothing else: the session keys stay empty and read as LoggedOut")
+        assertEquals(
+            setOf(cooldownUntil, lastRateLimitAt, collectionsRepairAt),
+            fallback.asMap().keys,
+            "nothing else: the session keys stay empty and read as LoggedOut",
+        )
+    }
+
+    /** R11: like the cooldown, the repair limit assumes the worst: a repair just ran, so none runs within the next 24 h. */
+    @Test
+    fun theFallbackAlsoHoldsTheRepairLimitForADay() {
+        assertEquals(5_000_000L, SettingsStore.corruptionFallback(now = 5_000_000L)[collectionsRepairAt])
+    }
+
+    @Test
+    fun aCorruptFileIsReplacedByARepairLimitThatStartsNow() = runTest {
+        assertEquals(5_000_000L, open(corruptFile(), now = 5_000_000L).collectionsRepairAt())
     }
 
     @Test
@@ -158,6 +174,26 @@ class SettingsStoreTest {
         settings.setCollectionsRepairAt(null)
         assertNull(settings.collectionsRepairAt())
         assertEquals(emptySet(), readKeys(file))
+    }
+
+    /**
+     * "Forget collections query id": the stored id becomes "0" (digits, so it is sent, and never one the site runs, so the next
+     * use is stale and repairs), and the repair limit is cleared, so that repair is not refused by the last one's 24 h.
+     */
+    @Test
+    fun forgettingTheCollectionsQueryIdStoresZeroAndClearsTheRepairLimit() = runTest {
+        val file = File(tmp.root, "settings.preferences_pb")
+        val settings = open(file, now = 1L)
+        val name = WebGraphQl.SAVED_COLLECTIONS.friendlyName
+        settings.setGraphqlDocId(name, "777")
+        settings.setCollectionsRepairAt(5_000L)
+
+        settings.forgetCollectionsQueryId()
+
+        assertEquals("0", settings.graphqlDocId(name))
+        assertEquals("0", SettingsDocIdStore(settings).docId(WebGraphQl.SAVED_COLLECTIONS), "the id the next query is sent with")
+        assertNull(settings.collectionsRepairAt())
+        assertEquals(setOf(stringPreferencesKey("graphql_doc_$name")), readKeys(file), "nothing else is written")
     }
 
     @Test

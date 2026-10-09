@@ -12,15 +12,21 @@ data class SyncUiState(
     val canDiscard: Boolean,
     val canDeleteLibrary: Boolean,
     val banner: String?,
+    /** Said beside the banner, never instead of it: the collection names are the last good ones. Blocks nothing. */
+    val collectionNamesNotice: String? = null,
 )
 
 internal const val LOG_IN_TO_SYNC = "Log in to Instagram to sync"
+
+/** Spec 2026-10-09 §3.3: a sync kept the last collection names because it could not refresh them. */
+internal const val COLLECTION_NAMES_STALE = "Couldn't refresh collection names"
 
 /**
  * What the Sync screen offers for the latest run and the Pacer's state (spec 7.1, 7.4, 9.5). [sessionReady] is false when
  * the backend talks to Instagram and the session is not known to be valid (not read yet, logged out, expired, challenged):
  * starting or resuming is then off, and the screen says why unless a more specific banner already does. While the stored
  * session is still being read ([sessionLoading]) starting stays off, but nothing is said: "Log in" would be a guess.
+ * [collectionNamesStale] is the real library's flag (spec 2026-10-09 §3.3).
  */
 fun syncUiState(
     run: SyncRunEntity?,
@@ -28,6 +34,7 @@ fun syncUiState(
     now: Long,
     sessionReady: Boolean = true,
     sessionLoading: Boolean = false,
+    collectionNamesStale: Boolean = false,
 ): SyncUiState {
     val running = run?.status == SyncStatus.RUNNING
     val resumable = run?.status?.isResumable == true
@@ -52,6 +59,7 @@ fun syncUiState(
         canDiscard = resumable && !running,
         canDeleteLibrary = !running,
         banner = banner,
+        collectionNamesNotice = COLLECTION_NAMES_STALE.takeIf { collectionNamesStale },
     )
 }
 

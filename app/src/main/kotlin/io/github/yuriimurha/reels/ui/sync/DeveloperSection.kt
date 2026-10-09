@@ -19,7 +19,9 @@ import androidx.compose.ui.unit.dp
  * Debug builds only (the Sync screen decides): developer tools. [mockMode] is the mode this process runs in (true: the
  * fake library), or null when there is no Mock mode switch, which hides the row; otherwise the whole row toggles it, and
  * [mockSwitchEnabled] is false while a run is RUNNING or the latest run has not loaded yet. [labEnabled] gates the Adapter
- * lab button.
+ * lab button. [onForgetQueryId] is the real backend's "Forget collections query id" (spec 2026-10-09 §3.3), so the owner can
+ * watch one real repair; null (Mock mode) offers no button. It sends nothing, so it needs no session. [message] is what the
+ * section's last action could not do.
  */
 @Composable
 fun DeveloperSection(
@@ -28,6 +30,8 @@ fun DeveloperSection(
     onMockModeChange: (Boolean) -> Unit,
     onOpenLab: () -> Unit,
     labEnabled: Boolean,
+    onForgetQueryId: (() -> Unit)? = null,
+    message: String? = null,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Developer", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
@@ -48,5 +52,7 @@ fun DeveloperSection(
             )
         }
         OutlinedButton(onClick = onOpenLab, enabled = labEnabled) { Text("Adapter lab") }
+        if (onForgetQueryId != null) OutlinedButton(onClick = onForgetQueryId) { Text("Forget collections query id") }
+        message?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
     }
 }

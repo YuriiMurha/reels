@@ -19,10 +19,8 @@ import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.settings.SettingsDocIdStore
 import io.github.yuriimurha.reels.data.settings.SettingsStore
-import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
 import io.github.yuriimurha.reels.instagram.web.CookieStore
-import io.github.yuriimurha.reels.instagram.web.QueryRepair
 import io.github.yuriimurha.reels.instagram.web.WebEndpoints
 import io.github.yuriimurha.reels.instagram.web.WebInstagramClient
 import io.github.yuriimurha.reels.instagram.web.WebSessionProbe
@@ -31,6 +29,7 @@ import io.github.yuriimurha.reels.session.LazySessionProbe
 import io.github.yuriimurha.reels.session.SessionRepository
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.sync.LibraryAccount
+import io.github.yuriimurha.reels.sync.QueryRepairer
 import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.StoredLibraryAccount
@@ -42,6 +41,7 @@ import io.github.yuriimurha.reels.sync.pacing.DataStoreCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import io.github.yuriimurha.reels.sync.pacing.RoomRequestLog
+import io.github.yuriimurha.reels.transport.AndroidRepairPage
 import io.github.yuriimurha.reels.transport.AndroidWebPage
 import io.github.yuriimurha.reels.transport.WebViewTransport
 import kotlinx.coroutines.flow.first
@@ -179,8 +179,10 @@ class AppContainer(context: Context) {
     private val cdnHttp: OkHttpClient by lazy { HttpMediaFetcher.client(WebSettings.getDefaultUserAgent(context)) }
 
     /**
-     * Fake library, or real Instagram (P1). Building it builds no HTTP client: both are lazy. The collections query goes out with
-     * the doc id learned last (spec 2026-10-09 §3.3). The repair is not wired yet: it says so, and sync handles that (Task 5).
+     * Fake library, or real Instagram (P1). Building it builds no HTTP client and no WebView: all are lazy. The collections query
+     * goes out with the doc id learned last, and a stale one is repaired (at most once a day, and only when a sync asks) by a
+     * desktop page of the account's own Saved, made only for that repair and destroyed after it (spec 2026-10-09 §3.3). Mock
+     * mode builds none of it.
      */
     val backend: Backend by lazy {
         if (usesFake) {
@@ -190,7 +192,13 @@ class AppContainer(context: Context) {
                 WebInstagramClient(
                     { instagramTransport }, cookieStore,
                     docIds = SettingsDocIdStore(settings),
-                    repair = QueryRepair { throw InstagramException.RepairSkipped("not wired") },
+                    repair = QueryRepairer(
+                        settings,
+                        handle = { settings.session.first().handle },
+                        createPage = { AndroidRepairPage(context) },
+                        now = System::currentTimeMillis,
+                        log = debugLog,
+                    ),
                 ),
                 HttpMediaFetcher({ cdnHttp }),
                 instagramPacer,
@@ -233,11 +241,13 @@ class AppContainer(context: Context) {
         val signals: SessionSignals
         val sessionUsable: suspend (epoch: Int) -> RunSession
         val beforeRun: suspend () -> Unit
+        val setNamesStale: suspend (Boolean) -> Unit
         when (backend) {
             is Backend.Fake -> {
                 signals = SessionSignals.None
                 sessionUsable = { RunSession.USABLE } // the fake library has no session
                 beforeRun = { } // and no transport: Mock mode never touches it
+                setNamesStale = { } // its names never go stale, and the notice is the real library's
             }
             is Backend.Real -> {
                 signals = session
@@ -246,6 +256,8 @@ class AppContainer(context: Context) {
                 sessionUsable = session::runSession
                 // A run, or a Resume, is a new user action for the transport's page limit (R91).
                 beforeRun = ::allowNewInstagramAttempts
+                // The Sync screen's "Couldn't refresh collection names" (spec 2026-10-09 §3.3).
+                setNamesStale = settings::setCollectionNamesStale
             }
         }
         return SyncEngine(
@@ -254,6 +266,8 @@ class AppContainer(context: Context) {
             sessionUsable = sessionUsable,
             libraryAccount = libraryAccount,
             beforeRun = beforeRun,
+            setNamesStale = setNamesStale,
+            log = debugLog,
         )
     }
 }

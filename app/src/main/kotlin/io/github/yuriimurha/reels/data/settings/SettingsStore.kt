@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
+import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import io.github.yuriimurha.reels.sync.pacing.Cooldowns
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -106,6 +107,19 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         store.edit { it.setOrRemove(COLLECTIONS_REPAIR_AT, at) }
     }
 
+    /**
+     * The Developer action "Forget collections query id" (spec 2026-10-09 §3.3), in one write: the collections query's stored
+     * doc id becomes [FORGOTTEN_DOC_ID], so its next use is stale and repairs, and the repair limit is cleared, so that repair is
+     * not refused for having run in the last 24 h.
+     */
+    suspend fun forgetCollectionsQueryId() {
+        val key = graphqlDocKey(WebGraphQl.SAVED_COLLECTIONS.friendlyName)
+        store.edit {
+            it[key] = FORGOTTEN_DOC_ID
+            it.remove(COLLECTIONS_REPAIR_AT)
+        }
+    }
+
     /** True while the collection names are the last good ones because they could not be refreshed (spec 2026-10-09 §3.3). */
     val collectionNamesStale: Flow<Boolean> = store.data.map { it[COLLECTION_NAMES_STALE] ?: false }
 
@@ -126,6 +140,9 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         private val SESSION_CHALLENGE_URL = stringPreferencesKey("session_challenge_url")
         private val COLLECTIONS_REPAIR_AT = longPreferencesKey("collections_repair_at")
         private val COLLECTION_NAMES_STALE = booleanPreferencesKey("collection_names_stale")
+
+        /** What Forget stores: digits (so it is sent, R8), and never a doc id the website runs. */
+        internal const val FORGOTTEN_DOC_ID = "0"
 
         /** A GraphQL query's friendly name, as it goes into its key: letters, digits and `_`. */
         private val QUERY_NAME = Regex("[A-Za-z0-9_]{1,100}")
@@ -149,12 +166,14 @@ class SettingsStore(private val store: DataStore<Preferences>) {
          * What replaces a settings file that cannot be read (ruling R54). Wiping it would silently end an active
          * cooldown, even a 24 h one, so the replacement assumes the worst case: a rate limit just happened.
          * `cooldown_until` is [Cooldowns.SHORT_MS] (spec 7.3's 1 h) from [now], and `last_rate_limit_at` is [now], so a
-         * rate limit within the next 24 h escalates straight to the 24 h tier. The session keys stay empty: no kind
-         * reads as LoggedOut, and validation sorts that out once the cooldown ends.
+         * rate limit within the next 24 h escalates straight to the 24 h tier. R11: the same for the collections repair's
+         * limit, `collections_repair_at` is [now], so a lost file never lets a repair run within a day of the last one. The
+         * session keys stay empty: no kind reads as LoggedOut, and validation sorts that out once the cooldown ends.
          */
         internal fun corruptionFallback(now: Long): Preferences = preferencesOf(
             COOLDOWN_UNTIL to now + Cooldowns.SHORT_MS,
             LAST_RATE_LIMIT_AT to now,
+            COLLECTIONS_REPAIR_AT to now,
         )
     }
 }

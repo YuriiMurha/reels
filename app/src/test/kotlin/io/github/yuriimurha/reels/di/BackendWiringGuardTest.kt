@@ -71,6 +71,53 @@ class BackendWiringGuardTest {
         }
     }
 
+    /**
+     * Spec 2026-10-09 §3.3: the repair page (a second WebView on instagram.com) is made in one place, by the one [QueryRepairer]
+     * the real client gets as its repair, and Mock mode builds neither: `AndroidRepairPage(` lives in the `QueryRepairer(` call,
+     * which lives in the one `WebInstagramClient(` call, which lives in `Backend.Real(`. The repairer reads the stored session's
+     * handle, keeps its limit in the settings, and logs to the debug-only sink. `QueryRepairerTest` runs what it does.
+     */
+    @Test
+    fun theRepairPageIsMadeOnlyByTheRealClientsRepairer() {
+        val sources = allMain()
+        for (name in listOf("AndroidRepairPage", "QueryRepairer")) {
+            val construction = Regex("""(?<!class )(?<!\w)$name\s*\(|::\s*$name\b""")
+            val users = sources.mapValues { (_, text) -> text.lines().filterNot { it.trimStart().startsWith("import ") }.joinToString("\n") }
+                .filterValues { construction.containsMatchIn(it) }.keys
+            assertEquals(setOf("di/AppContainer.kt"), users, "$name is constructed only by the container")
+            assertEquals(1, construction.findAll(sources.getValue("di/AppContainer.kt")).count(), "exactly one $name(")
+        }
+        val container = main("di/AppContainer.kt")
+        val real = callArguments(container, "Backend.Real(").single()
+        val client = callArguments(real, "WebInstagramClient(").single()
+        val repairer = callArguments(client, "QueryRepairer(").single()
+        assertTrue(Regex("""\brepair\s*=\s*QueryRepairer\(""").containsMatchIn(client), "the client's repair: $client")
+        assertTrue(Regex("""^\s*settings\s*,""").containsMatchIn(repairer), "the limit is kept in the settings: $repairer")
+        assertTrue(Regex("""\bhandle\s*=\s*\{\s*settings\.session\.first\(\)\.handle\s*}""").containsMatchIn(repairer), "the handle: $repairer")
+        assertTrue(Regex("""\bcreatePage\s*=\s*\{\s*AndroidRepairPage\(\s*context\s*\)\s*}""").containsMatchIn(repairer), "the page: $repairer")
+        assertTrue(Regex("""\blog\s*=\s*debugLog\b""").containsMatchIn(repairer), "the debug-only sink: $repairer")
+        for (fake in callArguments(container, "Backend.Fake(")) {
+            assertFalse("Repair" in fake || "WebInstagramClient" in fake, "Mock mode builds no repair: $fake")
+        }
+    }
+
+    /**
+     * The Sync screen's "Couldn't refresh collection names" is the real library's: only the real engine writes it, and Mock mode's
+     * syncs (whose names never go stale) leave it alone. The engine's one debug line goes to the debug-only sink.
+     */
+    @Test
+    fun onlyTheRealEngineWritesTheNamesNotice() {
+        val container = main("di/AppContainer.kt")
+        val engine = callArguments(container, "SyncEngine(").single()
+        assertTrue(Regex("""\bsetNamesStale\s*=\s*setNamesStale\b""").containsMatchIn(engine), "the engine's notice: $engine")
+        assertTrue(Regex("""\blog\s*=\s*debugLog\b""").containsMatchIn(engine), "the engine's log: $engine")
+        val real = Regex("""is Backend\.Real\s*->\s*\{([^}]*)}""").find(container)?.groupValues?.get(1)
+        assertTrue(real != null && Regex("""setNamesStale\s*=\s*settings::setCollectionNamesStale\b""").containsMatchIn(real), "Backend.Real's notice: $real")
+        val fake = container.substringAfter("is Backend.Fake ->").substringBefore("is Backend.Real ->")
+        assertTrue(Regex("""setNamesStale\s*=\s*\{\s*}""").containsMatchIn(fake), "Backend.Fake's notice is a no-op: $fake")
+        assertFalse("settings" in fake, "Mock mode's engine writes no setting: $fake")
+    }
+
     /** No OkHttp API path is left in production: the API client factory and the JVM-test transport are `:instagram`'s, for tests. */
     @Test
     fun noOkHttpPathToInstagramsApiRemainsInProduction() {
@@ -308,6 +355,26 @@ class BackendWiringGuardTest {
             Regex("""realPacer\s*=\s*if\s*\(\s*container\.backend\s+is\s+Backend\.Fake\s*\)\s*container\.instagramPacer\s+else\s+null\b""")
                 .containsMatchIn(arguments),
             "the Sync screen must pass realPacer = if (container.backend is Backend.Fake) container.instagramPacer else null: $arguments",
+        )
+    }
+
+    /**
+     * Spec 2026-10-09 §3.3: "Forget collections query id" and "Couldn't refresh collection names" are the real library's. The
+     * screen hands the ViewModel the settings' action and flag for the real backend only; Mock mode gets neither (no button, and
+     * no notice the real library left behind). `SyncScreenCollectionNamesTest` runs both ways.
+     */
+    @Test
+    fun theSyncScreenOffersTheCollectionsQueryOnlyForTheRealBackend() {
+        val arguments = callArguments(main("ui/sync/SyncScreen.kt"), "SyncViewModel(").single()
+        assertTrue(
+            Regex("""forgetCollectionsQueryId\s*=\s*if\s*\(\s*container\.backend\s+is\s+Backend\.Real\s*\)\s*container\.settings::forgetCollectionsQueryId\s+else\s+null\b""")
+                .containsMatchIn(arguments),
+            "the Sync screen must pass forgetCollectionsQueryId = if (container.backend is Backend.Real) container.settings::forgetCollectionsQueryId else null: $arguments",
+        )
+        assertTrue(
+            Regex("""collectionNamesStale\s*=\s*if\s*\(\s*container\.backend\s+is\s+Backend\.Real\s*\)\s*container\.settings\.collectionNamesStale\s+else\s+flowOf\(\s*false\s*\)""")
+                .containsMatchIn(arguments),
+            "the Sync screen must pass collectionNamesStale = if (container.backend is Backend.Real) container.settings.collectionNamesStale else flowOf(false): $arguments",
         )
     }
 

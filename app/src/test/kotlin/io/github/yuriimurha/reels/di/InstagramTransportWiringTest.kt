@@ -6,11 +6,13 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.testutil.MainThreadTimeout
 import android.os.Looper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -20,7 +22,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -86,6 +90,34 @@ class InstagramTransportWiringTest {
         container.runEveryHook()
 
         assertFalse(container.instagramTransportCreated, "a hook built the transport in Mock mode")
+    }
+
+    /**
+     * Spec 2026-10-09 §3.3: Mock mode's client has no repair behind it (the fake library's answer is the interface's default),
+     * so no repair page can be made and no attempt is counted. Where the page is constructed is pinned in `BackendWiringGuardTest`.
+     */
+    @Test
+    fun mockModeHasNoRepair() = runBlocking {
+        val container = container(useFake = true)
+        assertFailsWith<InstagramException.Transient> { container.backend.client.repairCollections() }
+        assertNull(container.settings.collectionsRepairAt(), "no attempt was recorded")
+        assertFalse(container.instagramTransportCreated)
+    }
+
+    /**
+     * The real client's repair is the container's [io.github.yuriimurha.reels.sync.QueryRepairer] over the stored session: with no
+     * handle stored it refuses before it builds anything (no repair page, no transport) or counts an attempt against its limit.
+     */
+    @Test
+    fun theRealRepairWithoutAStoredHandleBuildsNothing() = runBlocking {
+        val container = container(useFake = false)
+        assertNull(container.settings.session.first().handle, "precondition: no session is stored")
+
+        val refused = assertFailsWith<InstagramException.RepairSkipped> { container.backend.client.repairCollections() }
+
+        assertEquals("collections repair unavailable: no handle", refused.message)
+        assertNull(container.settings.collectionsRepairAt(), "nothing was attempted")
+        assertFalse(container.instagramTransportCreated)
     }
 
     /**
