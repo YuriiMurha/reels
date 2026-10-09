@@ -18,6 +18,12 @@ class GraphQlQuery internal constructor(val friendlyName: String, val builtInDoc
 object WebGraphQl {
     const val PATH = "api/graphql"
 
+    /**
+     * Every path the website may post a query to: [PATH], the one the app sends to, and another one some of its pages use. The
+     * repair page's script (`ig_watch.js`) watches both and sends nothing; its tests pin its list against this one.
+     */
+    val QUERY_PATHS: List<String> = listOf(PATH, "graphql/query")
+
     /** The desktop website's Saved tab: the account's collections with their names. */
     val SAVED_COLLECTIONS = GraphQlQuery("PolarisProfileSavedTabContentQuery", "27584326974521636")
 

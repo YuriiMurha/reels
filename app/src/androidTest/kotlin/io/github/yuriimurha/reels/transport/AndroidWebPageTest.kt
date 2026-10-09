@@ -16,9 +16,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
-import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
 import mockwebserver3.SocketEffect
 import org.junit.After
@@ -31,10 +29,8 @@ import org.junit.Test
 import org.junit.rules.TestRule
 import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
-import java.net.InetAddress
 import java.net.URLDecoder
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -73,7 +69,7 @@ class AndroidWebPageTest {
     }
 
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
-    private val sites = mutableListOf<Site>()
+    private val sites = mutableListOf<LocalSite>()
     private val cookieOrigins = mutableListOf<String>()
     private var transport: WebViewTransport? = null
 
@@ -615,7 +611,7 @@ class AndroidWebPageTest {
      * naming a bridge object) to post forged replies for ids 0 to [FORGED_IDS] (the call's is 1) through each, and reports how
      * each one ended. Only then does the server answer the call, a second later, so a forgery that got through would win.
      */
-    private fun callWithAForgingFrame(site: Site, frames: Site, routes: List<String>): ForgedCall {
+    private fun callWithAForgingFrame(site: LocalSite, frames: LocalSite, routes: List<String>): ForgedCall {
         val inFlight = CountDownLatch(1)
         val reported = CountDownLatch(1)
         val report = AtomicReference<String>()
@@ -667,37 +663,7 @@ class AndroidWebPageTest {
 
     // --- Plumbing ------------------------------------------------------------------------------------------------------------
 
-    /** A local server that answers by path and remembers every request it got. */
-    private class Site : AutoCloseable {
-        private val server = MockWebServer()
-        private val seen = CopyOnWriteArrayList<RecordedRequest>()
-        private val routes = ConcurrentHashMap<String, (RecordedRequest) -> MockResponse>()
-
-        init {
-            server.dispatcher = object : Dispatcher() {
-                override fun dispatch(request: RecordedRequest): MockResponse {
-                    seen += request
-                    // Unknown paths (the page's favicon, say) are plain 404s.
-                    return routes[request.url.encodedPath]?.invoke(request) ?: MockResponse.Builder().code(404).build()
-                }
-            }
-            server.start(InetAddress.getByName("127.0.0.1"), 0)
-        }
-
-        val origin: String get() = "http://127.0.0.1:${server.port}"
-
-        fun route(path: String, handler: (RecordedRequest) -> MockResponse) {
-            routes[path] = handler
-        }
-
-        fun requestsTo(path: String): List<RecordedRequest> = seen.filter { it.url.encodedPath == path }
-
-        fun requests(): List<RecordedRequest> = seen.toList()
-
-        override fun close() = server.close()
-    }
-
-    private fun site(): Site = Site().also { sites += it }
+    private fun site(): LocalSite = LocalSite().also { sites += it }
 
     /**
      * The real transport on the real page, pointed at [site]: its origin is the home page and the only allowed sender. With
@@ -705,7 +671,7 @@ class AndroidWebPageTest {
      * With [rewrite], every script the transport evaluates is changed by it on the way into the page.
      */
     private fun transport(
-        site: Site,
+        site: LocalSite,
         heard: MutableList<String>? = null,
         callTimeoutMs: Long = 30_000,
         rewrite: ((String) -> String)? = null,
