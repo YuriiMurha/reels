@@ -71,7 +71,7 @@ per-collection feed requests stop.
 
 ### 3.3 Self-repair of the `doc_id`
 
-- **Storage.** The `doc_id` in use lives in the app's settings (`graphql_doc_saved_collections`), defaulting to the
+- **Storage.** The `doc_id` in use lives in the app's settings (`graphql_doc_<friendly name>`), defaulting to the
   built-in value; learned values replace it. A Developer action **Forget collections query id** sets it to a value known to
   be wrong, so the owner can trigger and watch one real repair.
 - **Trigger.** Only a stale-query reply (§3.1) starts a repair. A 429, a login or challenge landing or reply, a network
@@ -124,3 +124,39 @@ per-collection feed requests stop.
   taken from a fake page and never posted back, unknown friendly names refused; the repair page in desktop mode (UA and
   client hints seen by the server), its script catching a fake Saved page's request and reporting only `doc_id` + reply.
 - **Phone:** one sync shows the names; then **Forget collections query id** and one sync shows a successful repair.
+
+## 7. Amendments during implementation
+
+The text above is the approved design and stays as written, except the settings key name in 3.3, which now reads as the
+code has it. What changed while it was built (the numbers are the controller's rulings; `ARCHITECTURE.md` describes the
+result):
+
+- **R1.** The lab's Collections call moves to GraphQL in the commit that removes `WebEndpoints.collections` (task 4, not 5).
+- **R2.** Task 4 wired `SettingsDocIdStore` and a placeholder repair that refuses ("not wired"), so every commit compiled; task 5
+  replaced it with `QueryRepairer`.
+- **R3.** `SettingsStore.setCollectionsRepairAt(at: Long?)`: null clears the limit, which Forget needs.
+- **R4.** The phone spike (task 1) had not run when the parser was built: STALE, CURSOR and AUTO use the plan's stated
+  defaults, marked "assumed" in the code, and the phone rollout verifies them.
+- **R5.** The repo `CLAUDE.md` hard rule lists what the page scripts may repeat (`ig_fetch.js`'s GraphQL names, `ig_watch.js`).
+- **R6.** The GraphQL form-field and header names are `:instagram` constants (`WebGraphQl`), which `OkHttpTransport` and the
+  script pins use; the `DTSGInitialData` and `LSD` module names are a named exception, pinned by test literals.
+- **R7.** The PR is squash-merged, so main never carries the commits in which docs lagged the code.
+- **R8.** `SettingsDocIdStore` answers a stored id only when it is digits (at most 30), else the built-in one, and `learned()`
+  never stores any other; both transports refuse a doc id that is not digits.
+- **R9.** The repair page is laid out as a 1440 x 900 CSS-pixel window (device pixels = CSS pixels x density), and
+  `ig_watch.js` catches the site's real request shapes (a `Request` or `URL` object, `FormData` and `Blob` bodies, a JSON XHR).
+- **R10.** The repair page's identity is Chrome-on-Android's "Desktop site" (X11; Linux x86_64 user agent at the WebView's
+  major version, client-hint platform Linux, not mobile, form factor Desktop, 64-bit, Chrome's GREASE brand, the WebView's real
+  full version), not macOS: the phone's own platform, touch points and pixel density cannot be hidden, so macOS would
+  contradict them.
+- **R11.** The settings corruption fallback also sets `collections_repair_at` to now, so a lost file never allows a repair
+  within a day of the last one.
+- **R12.** In-band GraphQL `errors` go through the classifier's markers first (rate limit, login, challenge keep their
+  meaning), and a reply whose `data` has `viewer` is never a stale query (3.1's "errors with no usable data is stale" holds
+  only without `data.viewer`); a 2xx execution error with `data.viewer` is `Transient`.
+- **R13.** The sync keeps a set of cursors already seen while it lists the collections; a repeated one is
+  `ShapeChanged("page_info.end_cursor")`, as is a page whose next cursor is the one it was asked with.
+- **Also, in 2 and 4.** The names query costs one request per 12 collections (the automatic ones count), not "one for one".
+  A repair the 24 h limit refuses still costs one run-budget unit and one request-log entry. And with strategy A a Sync
+  (QUICK) records an item's collections only for the pages it walks, so an older saved item newly added to a collection is
+  picked up by a Full sync, no longer by a Sync.
