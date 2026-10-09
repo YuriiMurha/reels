@@ -81,6 +81,59 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         return stringPreferencesKey("library_account_pk_$library")
     }
 
+    /**
+     * Spec 2026-10-09 §3.3: the doc id last learned for the website's GraphQL query [name] (its friendly name), one key per query
+     * (`graphql_doc_<name>`), or null for none. Read through `SettingsDocIdStore`, which falls back to the built-in id.
+     */
+    suspend fun graphqlDocId(name: String): String? = store.data.first()[graphqlDocKey(name)]
+
+    /** Null removes it, so the query goes back to its built-in id. */
+    suspend fun setGraphqlDocId(name: String, docId: String?) {
+        val key = graphqlDocKey(name)
+        store.edit { it.setOrRemove(key, docId) }
+    }
+
+    private fun graphqlDocKey(name: String): Preferences.Key<String> {
+        require(QUERY_NAME.matches(name)) { "a query's friendly name is an identifier" }
+        return stringPreferencesKey("graphql_doc_$name")
+    }
+
+    /** When the last collections repair started (epoch ms), for its 24 h limit (spec 2026-10-09 §3.3), or null for never. */
+    suspend fun collectionsRepairAt(): Long? = store.data.first()[COLLECTIONS_REPAIR_AT]
+
+    /** R3: null clears it, so the next repair is not refused by the last one's 24 h. */
+    suspend fun setCollectionsRepairAt(at: Long?) {
+        store.edit { it.setOrRemove(COLLECTIONS_REPAIR_AT, at) }
+    }
+
+    /**
+     * The Developer action "Forget collections query id" (spec 2026-10-09 §3.3; R18, R21), in one edit: it arms one forced
+     * repair (`collections_force_repair`), so the next real sync skips the names query and repairs, and clears the repair limit,
+     * so that repair is not refused for having run in the last 24 h. It stores no made-up doc id: the one in use stays until a
+     * repair learns a new one, and nothing depends on how Instagram answers a wrong id.
+     */
+    suspend fun forgetCollectionsQueryId() {
+        store.edit {
+            it[COLLECTIONS_FORCE_REPAIR] = true
+            it.remove(COLLECTIONS_REPAIR_AT)
+        }
+    }
+
+    /** Whether Forget armed a forced repair that no sync has spent yet (R18). Read by the real sync engine only. */
+    suspend fun collectionsForceRepair(): Boolean = store.data.first()[COLLECTIONS_FORCE_REPAIR] ?: false
+
+    /** Spends the forced repair: the sync engine calls it once the Pacer has granted the repair's attempt (R21). */
+    suspend fun clearCollectionsForceRepair() {
+        store.edit { it.remove(COLLECTIONS_FORCE_REPAIR) }
+    }
+
+    /** True while the collection names are the last good ones because they could not be refreshed (spec 2026-10-09 §3.3). */
+    val collectionNamesStale: Flow<Boolean> = store.data.map { it[COLLECTION_NAMES_STALE] ?: false }
+
+    suspend fun setCollectionNamesStale(stale: Boolean) {
+        store.edit { it[COLLECTION_NAMES_STALE] = stale }
+    }
+
     private fun <T> MutablePreferences.setOrRemove(key: Preferences.Key<T>, value: T?) {
         if (value == null) remove(key) else this[key] = value
     }
@@ -92,6 +145,12 @@ class SettingsStore(private val store: DataStore<Preferences>) {
         private val SESSION_KIND = stringPreferencesKey("session_kind")
         private val SESSION_HANDLE = stringPreferencesKey("session_handle")
         private val SESSION_CHALLENGE_URL = stringPreferencesKey("session_challenge_url")
+        private val COLLECTIONS_REPAIR_AT = longPreferencesKey("collections_repair_at")
+        private val COLLECTION_NAMES_STALE = booleanPreferencesKey("collection_names_stale")
+        private val COLLECTIONS_FORCE_REPAIR = booleanPreferencesKey("collections_force_repair")
+
+        /** A GraphQL query's friendly name, as it goes into its key: letters, digits and `_`. */
+        private val QUERY_NAME = Regex("[A-Za-z0-9_]{1,100}")
 
         fun create(context: Context): SettingsStore = open(produceFile = { context.preferencesDataStoreFile("settings") })
 
@@ -112,12 +171,14 @@ class SettingsStore(private val store: DataStore<Preferences>) {
          * What replaces a settings file that cannot be read (ruling R54). Wiping it would silently end an active
          * cooldown, even a 24 h one, so the replacement assumes the worst case: a rate limit just happened.
          * `cooldown_until` is [Cooldowns.SHORT_MS] (spec 7.3's 1 h) from [now], and `last_rate_limit_at` is [now], so a
-         * rate limit within the next 24 h escalates straight to the 24 h tier. The session keys stay empty: no kind
-         * reads as LoggedOut, and validation sorts that out once the cooldown ends.
+         * rate limit within the next 24 h escalates straight to the 24 h tier. R11: the same for the collections repair's
+         * limit, `collections_repair_at` is [now], so a lost file never lets a repair run within a day of the last one. The
+         * session keys stay empty: no kind reads as LoggedOut, and validation sorts that out once the cooldown ends.
          */
         internal fun corruptionFallback(now: Long): Preferences = preferencesOf(
             COOLDOWN_UNTIL to now + Cooldowns.SHORT_MS,
             LAST_RATE_LIMIT_AT to now,
+            COLLECTIONS_REPAIR_AT to now,
         )
     }
 }

@@ -62,6 +62,21 @@ class SyncEngine(
      * fake backend has no transport: the default does nothing.
      */
     private val beforeRun: suspend () -> Unit = {},
+    /**
+     * The Sync screen's "Couldn't refresh collection names" (spec 2026-10-09 §3.3): told true when a run keeps the last names,
+     * false when a listing succeeds. The real backend passes the settings' flag; the fake one never fails a listing.
+     */
+    private val setNamesStale: suspend (Boolean) -> Unit = {},
+    /**
+     * R18/R21: whether the Developer action "Forget collections query id" armed one forced repair. Read when a run lists the
+     * names; the real backend passes the settings' flag, the fake one the default (it has no query to repair, and must never
+     * spend the real library's flag).
+     */
+    private val repairForced: suspend () -> Boolean = { false },
+    /** Spends that flag: called inside the request lambda, i.e. only once the Pacer has granted the forced repair's attempt. */
+    private val clearRepairForced: suspend () -> Unit = {},
+    /** Debug builds only: `collections query stale|forced`, `repair: ...`. Never a doc id or anything of a reply. */
+    private val log: ((String) -> Unit)? = null,
 ) {
     companion object {
         /** P7: a FULL reconcile removing at least this many items AND more than half of those that existed before the run is refused. */
@@ -69,6 +84,14 @@ class SyncEngine(
 
         /** R84: the `lastError` (and the Sync screen's banner) of a run under another account than the library's. */
         internal const val ANOTHER_ACCOUNT = "This library belongs to another Instagram account. Delete library to switch."
+
+        /** What a collection is called while the website has given it no name (spec 2026-10-09 §3.3). */
+        internal fun placeholderName(number: Int) = "Collection $number"
+
+        private val PLACEHOLDER = Regex("Collection ([1-9][0-9]{0,8})")
+
+        /** The N of a [placeholderName], or null for any other name. */
+        private fun placeholderNumber(name: String): Int? = PLACEHOLDER.matchEntire(name)?.groupValues?.get(1)?.toInt()
     }
 
     private val mediaDao = db.mediaDao()
@@ -101,12 +124,12 @@ class SyncEngine(
             notifySession { signals.sessionOk(account.username, epoch) }
             ensureLibraryAccount(account.pk)
             progress.phase("Listing collections")
-            val collections = fetchCollections(progress)
+            val (collections, lastNames) = fetchCollections(progress)
             val scopes = listOf(ALL_SAVED_ID to "All Saved") +
                 if (client.reportsSavedCollectionIds) emptyList() else collections.map { it.id to it.name }
             progress.update { it.copy(collectionsTotal = scopes.size) }
-            val knownCollections = collections.map { it.id }.toSet()
-            for ((scope, label) in scopes) walkScope(progress, scope, label, knownCollections)
+            val knownCollections = collections.mapTo(mutableSetOf()) { it.id }
+            for ((scope, label) in scopes) walkScope(progress, scope, label, knownCollections, placeholders = lastNames)
             progress.finish(SyncStatus.DONE, null)
         } catch (e: CancellationException) {
             withContext(NonCancellable) { progress.finish(SyncStatus.PAUSED, "Cancelled") }
@@ -163,12 +186,13 @@ class SyncEngine(
      * One paced request, retried after a transient failure. Every attempt first passes [ensureSessionUsable], inside the gate,
      * and the answer passes it again when it returns, before the caller writes anything of it (R107): a paste, a logout or a
      * login as another account can land while the request is out, and the answer then belongs to a session that is gone. Only a
-     * read; it sends nothing.
+     * read; it sends nothing. [retry] false makes exactly one attempt: the collections repair, which has its own limit.
      */
-    private suspend fun <T> call(progress: Progress, request: suspend () -> T): T {
-        val answer = retryTransient(random) {
+    private suspend fun <T> call(progress: Progress, retry: Boolean = true, request: suspend () -> T): T {
+        val paced: suspend () -> T = {
             pacer.sync(progress.budget, precondition = { ensureSessionUsable(progress.epoch) }, request = request)
         }
+        val answer = if (retry) retryTransient(random) { paced() } else paced()
         ensureSessionUsable(progress.epoch)
         return answer
     }
@@ -203,27 +227,155 @@ class SyncEngine(
     /** The session belongs to another account than the library ([ensureLibraryAccount]). */
     private class AnotherAccount : Exception()
 
-    private suspend fun fetchCollections(progress: Progress): List<CollectionEntity> {
+    /**
+     * The account's collections with their names, and whether they are the last good ones instead (spec 2026-10-09 §3.3).
+     *
+     * The website's names query, page by page. A stale reply to the FIRST page (the site no longer runs the doc id) gets the run's
+     * one repair ([repairCollections]), whose page then continues the listing. R18: when Forget armed a forced repair
+     * ([repairForced], read once, for the first page), the first page is that repair instead, with no query sent at all. When the
+     * names can't be had (the repair refused, failed or unusable, a stale LATER page, which is a broken answer and never
+     * repaired, or R20 a query the page could not send, on any page), the run goes on with the last names
+     * ([fallbackCollections]; the second value is true). A rate limit, a login or challenge, or a names reply of another shape
+     * stops the run as from any request. R13: a cursor already seen in this listing (A, B, A) is a shape change, before the cycle
+     * eats the run's budget.
+     */
+    private suspend fun fetchCollections(progress: Progress): Pair<List<CollectionEntity>, Boolean> {
         val remote = mutableListOf<RemoteCollection>()
+        val visited = mutableSetOf<String>()
         var cursor: String? = null
-        do {
-            val from = cursor
-            val page = call(progress) { client.collections(from) }
-            remote += page.items
-            cursor = page.nextCursor
-        } while (cursor != null)
+        try {
+            do {
+                val from = cursor
+                val page = if (from == null && repairForced()) {
+                    log?.invoke("collections query forced")
+                    repairCollections(progress, forced = true) ?: return fallbackCollections() to true
+                } else {
+                    try {
+                        call(progress) { client.collections(from) }
+                    } catch (e: InstagramException.StaleQuery) {
+                        if (from != null) throw e
+                        log?.invoke("collections query stale")
+                        repairCollections(progress) ?: return fallbackCollections() to true
+                    }
+                }
+                remote += page.items
+                cursor = page.nextCursor
+                if (cursor != null && !visited.add(cursor)) throw InstagramException.ShapeChanged("page_info.end_cursor")
+            } while (cursor != null)
+        } catch (e: InstagramException.StaleQuery) {
+            return fallbackCollections() to true
+        } catch (e: InstagramException.QueryNotSent) {
+            // R20: nothing went out (the page had no tokens), so there is nothing to repair, and a retry would find the same page.
+            return fallbackCollections() to true
+        }
         // An empty list over a library that has collections is a broken answer, not an account that deleted them all: marking
         // them removed would hide every collection. Thrown before the transaction, so nothing has been touched.
         if (remote.isEmpty() && collectionDao.liveCollectionCount() > 0) throw InstagramException.ShapeChanged("empty collection list")
-        val live = remote.mapIndexed { index, c -> CollectionEntity(c.id, c.name, c.coverMediaPk, position = index) }
-        db.withTransaction {
-            collectionDao.upsert(live + CollectionEntity(ALL_SAVED_ID, "All Saved", coverPk = null, position = -1))
+        val live = db.withTransaction {
+            val names = namesOf(remote)
+            val live = remote.mapIndexed { index, c -> CollectionEntity(c.id, names[index], c.coverMediaPk, position = index) }
+            collectionDao.upsert(live + allSaved())
             collectionDao.markRemovedExcept(live.map { it.id }, now())
+            live
         }
-        return live
+        markNamesStale(false)
+        return live to false
     }
 
-    private suspend fun walkScope(progress: Progress, scope: String, label: String, knownCollections: Set<String>) {
+    /**
+     * The run's one repair of the names query: through [call] like any request (one run-budget unit, inside the Pacer's gate, so
+     * never during a cooldown nor under a session that is gone), but never retried, since a second attempt could only be
+     * refused by the repair's own 24 h limit. Null when it gave no names: refused or failed ([InstagramException.RepairUnavailable],
+     * which the repairer logs itself), or a reply of the site's own that the client could not use, so it learned nothing from it:
+     * itself stale, failed for a moment, or (R14) of another shape. A rate limit, a login or a challenge page goes on as from any
+     * request. Debug log: `repair: learned new id` once the client returns, i.e. once it has parsed the reply and kept its doc id
+     * (D-I2), else `repair: failed (reply stale|reply transient|shape <field path>)`; the path holds field names and indices only.
+     * A [forced] repair spends Forget's flag inside the request lambda (R21): only once the Pacer has granted the attempt, so a
+     * cooldown, a budget or a session refusal keeps it for the next sync, and the repairer's own refusals spend it.
+     */
+    private suspend fun repairCollections(progress: Progress, forced: Boolean = false): Page<RemoteCollection>? = try {
+        call(progress, retry = false) {
+            if (forced) clearRepairForced()
+            client.repairCollections().also { log?.invoke("repair: learned new id") }
+        }
+    } catch (e: InstagramException.RepairUnavailable) {
+        null
+    } catch (e: InstagramException.StaleQuery) {
+        unusableRepair("reply stale")
+    } catch (e: InstagramException.Transient) {
+        unusableRepair("reply transient")
+    } catch (e: InstagramException.ShapeChanged) {
+        unusableRepair("shape ${e.fieldPath}")
+    }
+
+    private fun unusableRepair(reason: String): Nothing? {
+        log?.invoke("repair: failed ($reason)")
+        return null
+    }
+
+    /**
+     * The names could not be refreshed: the collections keep those of the last good listing, nothing is marked removed, and the
+     * Sync screen says so until a listing succeeds. All Saved is written too, for a library whose very first listing failed.
+     */
+    private suspend fun fallbackCollections(): List<CollectionEntity> {
+        collectionDao.upsert(listOf(allSaved()))
+        markNamesStale(true)
+        return collectionDao.liveCollectionsNow()
+    }
+
+    private fun allSaved() = CollectionEntity(ALL_SAVED_ID, "All Saved", coverPk = null, position = -1)
+
+    /**
+     * The name each of [remote] is stored under: the website's; for an empty one, the name the app already has for it; else a
+     * new [placeholderName], numbered on from the highest placeholder that stays, so no two collections share one.
+     */
+    private suspend fun namesOf(remote: List<RemoteCollection>): List<String> {
+        val had = collectionDao.liveCollectionsNow().associate { it.id to it.name }
+        val kept = remote.map { it.name.ifBlank { had[it.id].orEmpty() } }
+        var next = (kept.mapNotNull(::placeholderNumber).maxOrNull() ?: 0) + 1
+        return kept.map { name -> name.ifBlank { placeholderName(next++) } }
+    }
+
+    /** The Sync screen's notice. A store that can't be written must not stop the sync: only the notice would be wrong. */
+    private suspend fun markNamesStale(stale: Boolean) {
+        try {
+            setNamesStale(stale)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Intentionally ignored: the next run writes it again.
+        }
+    }
+
+    /**
+     * Only while the names are the last good ones ([fetchCollections]): a collection an item is saved in that was never named
+     * gets a [placeholderName] numbered one past the highest live placeholder (so numbering goes on across runs, in the order
+     * the feed first shows them), placed after the last collection, and is [known] from then on, so its memberships are
+     * written like any other's. A later good listing gives it the website's name. One a good listing marked removed is not
+     * new: its row comes back (cover kept) under the name it had, unless that is a placeholder name a live collection has
+     * taken since, which is numbered afresh, so no two collections share one.
+     */
+    private suspend fun addPlaceholder(id: String, known: MutableSet<String>) {
+        val live = collectionDao.liveCollectionsNow()
+        val number = (live.mapNotNull { placeholderNumber(it.name) }.maxOrNull() ?: 0) + 1
+        val position = (live.maxOfOrNull { it.position } ?: -1) + 1
+        val removed = collectionDao.collection(id)?.takeIf { it.removedAt != null }
+        val storedName = removed?.name?.takeUnless { name -> placeholderNumber(name) != null && live.any { it.name == name } }
+        collectionDao.upsert(
+            listOf(
+                CollectionEntity(id, storedName ?: placeholderName(number), coverPk = removed?.coverPk, position = position),
+            ),
+        )
+        known += id
+    }
+
+    private suspend fun walkScope(
+        progress: Progress,
+        scope: String,
+        label: String,
+        knownCollections: MutableSet<String>,
+        placeholders: Boolean,
+    ) {
         val resumed = syncDao.cursor(progress.run.id, scope)
         var cursor = resumed ?: SyncCursorEntity(
             runId = progress.run.id,
@@ -243,7 +395,7 @@ class SyncEngine(
             val from = cursor.nextCursor
             val page = call(progress) { client.savedMedia(scope.takeUnless { it == ALL_SAVED_ID }, from) }
             val current = cursor
-            val outcome = db.withTransaction { applyPage(progress, scope, current, page, knownCollections) }
+            val outcome = db.withTransaction { applyPage(progress, scope, current, page, knownCollections, placeholders) }
             cursor = outcome.cursor
             outcome.removedPks.forEach(thumbnails::delete)
             evictVideos(outcome.removedPks)
@@ -271,13 +423,17 @@ class SyncEngine(
         val removedPks: List<String>,
     )
 
-    /** One page in one transaction: media, memberships, cursor and (at the end of a FULL walk) reconcile. */
+    /**
+     * One page in one transaction: media, memberships, cursor and (at the end of a FULL walk) reconcile. With [placeholders]
+     * (the names are the last good ones), a collection an item lists that none of them names is added ([addPlaceholder]).
+     */
     private suspend fun applyPage(
         progress: Progress,
         scope: String,
         cursor: SyncCursorEntity,
         page: Page<RemoteMedia>,
-        knownCollections: Set<String>,
+        knownCollections: MutableSet<String>,
+        placeholders: Boolean,
     ): PageOutcome {
         val runId = progress.run.id
         val mode = progress.run.mode
@@ -301,7 +457,11 @@ class SyncEngine(
         if (scope == ALL_SAVED_ID && client.reportsSavedCollectionIds) {
             page.items.zip(memberships).forEach { (item, member) ->
                 // null means "the response doesn't say" (RemoteMedia): keep what we have, never treat it as "none".
-                val ids = item.savedCollectionIds?.filter { it in knownCollections } ?: return@forEach
+                val listed = item.savedCollectionIds ?: return@forEach
+                if (placeholders) {
+                    listed.filter { it.isNotBlank() && it !in knownCollections }.distinct().forEach { addPlaceholder(it, knownCollections) }
+                }
+                val ids = listed.filter { it in knownCollections }
                 // Only among the collections this run listed: a membership in one it did not list is left alone.
                 collectionDao.deleteRealMembershipsExcept(item.pk, ids, knownCollections.toList())
                 collectionDao.upsertMemberships(ids.map { CollectionMediaEntity(it, item.pk, member.sortKey, runId) })

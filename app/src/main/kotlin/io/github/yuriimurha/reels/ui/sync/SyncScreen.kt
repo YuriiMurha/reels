@@ -52,6 +52,7 @@ import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.sync.pacing.PacerStatus
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.login.LoginPurpose
+import kotlinx.coroutines.flow.flowOf
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,6 +74,9 @@ fun SyncScreen(
                 mockSwitch = container.mockModeSwitch { ProcessRestart.restart(appContext) }.takeIf { BuildConfig.DEBUG },
                 // Mock mode: Check now, the lab and the video resolver still use the real Pacer, so its state is shown too.
                 realPacer = if (container.backend is Backend.Fake) container.instagramPacer else null,
+                // The collections query and its names notice are the real library's (spec 2026-10-09 §3.3).
+                forgetCollectionsQueryId = if (container.backend is Backend.Real) container.settings::forgetCollectionsQueryId else null,
+                collectionNamesStale = if (container.backend is Backend.Real) container.settings.collectionNamesStale else flowOf(false),
             )
         }
     },
@@ -88,8 +92,10 @@ fun SyncScreen(
     val sessionMessage by viewModel.sessionMessage.collectAsStateWithLifecycle()
     val pasteError by viewModel.pasteError.collectAsStateWithLifecycle()
     val mockSwitchEnabled by viewModel.mockSwitchEnabled.collectAsStateWithLifecycle()
+    val forgetQueryIdEnabled by viewModel.forgetQueryIdEnabled.collectAsStateWithLifecycle()
     val realPacerNote by viewModel.realPacerNote.collectAsStateWithLifecycle()
     val storageMessage by viewModel.storageMessage.collectAsStateWithLifecycle()
+    val developerMessage by viewModel.developerMessage.collectAsStateWithLifecycle()
     var pasting by remember { mutableStateOf(false) }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
@@ -147,6 +153,9 @@ fun SyncScreen(
                         onMockModeChange = viewModel::setMockMode,
                         onOpenLab = onOpenLab,
                         labEnabled = sessionState is SessionState.Valid,
+                        onForgetQueryId = if (viewModel.canForgetQueryId) viewModel::forgetQueryId else null,
+                        forgetEnabled = forgetQueryIdEnabled,
+                        message = developerMessage,
                     )
                 }
             },
@@ -223,6 +232,7 @@ fun SyncContent(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            ui.collectionNamesNotice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }
         run?.let { RunProgress(it, pacer) }
         Section("History") {

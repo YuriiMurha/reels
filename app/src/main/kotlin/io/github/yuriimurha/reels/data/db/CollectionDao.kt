@@ -13,6 +13,14 @@ interface CollectionDao {
     @Query("SELECT * FROM collection WHERE removedAt IS NULL AND id != '$ALL_SAVED_ID' ORDER BY position")
     fun liveCollections(): Flow<List<CollectionEntity>>
 
+    /** [liveCollections], read once: the names a sync keeps when it cannot refresh them (spec 2026-10-09 §3.3). */
+    @Query("SELECT * FROM collection WHERE removedAt IS NULL AND id != '$ALL_SAVED_ID' ORDER BY position")
+    suspend fun liveCollectionsNow(): List<CollectionEntity>
+
+    /** The row of [id], live or marked removed, or null when there is none. */
+    @Query("SELECT * FROM collection WHERE id = :id")
+    suspend fun collection(id: String): CollectionEntity?
+
     @Query("UPDATE collection SET removedAt = :at WHERE id NOT IN (:keep) AND id != '$ALL_SAVED_ID' AND removedAt IS NULL")
     suspend fun markRemovedExcept(keep: List<String>, at: Long)
 

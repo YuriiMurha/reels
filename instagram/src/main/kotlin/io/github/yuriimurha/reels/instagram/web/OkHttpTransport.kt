@@ -4,6 +4,7 @@ import io.github.yuriimurha.reels.instagram.InstagramException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -14,7 +15,7 @@ import kotlin.coroutines.resumeWithException
 
 /**
  * [InstagramTransport] over the OkHttp client of [HttpClientFactory.create] (no redirects, no retries, the shared cookie
- * jar). One request per [get]. A connect failure is [InstagramException.Transient]; an HTTP error status is a reply.
+ * jar). One request per [get] or [graphql]. A connect failure is [InstagramException.Transient]; an HTTP error status is a reply.
  *
  * This is the JVM-test transport (MockWebServer and the like). Production uses the WebView transport (`:app`,
  * `WebViewTransport`), which runs each call as a same-origin `fetch()` in a hidden instagram.com page.
@@ -35,8 +36,29 @@ class OkHttpTransport(
         require(url != null && url.scheme == base.scheme && url.host == base.host && url.port == base.port) {
             "not a path on the Instagram base"
         }
+        return send(Request.Builder().url(url).get().build())
+    }
+
+    /**
+     * The website's form for [query], without the page's `fb_dtsg`/`lsd`: this transport has no page to read them from (the
+     * WebView transport's page adds them itself), and the JVM tests that use it need none.
+     */
+    override suspend fun graphql(query: GraphQlQuery, docId: String, variables: String): RawReply {
+        require(WebGraphQl.isDocId(docId)) { "not a doc id" }
+        val url = checkNotNull(base.resolve(WebGraphQl.PATH)) { "no GraphQL URL on the base" }
+        val form = FormBody.Builder()
+            .add(WebGraphQl.Field.CALLER_CLASS, WebGraphQl.CALLER_CLASS)
+            .add(WebGraphQl.Field.FRIENDLY_NAME, query.friendlyName)
+            .add(WebGraphQl.Field.VARIABLES, variables)
+            .add(WebGraphQl.Field.SERVER_TIMESTAMPS, "true")
+            .add(WebGraphQl.Field.DOC_ID, docId)
+            .build()
+        return send(Request.Builder().url(url).header(WebGraphQl.Header.FRIENDLY_NAME, query.friendlyName).post(form).build())
+    }
+
+    private suspend fun send(request: Request): RawReply {
         val response = try {
-            http.newCall(Request.Builder().url(url).get().build()).await()
+            http.newCall(request).await()
         } catch (e: IOException) {
             throw InstagramException.Transient(e)
         }

@@ -183,3 +183,8 @@ the controller's rulings; `ARCHITECTURE.md` describes the result):
   `TODO.md` "Later" item.
 - **3.5.** Nothing was deleted: `SessionGuard`, the cookie bridge and the OkHttp API client are used only by the JVM
   tests, which build their MockWebServer client with them, so removing them is a separate clean-up.
+- **Amended again by `2026-10-09-collection-names-design.md`.** `collections` is no longer `api/v1/collections/list/` (the
+  website answers it 404): the names come from the website's own GraphQL query, one POST from the same hidden page, and 3.2's
+  script gains `window.__igGraphQl`. When Instagram changes that query's id, a second, separate repair page (desktop mode,
+  at most once per 24 h, one page view) learns the new one. The 3.3 table row for `collections`, and 3.2's "one `fetch` per
+  call" read as "one `fetch`, a GET or the one allow-listed POST".

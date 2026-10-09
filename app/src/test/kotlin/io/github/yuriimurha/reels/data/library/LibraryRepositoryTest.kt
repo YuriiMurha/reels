@@ -192,6 +192,26 @@ class LibraryRepositoryTest {
     }
 
     /**
+     * C-M5: "Couldn't refresh collection names" spoke of names that are gone with the library: Delete library (the owner's way to
+     * switch accounts) clears it too, once the rows are gone. A write that fails only leaves the notice wrong until the next sync.
+     */
+    @Test
+    fun deleteLibraryClearsTheNamesNoticeAfterTheRowsAreGone() = runTest {
+        givenLibrary()
+        val cardsWhenCleared = mutableListOf<Int>()
+        lateinit var repository: LibraryRepository
+        repository = LibraryRepository(db, thumbs, clearNamesStale = { cardsWhenCleared += repository.collectionCards().first().size })
+
+        assertEquals(LibraryDeletion.COMPLETE, repository.deleteLibrary())
+
+        assertEquals(listOf(0), cardsWhenCleared, "cleared exactly once, after the library itself was deleted")
+        val failing = LibraryRepository(db, thumbs, clearNamesStale = { throw java.io.IOException("disk full") })
+        givenLibrary()
+        assertEquals(LibraryDeletion.COMPLETE, failing.deleteLibrary(), "never thrown, and nothing worth reporting")
+        assertEquals(emptyList(), failing.collectionCards().first())
+    }
+
+    /**
      * H4: forgetting the account is a settings write that can fail after the rows are gone. Delete library must not throw
      * (it would crash the app from the ViewModel's scope), must still remove everything else, and must say what was left undone.
      */

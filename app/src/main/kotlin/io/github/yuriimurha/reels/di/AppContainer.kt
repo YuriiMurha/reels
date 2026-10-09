@@ -17,6 +17,7 @@ import io.github.yuriimurha.reels.data.media.RealVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
+import io.github.yuriimurha.reels.data.settings.SettingsDocIdStore
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
 import io.github.yuriimurha.reels.instagram.web.CookieStore
@@ -28,6 +29,7 @@ import io.github.yuriimurha.reels.session.LazySessionProbe
 import io.github.yuriimurha.reels.session.SessionRepository
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.sync.LibraryAccount
+import io.github.yuriimurha.reels.sync.QueryRepairer
 import io.github.yuriimurha.reels.sync.RunSession
 import io.github.yuriimurha.reels.sync.SessionSignals
 import io.github.yuriimurha.reels.sync.StoredLibraryAccount
@@ -39,6 +41,7 @@ import io.github.yuriimurha.reels.sync.pacing.DataStoreCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import io.github.yuriimurha.reels.sync.pacing.RoomRequestLog
+import io.github.yuriimurha.reels.transport.AndroidRepairPage
 import io.github.yuriimurha.reels.transport.AndroidWebPage
 import io.github.yuriimurha.reels.transport.WebViewTransport
 import kotlinx.coroutines.flow.first
@@ -83,6 +86,8 @@ class AppContainer(context: Context) {
             db, thumbnails,
             clearVideoCache = { videoCache.clear() },
             forgetAccount = { libraryAccount.forget() },
+            // C-M5: "Couldn't refresh collection names" goes with the real library's names; Mock mode's delete leaves it alone.
+            clearNamesStale = { if (!usesFake) settings.setCollectionNamesStale(false) },
             beforeSessionChange = ::resetInstagramTransport,
             debugLog = debugLog,
         )
@@ -175,12 +180,31 @@ class AppContainer(context: Context) {
      */
     private val cdnHttp: OkHttpClient by lazy { HttpMediaFetcher.client(WebSettings.getDefaultUserAgent(context)) }
 
-    /** Fake library, or real Instagram (P1). Building it builds no HTTP client: both are lazy. */
+    /**
+     * Fake library, or real Instagram (P1). Building it builds no HTTP client and no WebView: all are lazy. The collections query
+     * goes out with the doc id learned last, and a stale one is repaired (at most once a day, and only when a sync asks) by a
+     * desktop page of the account's own Saved, made only for that repair and destroyed after it (spec 2026-10-09 §3.3). Mock
+     * mode builds none of it.
+     */
     val backend: Backend by lazy {
         if (usesFake) {
             Backend.Fake()
         } else {
-            Backend.Real(WebInstagramClient({ instagramTransport }, cookieStore), HttpMediaFetcher({ cdnHttp }), instagramPacer)
+            Backend.Real(
+                WebInstagramClient(
+                    { instagramTransport }, cookieStore,
+                    docIds = SettingsDocIdStore(settings),
+                    repair = QueryRepairer(
+                        settings,
+                        handle = { settings.session.first().handle },
+                        createPage = { AndroidRepairPage(context) },
+                        now = System::currentTimeMillis,
+                        log = debugLog,
+                    ),
+                ),
+                HttpMediaFetcher({ cdnHttp }),
+                instagramPacer,
+            )
         }
     }
 
@@ -188,8 +212,11 @@ class AppContainer(context: Context) {
     fun mockModeSwitch(restart: () -> Unit) =
         MockModeSwitch(usesFake, backendChoice, cancelSync = { syncScheduler.cancelAndAwait() }, restart = restart)
 
-    /** The debug Adapter lab. Built without the transport: that is only built when a lab call reaches the network. */
-    val adapterLab: AdapterLab by lazy { AdapterLab({ instagramTransport }, cookieStore) }
+    /**
+     * The debug Adapter lab. Built without the transport: that is only built when a lab call reaches the network. Its
+     * Collections call sends the doc id the real client would.
+     */
+    val adapterLab: AdapterLab by lazy { AdapterLab({ instagramTransport }, cookieStore, docIds = SettingsDocIdStore(settings)) }
 
     /**
      * Building this loads no WebView: the transport (and its page) is only built when the first request needs the probe, and
@@ -216,11 +243,17 @@ class AppContainer(context: Context) {
         val signals: SessionSignals
         val sessionUsable: suspend (epoch: Int) -> RunSession
         val beforeRun: suspend () -> Unit
+        val setNamesStale: suspend (Boolean) -> Unit
+        val repairForced: suspend () -> Boolean
+        val clearRepairForced: suspend () -> Unit
         when (backend) {
             is Backend.Fake -> {
                 signals = SessionSignals.None
                 sessionUsable = { RunSession.USABLE } // the fake library has no session
                 beforeRun = { } // and no transport: Mock mode never touches it
+                setNamesStale = { } // its names never go stale, and the notice is the real library's
+                repairForced = { false } // nor does it read (or spend) Forget's flag, which is the real library's
+                clearRepairForced = { }
             }
             is Backend.Real -> {
                 signals = session
@@ -229,6 +262,11 @@ class AppContainer(context: Context) {
                 sessionUsable = session::runSession
                 // A run, or a Resume, is a new user action for the transport's page limit (R91).
                 beforeRun = ::allowNewInstagramAttempts
+                // The Sync screen's "Couldn't refresh collection names" (spec 2026-10-09 §3.3).
+                setNamesStale = settings::setCollectionNamesStale
+                // R18/R21: the one forced repair "Forget collections query id" arms, spent once the Pacer grants it.
+                repairForced = settings::collectionsForceRepair
+                clearRepairForced = settings::clearCollectionsForceRepair
             }
         }
         return SyncEngine(
@@ -237,6 +275,10 @@ class AppContainer(context: Context) {
             sessionUsable = sessionUsable,
             libraryAccount = libraryAccount,
             beforeRun = beforeRun,
+            setNamesStale = setNamesStale,
+            repairForced = repairForced,
+            clearRepairForced = clearRepairForced,
+            log = debugLog,
         )
     }
 }

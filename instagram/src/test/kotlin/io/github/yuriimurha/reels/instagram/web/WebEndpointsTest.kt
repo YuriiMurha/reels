@@ -1,6 +1,7 @@
 package io.github.yuriimurha.reels.instagram.web
 
 import io.github.yuriimurha.reels.instagram.InstagramException
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -73,9 +74,20 @@ class WebEndpointsTest {
         assertEquals("c2", WebEndpoints.savedPosts(b, "c2").queryParameter("max_id"))
         assertEquals("/api/v1/feed/collection/17900000000000002/posts/", WebEndpoints.collectionPosts(b, "17900000000000002", null).encodedPath)
         assertEquals("/api/v1/media/3100000000000000001/info/", WebEndpoints.mediaInfo(b, "3100000000000000001").encodedPath)
-        val list = WebEndpoints.collections(b, null)
-        assertEquals("/api/v1/collections/list/", list.encodedPath)
-        assertEquals("[\"ALL_MEDIA_AUTO_COLLECTION\",\"MEDIA\",\"AUDIO_AUTO_COLLECTION\"]", list.queryParameter("collection_types"))
+    }
+
+    /**
+     * Spec 2026-10-09 §1: the api/v1 collections list is not served on the web (a 404 page). The names come from the website's
+     * GraphQL query ([WebGraphQl.SAVED_COLLECTIONS]); nothing in the adapter may build that old URL again.
+     */
+    @Test
+    fun noAdapterCodeAsksForTheApiV1CollectionsList() {
+        val root = File("src/main/kotlin")
+        assertTrue(root.isDirectory, "unit tests must run from the instagram module directory")
+        val sources = root.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList()
+        assertTrue(sources.size > 20, "the scan found ${sources.size} files")
+        val offenders = sources.filter { "collections/list" in it.readText() }.map { it.name }
+        assertEquals(emptyList(), offenders)
     }
 
     @Test
@@ -93,9 +105,9 @@ class WebEndpointsTest {
         assertEquals("api/v1/feed/saved/posts/", WebEndpoints.relative(WebEndpoints.savedPosts(b, null)))
         assertEquals("api/v1/feed/saved/posts/?max_id=a%2Bb%2Fc%3D", WebEndpoints.relative(WebEndpoints.savedPosts(b, "a+b/c=")))
         // Whatever the encoding, resolving the relative form against the base gives the same URL back.
-        val list = WebEndpoints.collections(b, "c 1")
-        assertEquals(list, b.resolve(WebEndpoints.relative(list)))
-        assertTrue(WebEndpoints.relative(list).startsWith("api/v1/collections/list/?collection_types="))
+        val page = WebEndpoints.collectionPosts(b, "17900000000000002", "c 1[\"x\"]")
+        assertEquals(page, b.resolve(WebEndpoints.relative(page)))
+        assertTrue(WebEndpoints.relative(page).startsWith("api/v1/feed/collection/17900000000000002/posts/?max_id="))
     }
 
     /** P6: one host per client, so OkHttp never coalesces connections and never re-sends after a 421. */
@@ -103,7 +115,7 @@ class WebEndpointsTest {
     fun everyApiEndpointStaysOnTheBaseHost() {
         val b = WebEndpoints.BASE
         listOf(
-            WebEndpoints.currentUser(), WebEndpoints.collections(b, "x"), WebEndpoints.savedPosts(b, "x"),
+            WebEndpoints.currentUser(), WebEndpoints.savedPosts(b, "x"),
             WebEndpoints.collectionPosts(b, "1", "x"), WebEndpoints.mediaInfo(b, "1"),
         ).forEach { assertEquals("www.instagram.com", it.host); assertEquals("https", it.scheme) }
     }
@@ -124,9 +136,8 @@ class WebEndpointsTest {
     fun theCursorIsOnlySentWhenThereIsOne() {
         val b = WebEndpoints.BASE
         assertNull(WebEndpoints.savedPosts(b, null).queryParameter("max_id"))
-        assertNull(WebEndpoints.collections(b, null).queryParameter("max_id"))
         assertNull(WebEndpoints.collectionPosts(b, "1", null).queryParameter("max_id"))
-        assertEquals("a+b/c=", WebEndpoints.collections(b, "a+b/c=").queryParameter("max_id"))
+        assertEquals("a+b/c=", WebEndpoints.collectionPosts(b, "1", "a+b/c=").queryParameter("max_id"))
     }
 
     @Test
@@ -135,5 +146,25 @@ class WebEndpointsTest {
         assertEquals("/api/v1/media/$max/info/", WebEndpoints.mediaInfo(WebEndpoints.BASE, max).encodedPath)
         assertFailsWith<InstagramException.ShapeChanged> { WebEndpoints.mediaInfo(WebEndpoints.BASE, "9".repeat(31)) }
         assertFailsWith<InstagramException.ShapeChanged> { WebEndpoints.collectionPosts(WebEndpoints.BASE, "1 ", null) }
+    }
+
+    /** The repair page's one URL (spec 2026-10-09 §3.3): the account's own Saved page, on the home page's origin. */
+    @Test
+    fun theSavedPageIsTheHandlesOwnOnTheHomeOrigin() {
+        val handle = "test" + "." + "user_1"
+        assertEquals("https://www.instagram.com/test.user_1/saved/", WebEndpoints.savedPage(handle))
+        for (good in listOf("a", "x".repeat(30), "a.b_c9", "_.9", "_", "A.")) {
+            assertEquals(WebEndpoints.HOME_URL + good + "/saved/", WebEndpoints.savedPage(good), good)
+        }
+    }
+
+    /** Only a handle of Instagram's shape goes into it: nothing that adds a path, a query, a fragment or another host. */
+    @Test
+    fun aHandleOfAnyOtherShapeHasNoSavedPage() {
+        val bad = listOf(
+            "", ".", "..", "...", "a/b", "../x", "a?b", "a#b", "a b", "a%2Fb", "a\n", "\tab", "x".repeat(31), "ä", "é", "ß",
+            "Ж", "١٢", "a@b.com", "a:b", "a\\b", "a-b",
+        )
+        for (handle in bad) assertNull(WebEndpoints.savedPage(handle), "'$handle'")
     }
 }

@@ -3,10 +3,20 @@ package io.github.yuriimurha.reels.instagram.web
 import io.github.yuriimurha.reels.instagram.InstagramException
 import kotlinx.serialization.json.JsonObject
 
-/** One Instagram API GET. Implementations make exactly one request per call and never retry or follow redirects. */
+/**
+ * One Instagram API call: a GET, or a POST of the website's own GraphQL query. Implementations make exactly one request per
+ * call and never retry or follow redirects.
+ */
 interface InstagramTransport {
     /** [pathAndQuery] is relative to https://www.instagram.com/ (no leading slash), built only by [WebEndpoints]. */
     suspend fun get(pathAndQuery: String): RawReply
+
+    /**
+     * One POST of the website's own GraphQL [query] with [docId] and [variables] (JSON text). The same rules as [get]: one
+     * request, never retried, never redirected. Tokens are the transport's business and never leave it. A [docId] that is not
+     * of the website's shape ([WebGraphQl.isDocId]) is refused with [IllegalArgumentException] before anything is sent.
+     */
+    suspend fun graphql(query: GraphQlQuery, docId: String, variables: String): RawReply
 }
 
 /**

@@ -1,7 +1,13 @@
 package io.github.yuriimurha.reels.instagram.web
 
+import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.InstagramException.ChallengeRequired
+import io.github.yuriimurha.reels.instagram.InstagramException.LoginRequired
+import io.github.yuriimurha.reels.instagram.InstagramException.RateLimited
 import io.github.yuriimurha.reels.instagram.InstagramException.ShapeChanged
+import io.github.yuriimurha.reels.instagram.InstagramException.Transient
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -15,8 +21,11 @@ import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class WebParsersTest {
     private fun fixture(name: String): JsonObject =
@@ -41,9 +50,6 @@ class WebParsersTest {
 
     private fun assertSavedShapeChange(path: String, json: JsonObject) =
         assertEquals(path, assertFailsWith<ShapeChanged> { WebParsers.savedPage(json) }.fieldPath)
-
-    private fun assertCollectionsShapeChange(path: String, json: JsonObject) =
-        assertEquals(path, assertFailsWith<ShapeChanged> { WebParsers.collectionsPage(json) }.fieldPath)
 
     /** The first media of `saved_page_more.json` (the reel) with [key] set to [value], parsed. */
     private fun reelWith(key: String, value: JsonElement): RemoteMedia =
@@ -233,43 +239,233 @@ class WebParsersTest {
         assertEquals("items", assertFailsWith<ShapeChanged> { WebParsers.savedPage(JsonObject(emptyMap())) }.fieldPath)
     }
 
+    // Replies to the website's Saved-tab GraphQL query (spec 2026-10-09 §3.1), scrubbed: names Alpha and Beta, fixture ids.
+    private fun node(id: String, name: String, cover: String? = null) =
+        """{"node":{"__typename":"XDTSavedCollection","collection_id":"$id","collection_name":${JsonPrimitive(name)},""" +
+            """"collection_media_count":1,"cover_media":${cover?.let { "{\"pk\":\"$it\"}" } ?: "null"}},"cursor":"x"}"""
+
+    private fun reply(vararg edges: String, next: String? = null) =
+        """{"data":{"viewer":{"collections_unified_with_auto_collections":{"edges":[${edges.joinToString(",")}],""" +
+            """"page_info":{"has_next_page":${next != null},"end_cursor":${next?.let { "\"$it\"" } ?: "null"}}}}}}"""
+
+    private fun collections(body: String) = WebParsers.collectionsGraphQl(Json.parseToJsonElement(body).jsonObject)
+
+    private fun assertCollectionsShapeChange(path: String, body: String) =
+        assertEquals(path, assertFailsWith<ShapeChanged> { collections(body) }.fieldPath)
+
+    private fun graphQl(body: String?, code: Int = 200, contentType: String? = "application/json") = RawReply(code, contentType, body)
+
+    private val alpha = node("17900000000000001", "Alpha", "3100000000000000001")
+
+    /** The collections root with [rest] after its `{`: the caller closes the root and the three objects around it. */
+    private fun root(rest: String) = """{"data":{"viewer":{"collections_unified_with_auto_collections":{$rest}}}}"""
+
     @Test
-    fun collectionsKeepOnlyMediaCollections() {
-        val page = WebParsers.collectionsPage(fixture("collections_list.json"))
-        assertEquals(listOf("Food", "Travel"), page.items.map { it.name })
-        assertEquals(listOf("17900000000000002", "17900000000000003"), page.items.map { it.id })
-        assertEquals("3100000000000000001", page.items[0].coverMediaPk)
-        assertNull(page.items[1].coverMediaPk)
+    fun collectionsGraphQlKeepsUserCollectionsAndSkipsAutomaticOnes() {
+        val page = collections(
+            reply(
+                node("ALL_MEDIA_AUTO_COLLECTION", "All posts", "3100000000000000009"),
+                alpha,
+                node("17900000000000002", "Beta"),
+                node("AUDIO_AUTO_COLLECTION", "Audio"),
+            ),
+        )
+        assertEquals(
+            listOf(
+                RemoteCollection("17900000000000001", "Alpha", "3100000000000000001"),
+                RemoteCollection("17900000000000002", "Beta", null),
+            ),
+            page.items,
+        )
         assertNull(page.nextCursor)
     }
 
     @Test
-    fun collectionsReturnTheCursorWhenMoreIsAvailable() {
-        val json = fixture("collections_list.json")
-            .with("more_available", JsonPrimitive(true))
-            .with("next_max_id", JsonPrimitive("QVFE_cursor_c"))
-        assertEquals("QVFE_cursor_c", WebParsers.collectionsPage(json).nextCursor)
+    fun aLeadingForLoopGuardIsStripped() {
+        val guarded = graphQl("for (;;);" + reply(alpha))
+        assertNull(WebParsers.classifySavedCollections(guarded))
+        assertEquals(listOf("Alpha"), WebParsers.collectionsGraphQl(WebParsers.savedCollectionsJsonOrThrow(guarded)).items.map { it.name })
+        // The guard hides nothing the reply says.
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("for (;;);" + """{"require_login":true}""")))
+        assertIs<LoginRequired>(assertFailsWith<InstagramException> { WebParsers.savedCollectionsJsonOrThrow(graphQl("""{"require_login":true}""")) })
     }
 
     @Test
-    fun collectionsWithoutMoreAvailableAreAShapeChange() {
-        assertCollectionsShapeChange("more_available", fixture("collections_list.json").without("more_available"))
+    fun page2CursorComesFromPageInfo() {
+        assertEquals("c1", collections(reply(alpha, next = "c1")).nextCursor)
+        assertNull(collections(reply(alpha)).nextCursor)
+        assertCollectionsShapeChange("page_info", root(""""edges":[]"""))
     }
 
     @Test
-    fun collectionsMoreAvailableWithoutACursorIsAShapeChange() {
-        val json = fixture("collections_list.json").with("more_available", JsonPrimitive(true))
-        assertCollectionsShapeChange("next_max_id", json)
+    fun aPageThatSaysMoreWithoutACursorOrNotAsABooleanIsAShapeChange() {
+        assertCollectionsShapeChange("page_info.end_cursor", root(""""edges":[],"page_info":{"has_next_page":true,"end_cursor":null}"""))
+        assertCollectionsShapeChange("page_info.end_cursor", root(""""edges":[],"page_info":{"has_next_page":true,"end_cursor":""}"""))
+        // A real JSON boolean only: the string "false" must not read as "last page" (P5).
+        assertCollectionsShapeChange("page_info.has_next_page", root(""""edges":[],"page_info":{"has_next_page":"false"}"""))
+        assertCollectionsShapeChange("page_info.has_next_page", root(""""edges":[],"page_info":{"end_cursor":null}"""))
+        assertCollectionsShapeChange("page_info", root(""""edges":[],"page_info":[]"""))
+    }
+
+    @Test
+    fun namesAreKeptAsIs() {
+        val odd = "Q\"uote 😀 שלום"
+        val page = collections(reply(node("17900000000000001", odd), node("17900000000000002", ""), node("17900000000000003", "  Gym  ")))
+        // An empty name stays empty here; sync gives it a placeholder (Task 5). T-F7: white space around a name is the site's too.
+        assertEquals(listOf(odd, "", "  Gym  "), page.items.map { it.name })
+    }
+
+    @Test
+    fun aNodeWithoutItsIdOrNameIsAShapeChange() {
+        assertCollectionsShapeChange("edges[1].node.collection_id", reply(alpha, """{"node":{"collection_name":"Beta"}}"""))
+        assertCollectionsShapeChange("edges[1].node.collection_id", reply(alpha, """{"node":{"collection_id":null,"collection_name":"Beta"}}"""))
+        assertCollectionsShapeChange("edges[1].node.collection_name", reply(alpha, """{"node":{"collection_id":"17900000000000002"}}"""))
+        assertCollectionsShapeChange(
+            "edges[1].node.collection_name",
+            reply(alpha, """{"node":{"collection_id":"17900000000000002","collection_name":null}}"""),
+        )
+        assertCollectionsShapeChange("edges[1].node", reply(alpha, """{"cursor":"x"}"""))
+        assertCollectionsShapeChange("edges[1].node", reply(alpha, """{"node":null,"cursor":"x"}"""))
+        assertCollectionsShapeChange("edges[1]", reply(alpha, "7"))
+        assertCollectionsShapeChange("edges", root(""""page_info":{"has_next_page":false}"""))
+        assertCollectionsShapeChange("data.viewer.collections_unified_with_auto_collections", """{"data":{"viewer":{}}}""")
+    }
+
+    @Test
+    fun anIdOfDigitsIsAUserCollectionAndAnythingElseIsAutomatic() {
+        assertTrue(WebParsers.isUserCollectionId("17900000000000001"))
+        for (auto in listOf("ALL_MEDIA_AUTO_COLLECTION", "AUDIO_AUTO_COLLECTION", "", "1790000000000000a", "-1", "1".repeat(31))) {
+            assertFalse(WebParsers.isUserCollectionId(auto), auto)
+        }
     }
 
     @Test
     fun aCoverPkThatIsNotDigitsIsJustNoCover() {
-        val list = fixture("collections_list.json")
-        fun foodWithCover(pk: JsonElement) =
-            WebParsers.collectionsPage(list.withWrapper(1) { it.with("cover_media", JsonObject(mapOf("pk" to pk))) }).items[0]
-        assertNull(foodWithCover(JsonPrimitive("x")).coverMediaPk)
-        assertNull(foodWithCover(num("3.1E18")).coverMediaPk)
-        assertEquals("3100000000000000009", foodWithCover(JsonPrimitive("3100000000000000009")).coverMediaPk)
+        fun alphaWithCover(pk: String) =
+            collections(reply("""{"node":{"collection_id":"17900000000000001","collection_name":"Alpha","cover_media":{"pk":$pk}}}"""))
+                .items.single().coverMediaPk
+        assertNull(alphaWithCover("\"x\""))
+        assertNull(alphaWithCover("3.1E18"))
+        assertEquals("3100000000000000009", alphaWithCover("\"3100000000000000009\""))
+        assertEquals("3100000000000000009", alphaWithCover("3100000000000000009"))
+    }
+
+    /**
+     * Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. R17: a 2xx
+     * JSON reply without `data.viewer` is stale with or without `errors`, so a doc id that names another query (planted, say)
+     * is repaired within a day instead of being sent again on every sync.
+     */
+    @Test
+    fun classifySavedCollectionsCallsFactStalesReplyAStaleQuery() {
+        val stale = listOf(
+            graphQl("""{"errors":[{"message":"x","severity":"CRITICAL"}],"data":null}"""),
+            graphQl("""{"errors":[{"message":"x"}]}"""),
+            graphQl("""{"errors":[{"message":"x"}],"data":{}}"""),
+            graphQl("""{"errors":[{"message":"x"}],"data":null,"status":"fail"}"""),
+            graphQl("for (;;);" + """{"errors":[{"message":"x","summary":"y","description":"z"}],"data":null}"""),
+            // R17: no errors at all.
+            graphQl("""{"data":{}}"""),
+            graphQl("""{"data":null}"""),
+            graphQl("{}"),
+            graphQl("""{"errors":[]}"""),
+            graphQl("""{"data":{"other_query_root":{"edges":[]}}}"""),
+            graphQl("""{"status":"fail"}"""),
+            graphQl("""{"data":{}}""", code = 204),
+            graphQl("<html><body>Sorry, this page isn't available.</body></html>", code = 404, contentType = "text/html"),
+            graphQl("Bad request", code = 400, contentType = "text/plain"),
+        )
+        for (reply in stale) {
+            val error = assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(reply), reply.body)
+            assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, error.query)
+            assertFalse(WebGraphQl.SAVED_COLLECTIONS.builtInDocId in error.message.orEmpty(), "a StaleQuery never carries a doc id")
+            assertIs<InstagramException.StaleQuery>(assertFailsWith<InstagramException> { WebParsers.savedCollectionsJsonOrThrow(reply) })
+        }
+    }
+
+    /** R12 (a): an `errors` entry that names a rate limit, a logout or a challenge is that, never a stale query. */
+    @Test
+    fun anInBandRateLimitLoginOrChallengeKeepsItsMeaning() {
+        val rootNull = """"data":{"viewer":{"collections_unified_with_auto_collections":null}}"""
+        val wait = """{"message":"Please wait a few minutes before you try again."}"""
+        // The throttled account of the review: before R12 this was a stale query, and would have started a repair.
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{$rootNull,"errors":[$wait]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[$wait]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"summary":"feedback_required"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("for (;;);" + """{"errors":[$wait],""" + reply(alpha).removePrefix("{"))))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[$wait]}""", code = 400)))
+
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[{"message":"x","summary":"login_required"}]}""")))
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{$rootNull,"errors":[{"description":"Login_Required"}]}""")))
+
+        val challenge = assertIs<ChallengeRequired>(
+            WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[{"description":"challenge_required"}]}""")),
+        )
+        assertNull(challenge.challengeUrl, "an in-band challenge has no URL")
+        assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"checkpoint_required"}]}""")))
+
+        // T4 parity: an entry's `error_type` carries the same markers, read as ErrorClassifier.classify reads a reply's.
+        assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[{"error_type":"checkpoint_required"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"x","error_type":"feedback_required"}]}""")))
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"data":{},"errors":[{"error_type":"Login_Required"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{$rootNull,"errors":[{"error_type":"feedback_required"}]}""")))
+
+        // Across entries, ErrorClassifier's precedence: a challenge, then a rate limit, then a logout.
+        val login = """{"message":"login_required"}"""
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[$login,$wait]}""")))
+        assertIs<ChallengeRequired>(
+            WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[$wait,{"summary":"challenge_required"}]}""")),
+        )
+    }
+
+    /** R12 (b): with `data.viewer` the query ran, so its doc id is current: an error there is a passing failure, never stale. */
+    @Test
+    fun aReplyWhoseQueryRanIsNeverStale() {
+        val execution = """"errors":[{"message":"An unknown error occurred.","severity":"ERROR"}]"""
+        for (data in listOf(
+            """{"viewer":{"collections_unified_with_auto_collections":null}}""",
+            """{"viewer":{}}""",
+            """{"viewer":null}""",
+        )) {
+            assertIs<Transient>(WebParsers.classifySavedCollections(graphQl("""{"data":$data,$execution}""")), data)
+            assertIs<Transient>(WebParsers.classifySavedCollections(graphQl("for (;;);" + """{"data":$data,$execution}""")), data)
+        }
+    }
+
+    @Test
+    fun classifySavedCollectionsKeepsEveryOtherFailure() {
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"status":"fail"}""", code = 429)))
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"require_login":true}""")))
+        assertNull(assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(RawReply(302, null, null, redirected = true))).challengeUrl)
+        assertIs<Transient>(WebParsers.classifySavedCollections(graphQl("<html>down</html>", code = 500, contentType = "text/html")))
+        assertIs<Transient>(WebParsers.classifySavedCollections(graphQl(null)))
+        // A challenge or a rate limit wins over the errors of a stale reply.
+        assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"message":"challenge_required","errors":[{"message":"x"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"x"}]}""", code = 429)))
+        // A cut 400 may have hidden a challenge, and a JSON 400 or a 410 is not fact STALE's reply: none is a stale query.
+        assertEquals("http.400.unreadable", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl(null, code = 400))).fieldPath)
+        assertEquals("http.400", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl("""{"status":"fail"}""", code = 400))).fieldPath)
+        assertEquals("http.410", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl("gone", code = 410))).fieldPath)
+        // A 200 that is not JSON keeps the rule of every other reply.
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("<html>Log in</html>", contentType = "text/html")))
+        assertEquals("$", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl("oops", contentType = "text/plain"))).fieldPath)
+    }
+
+    @Test
+    fun classifySavedCollectionsLetsAReplyWithTheRootBeParsed() {
+        assertNull(WebParsers.classifySavedCollections(graphQl(reply(alpha))))
+        // Errors beside the root (a partial answer) still carry the collections.
+        assertNull(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"x"}],""" + reply(alpha).removePrefix("{"))))
+    }
+
+    /** The query ran (`data.viewer` is there) but gave no root and no error: a reply of another shape, never stale (R12, R17). */
+    @Test
+    fun classifySavedCollectionsCallsAViewerWithoutTheRootOrErrorsAShapeChange() {
+        for (body in listOf("""{"data":{"viewer":{}}}""", """{"data":{"viewer":null}}""", """{"data":{"viewer":{"other":1}},"errors":[]}""")) {
+            assertEquals(
+                "data.viewer.collections_unified_with_auto_collections",
+                assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl(body)), body).fieldPath,
+            )
+        }
     }
 
     @Test

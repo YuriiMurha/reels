@@ -70,9 +70,17 @@ class DeveloperSectionTest {
     }
 
     private var opened = 0
+    private var forgotten = 0
     private val mockChanges = mutableListOf<Boolean>()
 
-    private fun show(mockMode: Boolean? = null, mockSwitchEnabled: Boolean = true, labEnabled: Boolean = true) = compose.setContent {
+    private fun show(
+        mockMode: Boolean? = null,
+        mockSwitchEnabled: Boolean = true,
+        labEnabled: Boolean = true,
+        canForget: Boolean = false,
+        forgetEnabled: Boolean = true,
+        message: String? = null,
+    ) = compose.setContent {
         ReelsTheme {
             DeveloperSection(
                 mockMode = mockMode,
@@ -80,8 +88,39 @@ class DeveloperSectionTest {
                 onMockModeChange = { mockChanges += it },
                 onOpenLab = { opened++ },
                 labEnabled = labEnabled,
+                onForgetQueryId = if (canForget) ({ forgotten++ }) else null,
+                forgetEnabled = forgetEnabled,
+                message = message,
             )
         }
+    }
+
+    /** Spec 2026-10-09 §3.3: the owner's way to watch one real repair. It sends nothing, so it needs no session. */
+    @Test
+    fun forgetCollectionsQueryIdIsOfferedWhenTheScreenGivesTheAction() {
+        show(canForget = true, labEnabled = false)
+        compose.onNodeWithText("Forget collections query id").assertIsEnabled().performClick()
+        assertEquals(1, forgotten)
+    }
+
+    /** R21: while a run is RUNNING (or the run has not loaded yet) the screen turns it off, like the Mock mode switch. */
+    @Test
+    fun aForgetTheScreenTurnedOffCannotBeTapped() {
+        show(canForget = true, forgetEnabled = false)
+        compose.onNodeWithText("Forget collections query id").assertIsNotEnabled().performClick()
+        assertEquals(0, forgotten)
+    }
+
+    @Test
+    fun noForgetButtonWithoutTheAction() {
+        show(canForget = false)
+        compose.onAllNodesWithText("Forget collections query id").assertCountEquals(0)
+    }
+
+    @Test
+    fun theSectionsMessageIsShown() {
+        show(canForget = true, message = "Couldn't forget the collections query id")
+        compose.onNodeWithText("Couldn't forget the collections query id").assertExists()
     }
 
     @Test

@@ -18,6 +18,21 @@ class SyncUiStateTest {
 
     private fun pacer(cooldownUntil: Long? = null) = PacerStatus(10, 600, 300, cooldownUntil)
 
+    /** Spec 2026-10-09 §3.3: the names are the last good ones; said beside whatever the run's banner says, never instead of it. */
+    @Test
+    fun staleCollectionNamesAreSaid() {
+        assertNull(syncUiState(run(SyncStatus.DONE), pacer(), now).collectionNamesNotice)
+        assertNull(syncUiState(run(SyncStatus.DONE), pacer(), now, collectionNamesStale = false).collectionNamesNotice)
+        val stale = syncUiState(run(SyncStatus.DONE), pacer(), now, collectionNamesStale = true)
+        assertEquals("Couldn't refresh collection names", stale.collectionNamesNotice)
+        assertNull(stale.banner)
+        assertTrue(stale.canStart, "it blocks nothing")
+
+        val paused = syncUiState(run(SyncStatus.PAUSED, "24-hour budget reached"), pacer(), now, collectionNamesStale = true)
+        assertEquals("24-hour budget reached", paused.banner)
+        assertEquals("Couldn't refresh collection names", paused.collectionNamesNotice)
+    }
+
     @Test
     fun nothingYet() {
         val ui = syncUiState(null, pacer(), now)

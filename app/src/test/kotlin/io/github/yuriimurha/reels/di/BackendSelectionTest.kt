@@ -4,6 +4,13 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.yuriimurha.reels.data.db.SyncMode
+import io.github.yuriimurha.reels.data.db.SyncRunEntity
+import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.fake.FakeFailures
+import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Test
@@ -172,6 +179,46 @@ class BackendSelectionTest {
 
     @Test
     fun deleteLibraryForgetsTheFakeLibrarysAccount() = deleteLibraryForgetsTheAccountOf(useFake = true)
+
+    /**
+     * C-M5: "Couldn't refresh collection names" is the real library's. Deleting the real library clears it with the names it
+     * spoke of; deleting Mock mode's fake library leaves it alone.
+     */
+    private fun deleteLibraryClearsTheNamesNoticeOf(useFake: Boolean) = runBlocking {
+        val container = container(useFake)
+        try {
+            container.settings.setCollectionNamesStale(true)
+            container.library.deleteLibrary()
+            assertEquals(useFake, container.settings.collectionNamesStale.first(), if (useFake) "the real library's notice stays" else "cleared")
+        } finally {
+            container.videoCache.cache.release()
+        }
+    }
+
+    @Test
+    fun deletingTheRealLibraryClearsTheNamesNotice() = deleteLibraryClearsTheNamesNoticeOf(useFake = false)
+
+    @Test
+    fun deletingTheFakeLibraryLeavesTheRealNamesNotice() = deleteLibraryClearsTheNamesNoticeOf(useFake = true)
+
+    /**
+     * R18/R21: Forget's flag is the real library's. A Mock mode sync with the flag set (the real library left it) asks the fake
+     * names query as always, never repairs, and leaves the flag for the real library.
+     */
+    @Test
+    fun mockModeNeverReadsTheForcedRepairFlag() = runBlocking {
+        val container = container(useFake = true)
+        container.settings.forgetCollectionsQueryId()
+        val fake = container.backend.client as FakeInstagramClient
+        // Stop the run at its first feed page: only the session check and the names query matter here.
+        fake.failures = FakeFailures { call -> if (call == 3) InstagramException.ShapeChanged("stop") else null }
+        val run = container.db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = 1L))
+
+        container.syncEngine().run(run)
+
+        assertEquals(listOf("currentUser", "collections:null", "saved:all:null"), fake.calls, "the names query was asked, as always")
+        assertTrue(container.settings.collectionsForceRepair(), "the real library's flag is left alone")
+    }
 
     private fun lazyIsInitialised(container: AppContainer, property: String): Boolean =
         (AppContainer::class.java.getDeclaredField("$property\$delegate").apply { isAccessible = true }.get(container) as Lazy<*>)

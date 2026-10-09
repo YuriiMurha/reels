@@ -146,3 +146,90 @@ Six small commits on `claude/hardening`; each started with a failing test. Every
 - **Tests and pins.** The hidden page's `WebViewClient` is a testable `PageClient`; new emulator tests (local servers only) for a 429 home page, a reset during a load and during a call, a reply that never comes, an aborted call, the stored claim header, a page that moved itself and a dropped connection; source pins for the transport's wiring and the page's default origin (now pinned to `WebEndpoints.HOME_URL`); the script pin checks every field it posts. The landing rule moved into `:instagram` (`WebEndpoints.landingOf`). A same-origin frame can speak through `parent.igBridge`: the trust boundary is the instagram.com origin, which docs and spec now say (R109).
 - **Docs.** README's rollout order is now: Mock mode off, then the box (instead of step 3, since the box covers the login), then the lab and Sync. A correction to the entry above: its "one Who am I" is one request, Who am I if Sync says "Logged in as", otherwise the login check (R102). Resolving the page load on `DOMContentLoaded` is parked in `TODO.md` (R108).
 - **Pacing.** No rate, budget or concurrency changed. A cancelled call now ends its request at once, a cancelled caller's load is finished rather than repeated (fewer home-page loads), and a session that needs the owner costs one more home-page load on the next call. No agent contacted Instagram; the emulator ran local servers only.
+
+## 2026-10-09: collection names through the website's own query, self-repairing (Tasks 1 to 6)
+
+- **Why (the phone findings).** The first phone tests of the WebView transport (2026-10-08/09, a throwaway account with 10 saved
+  posts in 3 collections) went: the login check 200; All Saved (`api/v1/feed/saved/posts/`) 200, with `saved_collection_ids` on
+  every item (spike Q2: yes); the collections call (`api/v1/collections/list/`) **404**, the site's own "page not available", so
+  a sync stopped at "Listing collections". Captures of the website itself (the debug WebView, values never read) showed its
+  mobile Saved tab has no collections at all, while its desktop one lists them with one GraphQL query,
+  `PolarisProfileSavedTabContentQuery` (`POST /api/graphql`, a `doc_id` that Instagram changes whenever it deploys the site).
+  The same query sent once from the mobile hidden page, with the page's own tokens and the mobile app id, was answered 200 with
+  the same edges: All posts and the 3 collections, with their names. The owner wants the names, and wants the app to keep them
+  working with no computer.
+- **The design.** Spec `docs/superpowers/specs/2026-10-09-collection-names-design.md` (with an "Amendments during implementation"
+  section) and plan `docs/superpowers/plans/2026-10-09-collection-names.md`:
+  - the names come from that query, sent by the same hidden page (`InstagramTransport.graphql`, an allow-list in `:instagram`,
+    `window.__igGraphQl`, the page's tokens read and used only in the page);
+  - when Instagram rejects the stored `doc_id`, a second, separate hidden page in desktop mode (Chrome-on-Android's "Desktop
+    site" identity, a 1440 x 900 CSS-pixel window, `ig_watch.js`) views the owner's own Saved page and watches the site's own
+    request for that one query; the app takes the new id from it, at most once per 24 h and inside the Pacer's gate;
+  - when that fails the sync goes on with the last names, collections no name covers become "Collection N", and Sync says
+    "Couldn't refresh collection names";
+  - `SAVED_COLLECTION_IDS_CONFIRMED` is `true` (strategy A): a sync walks All Saved once and reads each item's collections from
+    the item;
+  - a Developer action, **Forget collections query id**, makes the next names query stale, so the owner can watch one real repair.
+- **The tasks.**
+  - **Task 1** (a phone spike for the three facts the parser assumes) did not run: the phone was not connected. STALE (how a
+    rejected id is answered), CURSOR (the page-2 variable, `after`) and AUTO (the automatic collections have non-digit ids) are the
+    plan's stated defaults, marked "assumed" in the code, and the phone rollout verifies them.
+  - **Task 2**, the GraphQL transport: one allow-listed POST from the hidden page, tokens read and used in the page only, a
+    digits-only doc id, the form and header names as `:instagram` constants that the script pins use.
+  - **Task 3**, the repair page: `AndroidRepairPage`, `DesktopSite`, `ig_watch.js`, refused on a WebView that cannot do desktop
+    mode.
+  - **Task 4**, the parser, the stale rule, the doc-id store and the client; `WebEndpoints.collections` and the 404 call are gone.
+  - **Task 5**, the sync: `QueryRepairer` with its 24 h limit, the fallback, the placeholders, the names-stale notice and
+    Forget.
+  - **Task 6**, the docs and the phone rollout steps: `ARCHITECTURE.md` (a "Collection names" section and every stale
+    collections mention), the repo `CLAUDE.md` hard rule on what the page scripts may repeat, `README.md` (a rollout box, the
+    lab and troubleshooting), `TODO.md`, and the amendments in both specs.
+- **What the reviews found in first versions** (each fixed, with a test shown to fail without it):
+  - the token pins did not stop a token being logged or beaconed from the page script;
+  - the repair page said "Mobile" for its form factor and had no bitness, and laid out as 548 CSS pixels, not a desktop window;
+  - `ig_watch.js` missed the site's real request shapes and its XHR path could throw;
+  - a rate limit reported inside a GraphQL reply's `errors` (or a reply that had `data.viewer`) was classified as a stale id, which
+    would have triggered repairs during a rate limit;
+  - nothing stopped a page-2 cursor that never advanced (up to 300 identical requests per run).
+- **Pacing and safety.**
+  - A normal sync sends fewer requests: the per-collection feeds are gone, and the names query is one request per 12 collections.
+  - A 2xx execution error with `data.viewer` is `Transient` and follows the existing retry, up to 5 requests.
+  - A repair is one desktop page view of the owner's Saved page (the site's own requests, unpaced like the home-page load), at most
+    once per 24 h; it costs one run-budget unit and one request-log entry even when the limit refuses it. Each tap of Forget
+    re-arms one repair outside the limit. No rate, budget, gap or concurrency was raised.
+  - No agent contacted Instagram: every test used fakes, MockWebServer or the emulator's local servers, and the emulator stayed in
+    Mock mode.
+- **Next, the owner's phone.** Wait out any cooldown, then follow the README box "After the collection names update": one Sync,
+  the names on the grid, **Forget collections query id**, one more Sync, and paste the `InstagramHttp` lines. `TODO.md` lists
+  what that settles.
+
+## 2026-10-09: collection names, final review fixes
+
+A final review in four lenses (security, concurrency, tests by mutation, plan/docs/pacing) and a refute pass; rulings R14 to R21.
+Fixed in four commits and documented in a fifth:
+
+- **The repair** builds no Instagram URL in `:app` any more: `WebEndpoints.savedPage(handle)` owns the Saved page's URL and the
+  handle rule (D-C1). A site reply of another shape is a failed repair, so the sync keeps the last names (R14). The log says
+  `repair: learned new id` only once the client has parsed the reply and kept the id (D-I2), else
+  `repair: failed (reply stale|reply transient|shape …)`. A last attempt dated in the future is moved back to now, so a clock set
+  back never stalls repairs longer than a day; a page whose `destroy()` throws no longer hides how the watch ended (C-M4); a
+  collection a good listing had marked removed comes back under its old name, not as a new "Collection N". A 2xx names reply
+  without `data.viewer` is stale with or without errors (R17).
+- **Forget collections query id** no longer stores a made-up id (D-I4, R18, R21): it arms a persisted one-shot forced repair; the
+  next sync sends no names query (`collections query forced`) and repairs once; the flag is spent only once the Pacer grants the
+  attempt, is read by the real backend only, and the button is off while a run is going. A page without tokens is
+  `QueryNotSent`: never retried, the page kept, the last names (C-M2, R20).
+- **The hidden pages' console** stays out of the system log: both pages install one chrome client that handles console messages
+  and cancels or denies dialogs and permission requests (S-M1, R16). The emulator shows a plain WebView's console reaching logcat
+  and the hidden pages' never doing so.
+- **Tests** close the mutation review's gaps (where the page script's form and headers may go, a failing notice store, the built-in
+  id, placeholder numbers and places, a blank id, names kept with their white space) and drop or rename three tests that checked
+  only their own helpers. In-band GraphQL errors read `error_type` too, and Delete library clears the names notice (C-M5).
+- **Pacing.** No rate, budget, gap or concurrency was raised. Forget's sync sends one request fewer; a page without tokens costs one
+  run-budget unit and no request instead of up to five units and three home-page loads; R17 can start a repair (at most one per
+  24 h) where a run used to stop. The site is loaded at most 3 home loads per user action, plus at most one repair page view per
+  24 h or per Forget; during a repair the idle mobile page and the desktop repair page are both live for at most 45 s, with no
+  API call overlapping (R19).
+- **What the phone rollout settles.** AUTO and a real repair. STALE stays assumed (Forget no longer sends a wrong id), and CURSOR
+  stays unverified until the account has more than 12 collection edges, the automatic ones included.
+- No agent contacted Instagram: fakes, MockWebServer and the emulator's local servers only, the emulator in Mock mode.

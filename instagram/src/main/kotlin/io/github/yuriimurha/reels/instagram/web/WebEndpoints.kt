@@ -59,6 +59,17 @@ object WebEndpoints {
     /** [url] as an [InstagramTransport] takes it: the encoded path without its leading slash, then `?query` when there is one. */
     fun relative(url: HttpUrl): String = url.encodedPath.removePrefix("/") + (url.encodedQuery?.let { "?$it" } ?: "")
 
+    /**
+     * The account's own Saved page, `<home>/<handle>/saved/`, where the website itself sends the collections query (the
+     * repair page loads it, spec 2026-10-09 §3.3). Null when [handle] is not of Instagram's handle shape ([HANDLE], and not
+     * dots alone: `.` and `..` are path segments, not a profile), so nothing else ever goes into the URL.
+     */
+    fun savedPage(handle: String): String? =
+        handle.takeIf { HANDLE.matches(it) && it.any { c -> c != '.' } }?.let { "$HOME_URL$it/saved/" }
+
+    /** An Instagram handle: ASCII letters, digits, `.` and `_`, 1 to 30 of them. */
+    private val HANDLE = Regex("[A-Za-z0-9._]{1,30}")
+
     private val DIGITS = Regex("[0-9]{1,30}")
 
     /** An id goes into a URL path, so anything but digits ("..", "1/2") is refused before a request is made. */
@@ -67,11 +78,7 @@ object WebEndpoints {
 
     private fun HttpUrl.Builder.cursor(cursor: String?) = apply { cursor?.let { addQueryParameter("max_id", it) } }
 
-    /** Candidate from spec 6.2 (P4): the collection types are the ones instagrapi sends. */
-    fun collections(base: HttpUrl, cursor: String?): HttpUrl =
-        base.newBuilder().addPathSegments("api/v1/collections/list/")
-            .addQueryParameter("collection_types", "[\"ALL_MEDIA_AUTO_COLLECTION\",\"MEDIA\",\"AUDIO_AUTO_COLLECTION\"]")
-            .cursor(cursor).build()
+    // The collections and their names come from the website's GraphQL query (WebGraphQl.SAVED_COLLECTIONS), not from a URL here.
 
     fun savedPosts(base: HttpUrl, cursor: String?): HttpUrl =
         base.newBuilder().addPathSegments("api/v1/feed/saved/posts/").cursor(cursor).build()

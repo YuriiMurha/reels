@@ -47,6 +47,7 @@ internal const val LOGOUT_FAILED = "Couldn't finish logging out; try again"
 internal const val ACCOUNT_RECORD_KEPT = "Library deleted, but the account record couldn't be cleared; try Delete library again"
 internal const val CACHED_FILES_KEPT = "Library deleted; some cached files couldn't be removed"
 internal const val DELETE_LIBRARY_FAILED = "Couldn't delete the library; try again"
+internal const val FORGET_FAILED = "Couldn't forget the collections query id"
 
 /**
  * Maps [SessionRepository.pasteSessionId]'s answer. Only Valid means the paste was committed: Expired and Challenge
@@ -79,6 +80,16 @@ class SyncViewModel(
      * already that one.
      */
     private val realPacer: Pacer? = null,
+    /**
+     * The real backend only: the Developer action "Forget collections query id" (`SettingsStore.forgetCollectionsQueryId`, spec
+     * 2026-10-09 §3.3), so the owner can watch one real repair. Null offers none: Mock mode's fake library has no query to forget.
+     */
+    private val forgetCollectionsQueryId: (suspend () -> Unit)? = null,
+    /**
+     * The real backend only: true while a sync kept the last collection names because it could not refresh them (the settings'
+     * flag). Mock mode passes nothing: a flag the real library left behind says nothing about the fake one.
+     */
+    collectionNamesStale: Flow<Boolean> = flowOf(false),
     private val now: () -> Long = System::currentTimeMillis,
     /** Where the Mock mode switch works: it waits for WorkManager and writes a file. */
     private val io: CoroutineDispatcher = Dispatchers.IO,
@@ -116,11 +127,14 @@ class SyncViewModel(
     /** Null (still loading) is not ready: a sync must not start on a guess. */
     private fun sessionReady(state: SessionState?): Boolean = !requiresSession || state is SessionState.Valid
 
-    private fun uiState(r: SyncRunEntity?, t: Tick?, s: SessionState?): SyncUiState =
-        syncUiState(r, t?.status, t?.at ?: now(), sessionReady(s), sessionLoading = requiresSession && s == null)
+    private val namesStale: StateFlow<Boolean> = collectionNamesStale.stateIn(viewModelScope, sharing, false)
 
-    val ui: StateFlow<SyncUiState> = combine(run, tick, sessionState) { r, t, s -> uiState(r, t, s) }
-        .stateIn(viewModelScope, sharing, uiState(null, null, null))
+    private fun uiState(r: SyncRunEntity?, t: Tick?, s: SessionState?, n: Boolean): SyncUiState = syncUiState(
+        r, t?.status, t?.at ?: now(), sessionReady(s), sessionLoading = requiresSession && s == null, collectionNamesStale = n,
+    )
+
+    val ui: StateFlow<SyncUiState> = combine(run, tick, sessionState, namesStale) { r, t, s, n -> uiState(r, t, s, n) }
+        .stateIn(viewModelScope, sharing, uiState(null, null, null, false))
 
     /** Starts or resumes a run, but only when the screen offers it ([SyncUiState.canStart]): the buttons are disabled, and this holds the same line. */
     fun start(mode: SyncMode) {
@@ -181,23 +195,66 @@ class SyncViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), null)
 
     /**
-     * Off until the latest run has loaded, and while it is RUNNING. A restart then could leave WorkManager holding a run
-     * of this library for a process that runs the other one (R67), and a run the screen hasn't seen yet may be one. Like
-     * [loadedRun] it forgets its value once the screen has been gone for the grace period, so a returning screen never
-     * shows the old "enabled" before the run has been read again.
+     * True once the latest run has loaded and while it is not RUNNING. Like [loadedRun] it forgets its value once the screen has
+     * been gone for the grace period, so a returning screen never shows the old "enabled" before the run has been read again.
      */
-    val mockSwitchEnabled: StateFlow<Boolean> = loadedRun.map { it != null && it.run?.status != SyncStatus.RUNNING }
+    private val noRunRunning: StateFlow<Boolean> = loadedRun.map { it != null && it.run?.status != SyncStatus.RUNNING }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), false)
+
+    /** True once the latest run has been read and it is not RUNNING. */
+    private fun noRunRunningNow(): Boolean = loadedRun.value.let { it != null && it.run?.status != SyncStatus.RUNNING }
+
+    /**
+     * Off until the latest run has loaded, and while it is RUNNING ([noRunRunning]). A restart then could leave WorkManager
+     * holding a run of this library for a process that runs the other one (R67), and a run the screen hasn't seen yet may be one.
+     */
+    val mockSwitchEnabled: StateFlow<Boolean> = noRunRunning
 
     private var mockChange: Job? = null
 
     /** Changes the mode and restarts the app. Refused while the run is loading or RUNNING, and while a change is under way. */
     fun setMockMode(useFake: Boolean) {
         val switch = mockSwitch ?: return
-        val loaded = loadedRun.value ?: return
-        if (loaded.run?.status == SyncStatus.RUNNING) return
+        if (!noRunRunningNow()) return
         if (mockChange?.isActive == true) return
         mockChange = viewModelScope.launch(io) { switch.change(useFake) }
+    }
+
+    /** Whether the Developer section offers "Forget collections query id" (the real backend only). */
+    val canForgetQueryId: Boolean = forgetCollectionsQueryId != null
+
+    /**
+     * R21: like the Mock mode switch, Forget is off until the latest run has loaded and while it is RUNNING: a tap during a repair
+     * would erase that repair's attempt record, and one right after a run's own repair would arm a second within minutes.
+     */
+    val forgetQueryIdEnabled: StateFlow<Boolean> = noRunRunning
+
+    private val mutableDeveloperMessage = MutableStateFlow<String?>(null)
+
+    /** The Developer section's own message line: what its last action could not do. Cleared when the next one starts. */
+    val developerMessage: StateFlow<String?> = mutableDeveloperMessage
+
+    private var forgetJob: Job? = null
+
+    /**
+     * Arms one forced repair and clears the repair's 24 h limit (R18), so the next sync skips the names query and repairs once.
+     * Sends nothing. Refused while the run is loading or RUNNING ([forgetQueryIdEnabled]); a tap while one is being written is
+     * ignored; a write that fails is said on the screen ([developerMessage], no exception text), never thrown.
+     */
+    fun forgetQueryId() {
+        val forget = forgetCollectionsQueryId ?: return
+        if (!noRunRunningNow()) return
+        if (forgetJob?.isActive == true) return
+        forgetJob = viewModelScope.launch {
+            mutableDeveloperMessage.value = null
+            try {
+                forget()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                mutableDeveloperMessage.value = FORGET_FAILED
+            }
+        }
     }
 
     private val mutableSessionMessage = MutableStateFlow<String?>(null)

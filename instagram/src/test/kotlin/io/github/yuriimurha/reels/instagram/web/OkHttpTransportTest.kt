@@ -127,4 +127,68 @@ class OkHttpTransportTest {
         assertEquals("secret-zq7", reply.body)
         assertEquals("RawReply(code=200, redirected=false, body=<10 chars>)", reply.toString())
     }
+
+    @Test
+    fun savedCollectionsVariablesMatchTheWebsite() {
+        assertEquals(
+            """{"collection_types":["ALL_MEDIA_AUTO_COLLECTION","MEDIA","AUDIO_AUTO_COLLECTION"],"first":12}""",
+            WebGraphQl.savedCollectionsVariables(null),
+        )
+        assertEquals(
+            """{"collection_types":["ALL_MEDIA_AUTO_COLLECTION","MEDIA","AUDIO_AUTO_COLLECTION"],"first":12,"after":"c\"1"}""",
+            WebGraphQl.savedCollectionsVariables("c\"1"),
+        )
+    }
+
+    /** T-F3: the query's friendly name and built-in doc id are the website's own (spelled out here, never read back). */
+    @Test
+    fun theSavedCollectionsQueryIsTheWebsitesOwn() {
+        assertEquals("PolarisProfileSavedTabContentQuery", WebGraphQl.SAVED_COLLECTIONS.friendlyName)
+        assertEquals("27584326974521636", WebGraphQl.SAVED_COLLECTIONS.builtInDocId)
+    }
+
+    @Test
+    fun graphqlSendsOnePostWithTheQueryForm() = runTest {
+        server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "application/json").body("""{"data":{}}""").build())
+        val reply = transport().graphql(WebGraphQl.SAVED_COLLECTIONS, "123", "{}")
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/graphql", request.url.encodedPath)
+        val form = request.body!!.utf8()
+        assertTrue("doc_id=123" in form)
+        assertTrue("fb_api_req_friendly_name=PolarisProfileSavedTabContentQuery" in form)
+        assertEquals("PolarisProfileSavedTabContentQuery", request.headers["x-fb-friendly-name"])
+        assertEquals(200, reply.code)
+        assertEquals(1, server.requestCount)
+    }
+
+    /** R6: the form is the website's ([WebGraphQl.FORM_FIELDS], in order) less the page's two tokens, which this transport has not. */
+    @Test
+    fun graphqlSendsTheWebsitesFormFieldsWithoutTheTokens() = runTest {
+        server.enqueue(MockResponse.Builder().code(200).body("{}").build())
+        transport().graphql(WebGraphQl.SAVED_COLLECTIONS, "27584326974521636", WebGraphQl.savedCollectionsVariables(null))
+        val request = server.takeRequest()
+        val fields = request.body!!.utf8().split('&').map { it.substringBefore('=') }
+        assertEquals(WebGraphQl.FORM_FIELDS - listOf(WebGraphQl.Field.DTSG, WebGraphQl.Field.LSD), fields)
+        assertTrue(request.headers["Content-Type"].orEmpty().startsWith("application/x-www-form-urlencoded"))
+        assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, request.headers[WebGraphQl.Header.FRIENDLY_NAME])
+    }
+
+    @Test
+    fun aDocIdThatIsNotDigitsIsRefusedBeforeAnyRequest() = runTest {
+        for (docId in listOf("", "12a", " 123", "123\n", "1".repeat(WebGraphQl.DOC_ID_MAX_DIGITS + 1), "١٢")) {
+            assertFailsWith<IllegalArgumentException>(docId) { transport().graphql(WebGraphQl.SAVED_COLLECTIONS, docId, "{}") }
+        }
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun aDocIdIsDigitsOnlyAndNotTooLong() {
+        assertTrue(WebGraphQl.isDocId("27584326974521636"))
+        assertTrue(WebGraphQl.isDocId("0"))
+        assertTrue(WebGraphQl.isDocId("9".repeat(WebGraphQl.DOC_ID_MAX_DIGITS)))
+        for (bad in listOf("", "12a", "-1", "1.5", "0x1F", " 1", "1 ", "1\n", "١", "9".repeat(WebGraphQl.DOC_ID_MAX_DIGITS + 1))) {
+            assertFalse(WebGraphQl.isDocId(bad), bad)
+        }
+    }
 }

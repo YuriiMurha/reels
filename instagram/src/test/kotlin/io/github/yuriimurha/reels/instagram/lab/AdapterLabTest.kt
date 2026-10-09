@@ -1,10 +1,14 @@
 package io.github.yuriimurha.reels.instagram.lab
 
 import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.web.DocIdStore
+import io.github.yuriimurha.reels.instagram.web.GraphQlQuery
 import io.github.yuriimurha.reels.instagram.web.HttpClientFactory
 import io.github.yuriimurha.reels.instagram.web.InMemoryCookieStore
 import io.github.yuriimurha.reels.instagram.web.OkHttpTransport
+import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import io.github.yuriimurha.reels.instagram.web.cutResponse
+import io.github.yuriimurha.reels.instagram.web.formFields
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -44,8 +48,15 @@ class AdapterLabTest {
     @AfterTest
     fun stop() = server.close()
 
+    /** The stored doc id the lab must send: digits, as every transport needs, and not the built-in one. */
+    private val docIds = object : DocIdStore {
+        override suspend fun docId(query: GraphQlQuery): String = "555"
+
+        override suspend fun learned(query: GraphQlQuery, docId: String) = error("the lab never learns an id")
+    }
+
     private fun lab(http: () -> OkHttpClient = { HttpClientFactory.create(cookies, "test-agent") }) =
-        AdapterLab({ OkHttpTransport(http(), server.url("/")) }, cookies)
+        AdapterLab({ OkHttpTransport(http(), server.url("/")) }, cookies, docIds)
 
     private fun fixture(name: String): String = javaClass.getResource("/fixtures/web/$name")!!.readText()
 
@@ -60,7 +71,7 @@ class AdapterLabTest {
     fun eachCallHitsExactlyOneExpectedPath() = runTest {
         val lab = lab()
         serve("""{"form_data":{"username":"user_1"},"status":"ok"}""")
-        serveFixture("collections_list.json")
+        serveFixture("collections_graphql.json")
         serveFixture("saved_page_more.json")
         serveFixture("collection_page.json")
         serveFixture("media_info.json")
@@ -71,21 +82,71 @@ class AdapterLabTest {
         lab.run(LabCall.SAVED_COLLECTION, collectionId)
         lab.run(LabCall.MEDIA_INFO, mediaPk)
 
-        val paths = (1..5).map { server.takeRequest().url }
+        val requests = (1..5).map { server.takeRequest() }
+        val paths = requests.map { it.url }
         assertEquals(
             listOf(
                 "/api/v1/accounts/edit/web_form_data/",
-                "/api/v1/collections/list/",
+                "/api/graphql",
                 "/api/v1/feed/saved/posts/",
                 "/api/v1/feed/collection/$collectionId/posts/",
                 "/api/v1/media/$mediaPk/info/",
             ),
             paths.map { it.encodedPath },
         )
+        assertEquals(listOf("GET", "POST", "GET", "GET", "GET"), requests.map { it.method })
         // The first page of each walk only: a lab call never carries a cursor.
         assertTrue(paths.all { it.queryParameter("max_id") == null })
-        assertEquals("[\"ALL_MEDIA_AUTO_COLLECTION\",\"MEDIA\",\"AUDIO_AUTO_COLLECTION\"]", paths[1].queryParameter("collection_types"))
+        assertEquals(WebGraphQl.savedCollectionsVariables(null), requests[1].formFields()[WebGraphQl.Field.VARIABLES])
         assertEquals(5, server.requestCount)
+    }
+
+    /** R1: the Collections call is one POST of the website's own query, with the doc id the store holds. */
+    @Test
+    fun collectionsSendsOnePostOfTheSitesQueryWithTheStoredDocId() = runTest {
+        serveFixture("collections_graphql.json")
+        val result = lab().run(LabCall.COLLECTIONS, null)
+        assertEquals("ok", result.classification)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/" + WebGraphQl.PATH, request.url.encodedPath)
+        val form = request.formFields()
+        assertEquals("555", form[WebGraphQl.Field.DOC_ID])
+        assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, form[WebGraphQl.Field.FRIENDLY_NAME])
+        assertEquals(WebGraphQl.savedCollectionsVariables(null), form[WebGraphQl.Field.VARIABLES])
+        assertEquals(1, server.requestCount)
+    }
+
+    /** R1: a reply behind the website's `for (;;);` guard still shows its shape, a scrubbed copy and the first user collection. */
+    @Test
+    fun collectionsShowsTheShapeAfterTheGuardAndReadsTheFirstUserCollection() = runTest {
+        serve("for (;;);" + fixture("collections_graphql.json"), headers = mapOf("Content-Type" to "text/javascript; charset=utf-8"))
+        val result = lab().run(LabCall.COLLECTIONS, null)
+        assertEquals("ok", result.classification)
+        assertNull(result.error)
+        assertTrue(result.shape.startsWith("data object\n  viewer object\n    collections_unified_with_auto_collections object"), result.shape)
+        assertTrue("        node object" in result.shape, result.shape)
+        assertTrue("      has_next_page boolean = false" in result.shape, result.shape)
+        assertFalse("Alpha" in result.shape || "Alpha" in assertNotNull(result.scrubbedJson), "a collection name is data")
+        assertEquals(3, parse(result.scrubbedJson!!).jsonObject["data"]!!.jsonObject["viewer"]!!.jsonObject
+            ["collections_unified_with_auto_collections"]!!.jsonObject["edges"]!!.jsonArray.size)
+        // ALL_MEDIA_AUTO_COLLECTION comes first: the first user collection is Alpha.
+        assertEquals(collectionId, result.ids.firstCollectionId)
+    }
+
+    @Test
+    fun aStaleCollectionsReplyIsAnAnswerClassifiedStaleQuery() = runTest {
+        serve("""{"errors":[{"message":"x","severity":"CRITICAL"}],"data":null}""")
+        serve("<html>not here</html>", code = 404, headers = mapOf("Content-Type" to "text/html"))
+        val lab = lab()
+        for (expectedShape in listOf("errors array[1]", "(not JSON: text/html, 21 chars)")) {
+            val result = lab.run(LabCall.COLLECTIONS, null)
+            assertEquals("StaleQuery", result.classification)
+            assertIs<InstagramException.StaleQuery>(result.error)
+            assertTrue(result.shape.startsWith(expectedShape), result.shape)
+            assertNull(result.ids.firstCollectionId)
+        }
+        assertEquals(2, server.requestCount)
     }
 
     @Test
@@ -101,10 +162,10 @@ class AdapterLabTest {
     }
 
     @Test
-    fun collectionsFillsTheFirstMediaCollectionIdSkippingTheAutoCollections() = runTest {
-        serveFixture("collections_list.json")
+    fun collectionsFillsTheFirstUserCollectionIdSkippingTheAutomaticOnes() = runTest {
+        serveFixture("collections_graphql.json")
         val result = lab().run(LabCall.COLLECTIONS, null)
-        // 17900000000000001 is ALL_MEDIA_AUTO_COLLECTION: the first MEDIA one is Food.
+        // The first node is ALL_MEDIA_AUTO_COLLECTION (fact AUTO): the first user collection is Alpha.
         assertEquals(collectionId, result.ids.firstCollectionId)
         assertNull(result.ids.firstMediaPk)
     }
@@ -247,7 +308,7 @@ class AdapterLabTest {
     @Test
     fun aResultsToStringNeverContainsAnId() = runTest {
         val lab = lab()
-        serveFixture("collections_list.json")
+        serveFixture("collections_graphql.json")
         serveFixture("saved_page_more.json")
         val collections = lab.run(LabCall.COLLECTIONS, null)
         val saved = lab.run(LabCall.SAVED_ALL, null)
@@ -399,7 +460,7 @@ class AdapterLabTest {
         var built = 0
         val lab = lab { built++; HttpClientFactory.create(cookies, "test-agent") }
         assertEquals(0, built)
-        serveFixture("collections_list.json")
+        serveFixture("collections_graphql.json")
         serveFixture("saved_page_more.json")
         lab.run(LabCall.COLLECTIONS, null)
         lab.run(LabCall.SAVED_ALL, null)
@@ -411,11 +472,14 @@ class AdapterLabTest {
         val dead = MockWebServer().apply { start() }
         val url = dead.url("/")
         dead.close()
-        val unreachable = AdapterLab({ OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), url) }, cookies)
+        val unreachable = AdapterLab({ OkHttpTransport(HttpClientFactory.create(cookies, "test-agent"), url) }, cookies, docIds)
         assertFailsWith<InstagramException.Transient> { unreachable.run(LabCall.SAVED_ALL, null) }
+        assertFailsWith<InstagramException.Transient> { unreachable.run(LabCall.COLLECTIONS, null) }
 
         server.enqueue(cut(200))
+        server.enqueue(cut(200))
         assertFailsWith<InstagramException.Transient> { lab().run(LabCall.SAVED_ALL, null) }
-        assertEquals(1, server.requestCount)
+        assertFailsWith<InstagramException.Transient> { lab().run(LabCall.COLLECTIONS, null) }
+        assertEquals(2, server.requestCount)
     }
 }

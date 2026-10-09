@@ -8,19 +8,31 @@ this file describes only what exists.
 
 The code for M0 to M6 is complete and unit-tested, with fakes and MockWebServer only. No agent has logged in to
 Instagram or sent it a request, and the emulator only ever ran the debug build in Mock mode or the release build logged
-out (once also on the fake backend, through a temporary local edit), plus the hidden page's own tests, which load only
-local servers. What is still unconfirmed needs the owner's phone (the README's checklist, `TODO.md`):
+out (once also on the fake backend, through a temporary local edit), plus the hidden page's and the repair page's own
+tests, which load only local servers. What is still unconfirmed needs the owner's phone (the README's checklist, `TODO.md`):
 
 - **The WebView transport.** The first two API requests the app made on the owner's phone, sent by OkHttp before this
   change, were answered HTTP 429. Every API call now runs inside a hidden instagram.com page ([Transport](#transport)),
   which has never met Instagram. First on the phone: the hidden page loads and one request answers 200, Who am I if
   Logged in, otherwise the login check (R102) (README section 5, "After an update that changes how the app talks to
   Instagram").
+- **Collection names.** The website answers the first design's collections-list call with a 404. The names now come
+  from the website's own GraphQL query, sent by the same hidden page, and when Instagram changes that query's id the app
+  learns the new one from the site itself, on the phone ([Collection names](#collection-names)). Built and tested with
+  fakes, MockWebServer and the emulator's local server only: the query and the repair have never met Instagram. Three facts
+  about the query are the plan's stated defaults, marked "assumed" in the code, until the phone confirms them: how a
+  rejected id is answered (STALE), the name of the page-2 cursor variable, `after` (CURSOR), and that the owner's own
+  collections have digits-only ids while the automatic ones ("All posts", audio) do not (AUTO). First on the phone: the
+  README box "After the collection names update". It settles AUTO (no "All posts" or audio card) and shows a real repair
+  (Forget, then a Sync), but not every fact: Forget no longer sends a wrong id (R18), so STALE stays assumed until Instagram
+  really changes the id, and CURSOR stays unverified until the account has more than 12 collection edges (the automatic
+  ones included), the first time a second names page is asked for.
 - **M2:** the WebView login itself.
 - **M3:** the endpoints, headers and JSON shapes. They are candidates from instaloader and instagrapi, pinned by
   synthetic fixtures, until the Adapter lab shows the real responses. The login check's endpoint
   (`accounts/edit/web_form_data/`) and the mobile web app id (`1217981644879628`, from a capture of the mobile site) are
-  as new as the transport.
+  as new as the transport. Spike question 2 is answered: every saved item lists its collections in
+  `saved_collection_ids` (2026-10-09).
 - **M4:** a real Sync and Full sync, the budgets, the cooldown display and the challenge stop.
 - **M5:** playing real reels, link renewal and the cache.
 - **M6:** the release build's hidden-page transport, real client, CDN fetcher and WebView login under R8.
@@ -30,19 +42,32 @@ A debug build starts in Mock mode (the fake library); a release build always use
 ## How it fits together
 
 - `:instagram` (pure Kotlin/JVM) is the only place that knows Instagram: endpoints, header constants, pagination, JSON
-  fields. `:app` reaches it through the `InstagramClient` contract; it builds no Instagram URL and parses no Instagram
-  JSON, and the hidden page's landing rule (which paths mean "log in" or "verify") is `WebEndpoints.landingOf`. Two small
-  things in `:app` do repeat Instagram's names, as named exceptions: `ig_fetch.js` (the hidden page's script: the three
-  constant header values, which `WebViewTransportTest` pins to `WebHeaders`, and the names it needs to build the site's own
-  request, the header names, the `csrftoken` cookie and the `www-claim-v2` storage key, pinned by the same test) and
-  `AndroidWebPage`'s default origin (the one origin its message bridge accepts; `AndroidWebPageGuardTest` pins it to the
-  scheme and host of `WebEndpoints.HOME_URL`, and `BackendWiringGuardTest` that the container passes no other). Outside
-  comments, a grep of `app/src/main` for the domains finds only that origin.
+  fields. `:app` reaches it through the `InstagramClient` contract; it builds no Instagram URL (the repair page's Saved URL
+  is `WebEndpoints.savedPage`, with the handle rule) and parses no Instagram JSON, and the hidden page's landing rule (which
+  paths mean "log in" or "verify") is `WebEndpoints.landingOf`. A few small
+  things in `:app` do repeat Instagram's names, as named exceptions:
+  - `ig_fetch.js` (the hidden page's script): the three constant header values, which `WebViewTransportTest` pins to
+    `WebHeaders`, and the names it needs to build the site's own request, the header names, the `csrftoken` cookie and the
+    `www-claim-v2` storage key, pinned by the same test. For its GraphQL call it also repeats the friendly name,
+    `/api/graphql`, the seven form field names, the `x-fb-*` and other header names and the doc id's digits-only rule, all
+    pinned to the `WebGraphQl` constants by the same test. The one exception inside the exception is the `DTSGInitialData`
+    and `LSD` module names (and the patterns that read the page's own data for them): `:instagram` has no constant for them,
+    so only the test's literals pin them.
+  - `ig_watch.js` (the repair page's script, [Collection names](#collection-names)): the friendly name,
+    `WebGraphQl.QUERY_PATHS` and the two form field names it reads, `fb_api_req_friendly_name` and `doc_id`, pinned by
+    `RepairPageGuardTest` as one whole text built from those constants.
+  - `AndroidWebPage`'s default origin (the one origin its message bridge accepts; `AndroidWebPageGuardTest` pins it to the
+    scheme and host of `WebEndpoints.HOME_URL`, and `BackendWiringGuardTest` that the container passes no other).
+    `AndroidRepairPage` takes its origin from `WebEndpoints.HOME_URL` too and spells none.
+
+  Outside comments, a grep of `app/src/main` for the domains finds only that origin.
 - `AppContainer` hand-wires `:app`, one per process. It picks a backend (fake or real) once per process, and the library
   database, thumbnails, client, fetcher and video resolver follow that choice.
 - Every Instagram API request, from a sync, a session check, the viewer or the lab, goes through the one `Pacer` and then
-  through the one `WebViewTransport` ([Transport](#transport)): one `fetch` in a hidden instagram.com page per call.
-  Thumbnails and videos do not: they use cookieless clients.
+  through the one `WebViewTransport` ([Transport](#transport)): one `fetch` in a hidden instagram.com page per call, a GET
+  or the one allow-listed GraphQL POST. Thumbnails and videos do not: they use cookieless clients. The one other thing that
+  loads instagram.com is the collections repair, a second hidden page that views the owner's Saved page, at most every 24 h
+  and inside the Pacer's gate ([Collection names](#collection-names)).
 - Sync runs in a WorkManager foreground worker and writes Room; the screens read Room.
 
 ## Components
@@ -55,19 +80,20 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
 | Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`, `*.p12`, `*.pfx`; compared in lower case), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
 | Database | `app/.../data/db/` | Room v1: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `sync_run`, `sync_cursor`, `api_request`. Schema exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. |
-| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT`, or `CACHED_FILES_KEPT` when a thumbnail or the video cache could not be emptied (`ThumbnailStore.deleteAll()` throws once it has tried them all), or both, and `SyncViewModel` says so under the Delete library button) and clears thumbnails and the cached videos, through an injected `clearVideoCache`; neither failure fails the delete, the rows are already gone, and both are reported), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
+| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT`, or `CACHED_FILES_KEPT` when a thumbnail or the video cache could not be emptied (`ThumbnailStore.deleteAll()` throws once it has tried them all), or both, and `SyncViewModel` says so under the Delete library button), then clears "Couldn't refresh collection names" through an injected `clearNamesStale` (C-M5: the real library's container passes `settings.setCollectionNamesStale(false)`, Mock mode's nothing; a failure is swallowed, only the notice would be wrong), and clears thumbnails and the cached videos, through an injected `clearVideoCache`; neither failure fails the delete, the rows are already gone, and both are reported), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
 | Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
 | Video | `app/.../data/media/`, `ui/viewer/` | On-demand playback with a `pk`-keyed cache (spec 8). [Details](#video). |
 | Pacer | `app/.../sync/pacing/` | The single gate for Instagram API calls. [Details](#pacer). |
 | Transport | `app/.../transport/`, `app/src/main/assets/ig_fetch.js` | Sends every Instagram API call as a same-origin `fetch` inside a hidden instagram.com WebView page. [Details](#transport). |
-| Settings | `app/.../data/settings/SettingsStore.kt` | DataStore preferences: `muted`; the persisted cooldown (`cooldown_until`, `last_rate_limit_at`); the session state (`session_kind`, `session_handle`, `session_challenge_url`, encoded by the session package; the session itself is only in the cookie jar); and the Instagram account each library belongs to (R84: `library_account_pk_real`, `library_account_pk_fake`, read and written through `sync/LibraryAccount.kt`'s `StoredLibraryAccount`; a corrupt file loses it, and the next run then adopts its own account). A settings file that cannot be read is replaced by `corruptionFallback` (ruling R54), not by empty preferences: `cooldown_until = now + 1 h` (the Pacer's `Cooldowns.SHORT_MS`) and `last_rate_limit_at = now`, so a corruption never silently ends an active cooldown and a rate limit in the next 24 h escalates straight to the 24 h tier; the session keys stay empty, which reads as LoggedOut until validation runs. Budgets persist in `api_request` (`RoomRequestLog`). |
+| Collection names | `instagram/.../web/WebGraphQl.kt`, `DocIdStore.kt`, `app/.../transport/AndroidRepairPage.kt`, `DesktopSite.kt`, `RepairPage.kt`, `app/src/main/assets/ig_watch.js`, `app/.../sync/QueryRepairer.kt`, `app/.../data/settings/SettingsDocIdStore.kt` | The names come from the website's own GraphQL query, sent by the hidden page; a second, desktop-mode hidden page learns the query's id from the site when the stored one goes stale (at most once per 24 h). The last names are kept when that fails. [Details](#collection-names). |
+| Settings | `app/.../data/settings/SettingsStore.kt` | DataStore preferences: `muted`; the persisted cooldown (`cooldown_until`, `last_rate_limit_at`); the session state (`session_kind`, `session_handle`, `session_challenge_url`, encoded by the session package; the session itself is only in the cookie jar); and the Instagram account each library belongs to (R84: `library_account_pk_real`, `library_account_pk_fake`, read and written through `sync/LibraryAccount.kt`'s `StoredLibraryAccount`; a corrupt file loses it, and the next run then adopts its own account); and the collection names' four keys: the doc id last learned for the collections query (`graphql_doc_<friendly name>`, read through `SettingsDocIdStore`), when the last repair started (`collections_repair_at`, epoch ms, for its 24 h limit), whether the names are the last good ones (`collection_names_stale`) and the one forced repair "Forget collections query id" armed (`collections_force_repair`, R18; written with the repair limit's removal in one edit, removed when a sync spends it). A settings file that cannot be read is replaced by `corruptionFallback` (ruling R54), not by empty preferences: `cooldown_until = now + 1 h` (the Pacer's `Cooldowns.SHORT_MS`) and `last_rate_limit_at = now`, so a corruption never silently ends an active cooldown and a rate limit in the next 24 h escalates straight to the 24 h tier; it also sets `collections_repair_at = now` (R11), so a lost file never allows a collections repair within a day of the last one; the session keys stay empty, which reads as LoggedOut until validation runs. Budgets persist in `api_request` (`RoomRequestLog`). |
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
-| Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 times per user action (counted again after an idle close). [Details](#wiring). |
+| Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 home loads per user action (counted again after an idle close), plus at most one repair page view of the owner's Saved page per 24 h or per Forget. [Details](#wiring). |
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks` (an `ACTION_VIEW` intent, so whichever app handles the link). Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
-| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session, and its session section adds one line for the real Pacer's cooldown or 24 h count (see Session). Log out cancels a running sync before it forgets the session. Debug builds add the Developer section ([Lab screen](#lab-screen)). |
+| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Collections" is feeds walked over feeds to walk, so `1 / 1` under strategy A, not the number of collections; "Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session, and its session section adds one line for the real Pacer's cooldown or 24 h count (see Session). Log out cancels a running sync before it forgets the session. With the real backend the Library section also says "Couldn't refresh collection names" while the names are the last good ones ([Collection names](#collection-names)). Debug builds add the Developer section ([Lab screen](#lab-screen)). |
 | Lab screen | `app/.../ui/lab/`, `ui/sync/DeveloperSection.kt` | The debug-only front end of the Adapter lab, and the Mock mode switch. [Details](#lab-screen). |
 | Session | `app/.../session/` | The session lives only in the WebView's cookie store. [Details](#session). |
 | Login | `app/.../ui/login/`, `ui/sync/SessionSection.kt` | Instagram's own login page in a WebView. [Details](#login). |
@@ -125,13 +151,17 @@ A debug build starts in Mock mode (the fake library); a release build always use
 Pure Kotlin/JVM.
 
 - **Contract.** `InstagramClient` (which extends `SessionProbe`) with `reportsSavedCollectionIds`, `collections`,
-  `savedMedia` and `mediaInfo`; typed `InstagramException`s (`LoginRequired`, `ChallengeRequired`, `RateLimited`,
-  `Transient`, `ShapeChanged(fieldPath)`); `Permalinks`; and `FakeInstagramClient` over a deterministic `FakeLibrary`
-  with scripted failures. `mediaInfo` returns `RemoteMedia?`: null means Instagram no longer has the item (P8).
+  `repairCollections`, `savedMedia` and `mediaInfo`; typed `InstagramException`s (`LoginRequired`, `ChallengeRequired`,
+  `RateLimited`, `Transient`, `ShapeChanged(fieldPath)`, and for the collections query `StaleQuery`, `QueryNotSent(reason)`
+  (R20: the transport could not send it, never retried) and the sealed `RepairUnavailable` with `RepairSkipped` and
+  `RepairFailed`); `Permalinks`; and `FakeInstagramClient` over a deterministic
+  `FakeLibrary` with scripted failures (its `repairCollections` is the interface's default, a `Transient`: the fake library has
+  nothing to repair). `mediaInfo` returns `RemoteMedia?`: null means Instagram no longer has the item (P8).
 - **Web layer.**
   - **The transport seam.** `InstagramTransport.get(pathAndQuery)` makes exactly one GET per call and never retries or
-    follows a redirect. The path is relative to `https://www.instagram.com/` (no leading slash) and built only by
-    `WebEndpoints`. It answers a `RawReply(code, contentType, body, redirected)`: `body` is null when it could not be
+    follows a redirect, and `graphql(query, docId, variables)` makes exactly one POST of an allow-listed GraphQL query under
+    the same rules ([Collection names](#collection-names)). The path is relative to `https://www.instagram.com/` (no leading
+    slash) and built only by `WebEndpoints`. It answers a `RawReply(code, contentType, body, redirected)`: `body` is null when it could not be
     read, `redirected` is true for a redirect that was not followed (a browser `fetch` hides where it led), and
     `toString()` never prints the body. `WebInstagramClient`, `WebSessionProbe` and `AdapterLab` take a transport (as a
     lambda, asked for on the first call that needs one), not an HTTP client. Production has one, `WebViewTransport`
@@ -194,7 +224,8 @@ Pure Kotlin/JVM.
   application ones: only a network interceptor sees a 503 or a 421 before OkHttp's own follow-up logic can re-send it, and
   the MockWebServer test of the 421 cannot tell the difference (its 421 is not on a coalesced connection).
 - **Where Instagram strings live.** `WebEndpoints` owns every Instagram URL and host the app needs (the home and login
-  pages, the API base and each endpoint, the login host allowlist and its dot-boundary matcher `isLoginPage`) and `WebSessionCookies` the
+  pages, the API base and each endpoint, the account's own Saved page the repair loads, `savedPage(handle)`, which is null for
+  a handle not of Instagram's shape, the login host allowlist and its dot-boundary matcher `isLoginPage`) and `WebSessionCookies` the
   exact Set-Cookie values and origin for a pasted session and its rollback, so `:app` spells no Instagram URL or cookie
   attribute out.
 - **`ErrorClassifier`** maps one response to a typed failure, in this precedence:
@@ -230,13 +261,16 @@ Pure Kotlin/JVM.
     digits (`3.1E18` or text is a shape change); a collection's cover pk that isn't digits just means no cover.
   - A `taken_at` outside the `Instant` range is a shape change; an out-of-range CDN `oe` just means no expiry.
   - `saved_collection_ids` with any non-string entry counts as "the response doesn't say" (null), never a shorter list.
-  - Only collections whose `collection_type` is `MEDIA` are kept.
+  - The collections come from the GraphQL reply ([Collection names](#collection-names)): its `edges[].node`s, less the
+    automatic ones, which are told by an id that is not digits (fact AUTO, assumed), never by a display name.
 - **`MediaLinks`** picks the thumbnail (narrowest `image_versions2` candidate at least 720 px wide, else the widest; a
   carousel uses its first child's candidates) and reads the CDN link expiry from the hex `oe` parameter.
-- **`WebInstagramClient`** is the real `InstagramClient`. `WebEndpoints` builds the four candidate URLs (P4:
-  `collections/list/` with the three `collection_types`, `feed/saved/posts/`, `feed/collection/{id}/posts/`,
+- **`WebInstagramClient`** is the real `InstagramClient`. `WebEndpoints` builds the three candidate URLs it still GETs (P4:
+  `feed/saved/posts/`, `feed/collection/{id}/posts/` (only the lab, and strategy B below, ask for it) and
   `media/{pk}/info/`; the cursor is `max_id`), the transport fetches them (`classifyReply`, then the JSON object), `WebParsers`
-  parses them, and `currentUser` is the `WebSessionProbe`.
+  parses them, and `currentUser` is the `WebSessionProbe`. `collections` and `repairCollections` are the website's GraphQL
+  query, not a URL: the first design's collections-list path is gone (the website answers it 404), and `WebEndpointsTest`
+  pins that no `:instagram` code asks for it.
   - It makes exactly one request per call and never retries (the caller paces every call through the Pacer, so it adds no
     request rate or concurrency). The transport is asked for lazily on the first call that needs it, so constructing the
     client sends nothing and builds no page.
@@ -244,8 +278,10 @@ Pure Kotlin/JVM.
   - **P6:** every endpoint builder stays on the base host (`www.instagram.com`) and a test pins it. It was written to keep
     OkHttp from coalescing HTTP/2 connections and re-sending after a 421; with the hidden page it keeps every call
     same-origin (the transport also refuses a path that could name another host).
-  - **P3:** `reportsSavedCollectionIds` defaults to `SAVED_COLLECTION_IDS_CONFIRMED = false` (strategy B: walk every
-    collection, more requests but always correct) until the Adapter lab shows `saved_collection_ids` on saved items.
+  - **P3:** `reportsSavedCollectionIds` defaults to `SAVED_COLLECTION_IDS_CONFIRMED = true`: spike question 2 was answered
+    yes on 2026-10-09, every saved item lists its collections in `saved_collection_ids`, so the sync walks All Saved once
+    (strategy A) and the per-collection feeds are not walked. Strategy B (walk every collection, more requests but always
+    correct) stays in the engine for a client that reports `false`.
   - **P8:** `mediaInfo` returns null for HTTP 400 and 404 (the `ShapeChanged("http.400")` and `http.404` that
     `ErrorClassifier` gives a 4xx without a challenge, login or rate-limit marker) and for an empty `items`. A challenge,
     login or rate limit in the same 400 body still throws, and a null never deletes anything (the viewer shows "not
@@ -257,10 +293,13 @@ Pure Kotlin/JVM.
 `instagram/.../lab/`: the pure-JVM core of the on-phone Adapter lab, where the owner sends one request per candidate
 endpoint to learn the real response shapes (spec 6.3).
 
-- **One request, no retry.** `AdapterLab.run(call, arg)` sends exactly ONE GET for a `LabCall` (current user,
-  collections, All Saved, one collection, one media). The URL comes from the `WebEndpoints` builders (the user id from the
-  `ds_user_id` cookie, digits only), so no session, a missing id or a non-digit id throws before any request and before
-  the lazy transport is built. The lab adds no request path or rate: the caller (the app) must pace each `run` through the
+- **One request, no retry.** `AdapterLab.run(call, arg)` sends exactly ONE request for a `LabCall` (current user,
+  collections, All Saved, one collection, one media): a GET, except Collections, which is one POST of the website's query
+  ([Collection names](#collection-names)) with the doc id the `DocIdStore` holds. The lab never learns a doc id and never
+  repairs: a rejected one shows as classification `StaleQuery`. A GET's URL comes from the `WebEndpoints` builders (the user id
+  from the `ds_user_id` cookie, digits only), so no session, a missing id or a non-digit id throws before any request and
+  before the lazy transport is built. Collections' reply is classified by the query's own rule and shown and scrubbed after
+  the website's leading `for (;;);`, and its first user collection's id feeds First collection. The lab adds no request path or rate: the caller (the app) must pace each `run` through the
   Pacer.
 - **Any status is an answer.** `run` takes the transport's `RawReply` and classifies it with `classifyReply` (the one rule,
   see above); an HTTP error status is an answer, not an exception, and so is a redirect (its shape reads
@@ -317,6 +356,16 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
     navigation to anything but Instagram's, Facebook's or Meta's domains (`WebEndpoints.isLoginPage`) is refused
     (`shouldOverrideUrlLoading`). Everything is main-thread only: `get` and `reset` switch to the main dispatcher, so the
     sync worker's coroutine suspends until the reply.
+  - **The console stays out of the system log (R16).** A WebView with no chrome client writes the site's own `console`
+    messages to logcat (tag `chromium`), release builds too, and the site logs signed CDN URLs (the repair page's URL also
+    holds the owner's handle). Both hidden pages, `AndroidWebPage` and `AndroidRepairPage`, install one shared
+    `HiddenPageChromeClient` in their `init`, before any load: `onConsoleMessage` returns true (handled, never logged, never
+    `super`); `alert`, `confirm`, `prompt` and `beforeunload` are cancelled at once; geolocation (not retained) and every other
+    permission request are denied; a file chooser gets no file. Full screen (`onShowCustomView`) and new windows
+    (`onCreateWindow`) keep the default, which shows and opens nothing. `ChromeClientPin` (used by `AndroidWebPageGuardTest`
+    and `RepairPageGuardTest`) pins the class and its one installation on each page, `HiddenPageChromeClientTest` runs each
+    override, and the emulator's `HiddenPageConsoleTest` shows a plain WebView's console marker reaching this process's
+    logcat and the two hidden pages' markers never doing so.
 - **One call.** `get(path)` refuses a path that does not start with a letter or a digit, or that holds a tab, CR or LF
   (so it can never name another host), then:
   1. makes the page exist: the first call (and the first after a reset or an idle close) creates it and loads
@@ -327,6 +376,9 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   4. waits up to 30 s for the page's message with that id.
 
   Exactly one `fetch` per call, so the Pacer's one gate, its gaps and its budgets mean what they meant before.
+  `graphql(query, docId, variables)` is the same call with `window.__igGraphQl` evaluated instead of `window.__igFetch`: the
+  busy flag, the landing check, the sticky verdicts, the page cap, the idle close, the remembered 429 and the abort all hold
+  for it unchanged, and it is one POST ([Collection names](#collection-names)).
 - **The page's script** (`ig_fetch.js`) is one function: `fetch('/' + path)` with `method: 'GET'`,
   `credentials: 'same-origin'`, `redirect: 'manual'` and the headers `x-ig-app-id: 1217981644879628`,
   `x-asbd-id: 359341`, `x-requested-with: XMLHttpRequest`, `x-csrftoken` (from `document.cookie`) and `x-ig-www-claim` (the
@@ -334,7 +386,10 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   is posted as `redirected = true` with `code: 0`, a failed `fetch` (offline, DNS, reset) is code -1, a body that can't be read is null.
   The CSRF token and the claim never leave the page. Each fetch gets its own `AbortController`, kept by id until the fetch
   settles, and `window.__igAbort(id)` (defined once, behind the same guard as `__igFetch`) aborts it (R105); an aborted fetch
-  posts code -1 for its id, which nobody waits for any more.
+  posts code -1 for its id, which nobody waits for any more. The same script holds `window.__igGraphQl`, which reads the
+  page's own tokens, uses them for one POST and posts back the same message; how, and what it never does with them, is under
+  [Collection names](#collection-names). Both calls route their reply through one `answer(id)`, so the message cannot drift
+  between them.
 - **The message channel** is `WebViewCompat.addWebMessageListener`, installed before the first load as `window.igBridge`
   for the origin `https://www.instagram.com` only. A message reaches the transport only when the platform credits it to the
   MAIN frame, from exactly that origin, and only as a STRING; `AndroidWebPageGuardTest` pins the rule set and the three
@@ -421,8 +476,11 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   run, a check or a lab session that begins after 5 idle minutes). A login-screen check runs with two instagram.com pages
   live, the visible login WebView and the hidden page, and since the stored state is not Valid then, R92 resets the hidden
   page first, so that check always comes with a fresh home-page load. One more thing the Pacer does not see: Chromium may
-  re-send a GET on a dropped connection, the same way it would for the website itself (spec 4, accepted). The app makes one
-  call and the Pacer counts one request, so a re-send is a request the app neither sees nor counts.
+  re-send a GET or the GraphQL POST on a dropped connection, the same way it would for the website itself (spec 4, accepted).
+  The app makes one call and the Pacer counts one request, so a re-send is a request the app neither sees nor counts. The
+  collections repair's view of the owner's Saved page is the one other unpaced page view, and has its own bounds
+  ([Collection names](#collection-names)): at most 3 home loads per user action, plus at most one repair page view per 24 h
+  or per Forget.
 - **X-Requested-With (R100).** The WebViews keep sending their automatic `X-Requested-With: io.github.yuriimurha.reels`:
   on the emulator it went on every request the WebView made itself (the home page, images, frames, the favicon), while the
   API `fetch` carried only the script's own `x-requested-with: XMLHttpRequest` (a single value). It cannot be turned off:
@@ -457,11 +515,12 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   `SessionRepository` and `LibraryRepository` take it as `debugLog`.
 - **Logging (spec 3.4).** Debug builds log one line per API call under the tag `InstagramHttp`:
   `GET <path, digit runs of 3 or more as <n>> -> <code> (<ms> ms)`, for example `GET api/v1/accounts/edit/web_form_data/ ->
-  200 (412 ms)`. `<code>` is the HTTP status, `redirect`, or what happened when there is none: `timeout`, `login page`,
+  200 (412 ms)`, or for a GraphQL call `GRAPHQL <friendly name> -> <code> (<ms> ms)`, which never carries the doc id, the
+  variables or a body. `<code>` is the HTTP status, `redirect`, or what happened when there is none: `timeout`, `login page`,
   `challenge page`, `unexpected page`, `load http <status>`, `load http 429 (remembered)` (R104a), `load failed`,
-  `load timeout`, `page limit`, `busy`, `no page`,
-  `page destroyed`, `page error`, `network error`, `cancelled`, or `error` (the default, for a failure that is none of
-  these). A non-2xx reply is followed by its `ErrorReplySummary` line
+  `load timeout`, `page limit`, `busy`, `no page`, `no tokens` and `refused query` (a GraphQL call the page could not or would
+  not send), `page destroyed`, `page error`, `network error`, `cancelled`, or `error` (the default, for a failure that is
+  none of these). A non-2xx reply is followed by its `ErrorReplySummary` line
   (`<-- 429 reply: ...`, see [`:instagram`](#instagram)). Never a body in a 2xx line and never a header (the app sees none,
   so none is logged). The idle close logs `page closed (idle)`, `closePage()` `page closed (owner needed)`. A release build logs nothing: `AppContainer.debugLog` is
   null there. This replaces the OkHttp header log (`--> GET https://...` blocks with redacted cookies) for API calls, and
@@ -505,6 +564,243 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   (Robolectric) runs every hook on a container with no session and asks `instagramTransportCreated`; and the smoke suite's
   `requireNoTransport()` fails a Mock mode run, before and after each test, if the transport was ever built.
 
+## Collection names
+
+`instagram/.../web/` (`WebGraphQl.kt`, `DocIdStore.kt`, `WebParsers.kt`, `WebInstagramClient.kt`), `app/src/main/assets/`
+(`ig_fetch.js`, `ig_watch.js`), `app/.../transport/` (`AndroidRepairPage.kt`, `DesktopSite.kt`, `RepairPage.kt`),
+`app/.../sync/` (`QueryRepairer.kt`, `SyncEngine.kt`) and `app/.../data/settings/`. Spec
+[`2026-10-09-collection-names-design.md`](docs/superpowers/specs/2026-10-09-collection-names-design.md), which amends the
+first two specs.
+
+The first design listed the collections with a call of its own, which the website answers with a 404. Its mobile Saved
+tab has no collections at all, but its desktop one lists them with one GraphQL query, and that query sent from the mobile hidden
+page (with the page's own tokens and the mobile app id) was answered 200 with the same fields. So the app sends that query.
+Instagram changes a query's `doc_id` whenever it deploys the site, so when the stored id stops working the app learns the
+current one from the site itself, on the phone, with no rebuild.
+
+- **The query.** Friendly name `PolarisProfileSavedTabContentQuery` and built-in `doc_id` `27584326974521636` (public site
+  constants, from a capture on 2026-10-08), variables `{"collection_types":["ALL_MEDIA_AUTO_COLLECTION","MEDIA","AUDIO_AUTO_COLLECTION"],"first":12}`
+  as the site sends them, and for page 2 on the previous page's `page_info.end_cursor` as `after` (CURSOR, assumed). The reply
+  root is `data.viewer.collections_unified_with_auto_collections`: `edges[].node` with `collection_id`, `collection_name` and
+  `cover_media.pk`, and `page_info`. The body may start with `for (;;);`, which the parser strips.
+- **The GraphQL seam (`:instagram`) and the allow-list.**
+  - `InstagramTransport.graphql(query, docId, variables)` is one POST, with `get`'s rules: one request, never retried, never
+    redirected. Its path, form field names and header names are constants in `WebGraphQl` (`PATH`, `QUERY_PATHS`, `Field`,
+    `FORM_FIELDS`, `Header`, `HEADERS`), which `OkHttpTransport` builds its request from and the page scripts' tests pin
+    against.
+  - `GraphQlQuery` has an internal constructor, so only `:instagram` can make one, and `WebGraphQl.ALL` is the allow-list (today
+    one query: friendly name AND built-in id). A transport refuses, with `IllegalArgumentException` and before anything is
+    sent, a query outside `ALL` and a doc id that is not `WebGraphQl.isDocId` (ASCII digits, 1 to 30). The allow-list names a
+    query, but the server runs whatever persisted query a doc id names, so the id is held to the shape of the website's
+    too; the page's script checks both again and answers code -3 (nothing sent, `Transient`, the page kept).
+- **Tokens are read and used only in the page.** `window.__igGraphQl(id, name, docId, variables)` in `ig_fetch.js` reads
+  `fb_dtsg` and `lsd` from the site's own module system (`DTSGInitialData`, `LSD`), else from the data its server put in the
+  page's HTML, and `csrftoken` from `document.cookie`. It then POSTs `application/x-www-form-urlencoded` to `/api/graphql`:
+  the seven fields `fb_dtsg`, `lsd`, `fb_api_caller_class=RelayModern`, `fb_api_req_friendly_name`, `variables`,
+  `server_timestamps=true` and `doc_id`, with the headers `content-type`, `x-fb-friendly-name`, `x-fb-lsd`, `x-ig-app-id`,
+  `x-asbd-id` and `x-csrftoken`, `credentials: 'same-origin'` and `redirect: 'manual'`. It posts back the same
+  `{id, code, contentType, body, redirected}` as a GET. A page that has no tokens posts code -2: nothing was sent, and (R20)
+  `WebViewTransport` answers the GraphQL call with `InstagramException.QueryNotSent("no tokens")`, a direct subtype that
+  `retryTransient` never retries, and keeps the page (a GET needs no tokens, and a fresh page would only cost a home load);
+  the sync falls back to the last names on it ([Collection names](#collection-names)). Only a GraphQL call reads -2 that way:
+  for a GET, whose script never posts it, it is no status at all (`Transient`, like -1). Every `when`/`catch` over
+  `InstagramException` sees it as: the sync's names listing, a fallback; `retryTransient` and the Pacer, passed through; the
+  Adapter lab, a failed call shown through `userMessage` as "query not sent: no tokens"; the viewer's link refresh and the
+  session probe send only GETs and never meet it. No token ever reaches the app, a log or any other request:
+  `WebViewTransportTest` pins the script's text (the tokens object is used only to build the form and the headers, the reader
+  is called once, `tokens()` has its exact known text, the bridge is named and posted to only where the reply messages are,
+  and a list of words such as `console`, `navigator`, `sendBeacon`, `WebSocket`, `Image` and `localStorage` never appears) and
+  checks the pins against a list of mutants (a token logged, beaconed, kept on `window`, posted back or hidden behind another
+  name), each of which must fail them; the emulator suite checks that a server saw both tokens and that the one message the page
+  handed the app held neither.
+- **The doc-id store.** `DocIdStore` answers the id to send (`docId(query)`) and takes the one the site was seen using
+  (`learned(query, docId)`). `SettingsDocIdStore` keeps it under the key `graphql_doc_<friendly name>`, falling back to the
+  built-in id. Only digits are ever answered or stored (R8): a stored value that is not `isDocId` is answered with the
+  built-in id, and `learned()` ignores a non-digit id, because both transports would refuse it and the refusal would escape
+  as an unexpected exception. `WebInstagramClient.repairCollections()` learns the id only after the repaired reply has parsed
+  as a page of collections, and `QueryRepairer` hands over only the reply of a 2xx: an id is never learned from an error
+  status, a reply that did not parse or a stale one.
+- **The stale rule (R12, R17).** `WebParsers.classifySavedCollections` reads a reply to the query in this order, on the body
+  after a leading `for (;;);`:
+  1. the rule of every reply (`classifyReply`): a challenge, a rate limit, a logout, a redirect or a network problem keeps its
+     meaning;
+  2. the same markers inside the reply's GraphQL `errors` entries (`message`, `summary`, `description` and `error_type`, the
+     last read as `ErrorClassifier.classify` reads a reply's), so a throttled 200 is `RateLimited` and a login or challenge
+     reported in the body keeps its meaning too, never a repair;
+  3. a stale query, `StaleQuery` (it carries the friendly name only): a 2xx JSON reply without `data.viewer` (`data` null,
+     absent, empty or another query's), with `errors` or without them (R17: so a doc id that names another persisted query,
+     planted or not, is repaired within a day instead of being sent again on every sync), or a 400 or 404 that is not JSON
+     (STALE, assumed, to be confirmed on the phone). Only a new doc id fixes that, so it is never a shape change, never
+     retried and never arms a cooldown;
+  4. a reply whose `data` has `viewer` is never stale: with `errors` and no root it is `Transient` (a 2xx execution error,
+     which follows the existing retry), with neither it is `ShapeChanged` at the root path.
+- **The parser.** The nodes of `edges`, in order, less the automatic collections: the owner's own have a `collection_id` of
+  digits only and the automatic ones (`ALL_MEDIA_AUTO_COLLECTION`, audio) do not (AUTO, assumed). A collection is never told
+  by its display name. The cover is `cover_media.pk` when it is digits; a name is kept as the site sends it, an empty one
+  too. `page_info.has_next_page` must be a real boolean and `end_cursor` non-empty when there is more (P5 for GraphQL).
+- **Cursor guards (R13).** The client throws `ShapeChanged("page_info.end_cursor")` when a page's next cursor is the one it
+  was asked with (CURSOR is unverified, and a server that ignored it would answer the same page for ever), and the sync keeps
+  the set of cursors it has seen while listing, so an A, B, A cycle ends the same way, before it eats the run's budget.
+- **Strategy A is on.** `SAVED_COLLECTION_IDS_CONFIRMED = true`: the sync walks All Saved once and takes each item's
+  collections from its own `saved_collection_ids` ([Sync engine](#sync-engine)); no per-collection feed is requested. The
+  consequence: a Sync (QUICK) stops a feed at the first page that holds an item the library already has, so it records an
+  item's collections only for the pages it walks, and an older saved item newly added to a collection is picked up by a Full
+  sync, no longer by a Sync (strategy B's per-collection walks would have caught it).
+- **The repair page.** When the stored id is stale (the first page of the listing), or Forget armed a forced repair (below),
+  the sync asks `client.repairCollections()` to learn the current one. It is `AndroidRepairPage`: its own `WebView`, never the
+  transport's page, with its own message listener, script and the hidden pages' quiet chrome client (R16, [Transport](#transport)),
+  made from the application context, never shown, and destroyed after its one watch.
+  - **Two pages at once, for at most 45 s (R19).** The transport's mobile page is not closed for a repair: it sits idle (the
+    repair holds the Pacer's gate, so no API call runs on it), and closing it would only add a home load to the next call.
+    So for the length of a repair (at most 45 s, at most once per 24 h or per Forget) the idle mobile page and the desktop
+    repair page are both live on the one session, with no API call overlapping the repair.
+  - **Desktop mode, through the WebView's own settings, with Chrome-on-Android's "Desktop site" identity (R10).** `DesktopSite`
+    builds it from the WebView package's version: the user agent `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML,
+    like Gecko) Chrome/<major>.0.0.0 Safari/537.36`, and through `UserAgentMetadata` the client hints platform Linux (no
+    platform version), architecture x86, 64 bits, no model, not mobile, form factor Desktop, Chrome's brands for that major
+    version (a GREASE brand, Chromium and Google Chrome, in Chromium's order, with the WebView's real full version). It is not
+    macOS because the phone's own `navigator.platform`, touch points and pixel density cannot be overridden, while a phone in
+    Chrome's Desktop mode shows exactly this combination.
+  - **The window (R9).** A wide viewport, and the view is measured and laid out at 1440 x 900 CSS pixels (device pixels = CSS
+    pixels x the screen's density), so a page that sizes itself by `width=device-width` lays out as the desktop window the
+    query was captured in.
+  - **Refusal.** The page refuses to be made (`IllegalStateException`) when this WebView lacks `USER_AGENT_METADATA`,
+    `USER_AGENT_METADATA_FORM_FACTORS` or `DOCUMENT_START_SCRIPT` (or `WEB_MESSAGE_LISTENER`), or its version is unknown:
+    without the first two it would send a desktop user agent with mobile client hints, a mismatch the app never sends.
+    `QueryRepairer` turns the failure into `RepairFailed("page error")`, so the sync falls back instead of crashing. Never
+    `addJavascriptInterface`.
+  - **What it watches.** `ig_watch.js` is installed with `addDocumentStartJavaScript` for the instagram.com origin only, so
+    it wraps `fetch` and `XMLHttpRequest` before the site's code runs. It watches for exactly one request: a POST to one of
+    `WebGraphQl.QUERY_PATHS` whose form names the friendly name, in whatever shape the site sends it (a string,
+    `URLSearchParams`, `FormData`, `Blob` or `ArrayBuffer` body; a `Request` or a `URL` object as the fetch's input; an XHR whose
+    reply is text or JSON). For that request only, and only once it got a completed HTTP response (a status of 100 to 599: a
+    failed fetch, or an XHR that ended with status 0, reports nothing), it posts `{kind: 'watched', docId, code, body}`: the doc
+    id from the request's form, the reply's status and its text. It never reads or posts a token, a cookie, storage or any other
+    request, and never throws into the site (`RepairPageGuardTest` pins the whole text, that it names no secret, and that it
+    posts only that report). Known gaps, not seen on the phone: a `Request` whose body is multipart `FormData` (the site's own
+    form is urlencoded) is not matched, and a JSON XHR's body is re-serialised, so an integer above 2^53 would round.
+  - **The message channel** is `addWebMessageListener` as `window.igBridge` for the origin only, read under the transport page's
+    three conditions (the main frame, exactly that origin, a string); a report counts only when its doc id has the website's
+    shape and its code is a number. The trust boundary is that origin, as for the transport's page (R109).
+  - **How a watch ends,** whichever comes first: the watched report (at once, even before the page has finished loading); a
+    main-frame page that is an HTTP error (the first load's or a later one's); a main-frame page that finishes on a login or
+    challenge path (`RepairLanding.Login`, `RepairLanding.Challenge`); a dead renderer or `destroy()` (`IOException`); or the
+    timeout, which first checks once more for a login or challenge path the page moved to by itself, else gives `null` (the
+    request never came). The page loads nothing but the instagram.com origin: the owner's own Saved page (below).
+  - **The 45 s bound** (`REPAIR_TIMEOUT_MS = 45_000`) covers the load and the wait together: a page that never finishes is a
+    request that never came.
+- **The 24 h limit and the handle.** `QueryRepairer` works in this order:
+  1. at most one attempt per `REPAIR_INTERVAL_MS = 86_400_000` ms, kept as `collections_repair_at`; a last attempt less than a
+     day ago refuses with `RepairSkipped("limit")` and makes no page. One dated in the future (a clock set back) refuses too,
+     and is first rewritten to now, so the next attempt waits a day from now and never longer, however far ahead the date
+     was. The settings corruption fallback also sets it to now (R11);
+  2. the URL is `WebEndpoints.savedPage(handle)` (D-C1: `:instagram` owns it), `https://www.instagram.com/<handle>/saved/`
+     built from `HOME_URL`, for the handle of the stored session; it is null unless the handle matches
+     `^[A-Za-z0-9._]{1,30}$` and is not dots alone (`.` and `..` are path segments), so nothing else ever goes into the URL
+     (`WebEndpointsTest` pins the URL and the refused shapes, and a source pin keeps `QueryRepairer` free of any URL or handle
+     rule of its own). No handle, or another shape, refuses with `RepairSkipped("no handle")`, no page and no attempt recorded;
+  3. the attempt is recorded before anything loads, so a repair that crashes half way still counts;
+  4. one page, made and destroyed on the main thread (a WebView is main-thread only), destroyed however the watch ends,
+     cancellation included; a `destroy()` that throws is caught (C-M4), so it never hides how the watch ended.
+- **What the ending means.** The site's own 2xx reply is a `RepairedQuery` (the client parses it, and only then learns the
+  id: learning only from a 2xx). A 429, as an error page or as the watched reply, is `RateLimited`, so the Pacer arms the
+  cooldown; a login page is `LoginRequired`, a challenge page `ChallengeRequired(null)`. Any other status (nothing is learned
+  from one), no request in time, or a page that failed or could not be made is `RepairFailed`.
+- **The repair inside the sync.** `SyncEngine.repairCollections` runs it as `call(progress, retry = false)`: through the
+  Pacer's gate like any request, so it holds the gate while it runs (the repair page never exists while an API call runs on
+  the normal hidden page), a cooldown refuses it, the session gate is asked before and after, and it costs one run-budget
+  unit. It is never retried, since a second attempt could only be refused by the limit. A stale reply to a LATER page is a
+  broken answer, not a stale id: it falls back with no repair. After a repair that gave no names (refused or failed, or a
+  repaired reply the client could not use: itself stale, failed for a moment, or, R14, of another shape) a run never repairs
+  again and goes on with the last names. A rate limit, a login or a challenge stops the run as from any request. (R14's cost:
+  a genuinely changed reply shape reads as "Couldn't refresh collection names", not "Adapter needs repair"; the lab still
+  shows the shape.)
+- **A names query that could not be sent (R20).** A page without tokens answers the names query with `QueryNotSent`, on any
+  page of the listing: nothing went out, so there is nothing to repair; it is never retried and the run falls back to the
+  last names at once (one run-budget unit, no request), keeping the page for the feed's GETs.
+- **The fallback and the placeholders.** When the names can't be had, the run goes on with the last good ones
+  (`fallbackCollections`): the collections keep their names, covers and positions, nothing is marked removed, All Saved is
+  written (for a library whose very first listing failed), and the items' memberships are still recorded. A collection an item
+  is saved in that none of the last names covers gets a placeholder, `Collection N`, placed after the last collection and
+  known from then on, so its memberships are written: N is one more than the highest `Collection <n>` among the live
+  collections, so numbering goes on across runs and never repeats a number in use. A later good listing renames the
+  placeholders to Instagram's names (same ids). A placeholder for an id that has a row a good listing marked removed is not
+  new: that row comes back (its cover kept, placed after the last collection) under the name it had, unless that is a
+  placeholder name a live collection has taken since, which is numbered afresh, so no two collections share one. In a good
+  listing, a collection whose name is empty keeps the name the app already has for it, else gets a new placeholder numbered
+  after the highest among the names that stay. A blank collection id on an item never gets one.
+- **The names-stale notice.** The fallback sets `collection_names_stale` and a good listing clears it; the Sync screen's
+  Library section shows "Couldn't refresh collection names" while it is set, beside the banner and blocking nothing. A
+  settings write that fails there is swallowed (only the notice would be wrong). Only the real backend writes it: the fake
+  engine's setter does nothing, so a Mock mode sync never touches the real library's flag. Delete library of the real
+  library clears it with the names it spoke of (C-M5); deleting Mock mode's fake library leaves it alone.
+- **Forget collections query id (R18, R21).** The Developer section's button (debug builds, real backend only: never offered
+  in Mock mode; it needs no session) is off while the latest run is RUNNING and until that run has loaded, like the Mock mode
+  switch (`SyncViewModel.forgetQueryIdEnabled`; `forgetQueryId()` refuses then too): a tap mid-repair would erase that
+  repair's attempt record. A tap makes `SettingsStore.forgetCollectionsQueryId()` set `collections_force_repair` and remove
+  `collections_repair_at`, in one edit. It stores no made-up id and sends nothing: the doc id in use stays until a repair
+  learns a new one, and nothing depends on how Instagram answers a wrong id. The next real sync's first names page reads the
+  flag (`SyncEngine`'s `repairForced` lambda, wired to the settings in `Backend.Real` only; the fake engine's default is
+  "not forced", so Mock mode never reads or spends it), sends no query, logs `collections query forced` and goes straight to
+  the run's one repair, outside the 24 h limit. The flag is cleared inside the request lambda (`clearRepairForced`), that is
+  once the Pacer has granted the attempt: a cooldown, the budget or a session refusal keeps it for the next sync, and the
+  repairer's own refusals (`limit`, `no handle`) spend it. The cost (R21): a crash between the clear and the attempt record
+  loses the forced repair, and the owner taps again; and Forget no longer exercises the STALE rule on the phone. A failed
+  write says "Couldn't forget the collections query id" under the button.
+- **Debug log** (tag `InstagramHttp`, debug builds only, never a doc id, handle, URL, token or body):
+  `GRAPHQL PolarisProfileSavedTabContentQuery -> <code> (<ms> ms)` per query (with the error summary line for a non-2xx
+  reply; `no tokens` for a query the page could not send), `collections query stale` when the first page is stale or
+  `collections query forced` when Forget armed the repair, then the repairer's `repair: start` or `repair: failed (<reason>)`
+  (`limit`, `no handle`, `http <code>`, `login page`, `challenge page`, `no query`, `page error`), and the engine's
+  `repair: learned new id` once the client has parsed the site's reply and kept its id (D-I2: never before), or
+  `repair: failed (reply stale)`, `repair: failed (reply transient)` or `repair: failed (shape <field path>)` (field names
+  and indices only) when the client could not use it.
+- **Traffic, and the pacing rule (CLAUDE.md).**
+  - A normal sync sends fewer requests than before: the per-collection feeds are gone. The names query is one request per 12
+    collections (`first: 12`), the automatic collections included, so a library of a few collections costs one.
+  - A 2xx execution error that has `data.viewer` is `Transient` and follows the existing retry (the Pacer's 30, 60, 120 and
+    240 s waits, each attempt a counted request): up to 5 requests for that page, then the run pauses.
+  - A names query the page could not send (no tokens, R20) costs one run-budget unit and no request, is never retried, and
+    keeps the page: no extra home load.
+  - A repair is one desktop page view of the owner's own Saved page (the site's own requests, about 30, unpaced like the home
+    page load), at most once per 24 h, and only after a rejected id (R17: any 2xx names reply without `data.viewer`) or a tap
+    of Forget. It costs one run-budget unit and one request-log entry even when the 24 h limit refuses it (the Pacer counts
+    and records before the repairer's limit is checked), so a sync within a day of a repair that meets another stale id
+    spends two units on the names: the stale request and the refused repair. Over-counting only. A forced repair replaces the
+    names request: one unit, as the request would have cost.
+  - So the site is loaded at most 3 home loads per user action, plus at most one repair page view per 24 h or per Forget;
+    during a repair the idle mobile page and the desktop repair page are both live for at most 45 s, with no API call
+    overlapping (R19).
+  - Chromium's own re-send of a GET or the GraphQL POST applies as before: the app neither sees nor counts it. No rate,
+    budget, gap or concurrency was raised.
+- **Tests.** All use fakes, MockWebServer or the emulator's local server; none contacts Instagram.
+  - `:instagram`: `WebParsersTest` (user and automatic collections, page 2, the `for (;;);` guard, names kept as sent, white
+    space too, the stale rule with R17 and every neighbour that must keep its meaning, in-band `error_type` too),
+    `WebInstagramClientTest` (the stored id is sent, a stale reply never repairs by itself, the repair learns only after the
+    reply parsed and sends nothing itself, the cursor guard), `OkHttpTransportTest` (one POST with the website's form fields and
+    no tokens, a doc id that is not digits refused before any request, the friendly name and built-in doc id spelled out),
+    `AdapterLabTest`, `WebEndpointsTest` (nothing asks for the old collections-list path; the Saved page's URL and every refused
+    handle shape).
+  - `:app` JVM: `WebViewTransportTest` (the GraphQL call, `no tokens` as `QueryNotSent` with the page kept, and the script pins
+    above, among them that `fetch` is named only by the two calls and the built form and headers go only to the fetch),
+    `RepairPageGuardTest`, `AndroidWebPageGuardTest` and `HiddenPageChromeClientTest` (R16), `DesktopSiteTest`,
+    `QueryRepairerTest` (the limit and its clamp, the handle, the attempt recorded first, the page always destroyed and a
+    throwing destroy harmless, every ending, the fixed log lines, no URL of its own), `SettingsDocIdStoreTest`,
+    `SettingsStoreTest` (R11, Forget's flag in one edit), `SyncEngineTest` (one repair then the sync, the exact log of a
+    repair that learned or could not use its reply, the fallback and its notice, a notice store that throws, never retried, a
+    rate-limited repair stopping the run, R14's fallback, a names query not sent, the cursor cycle, placeholders with their
+    numbers and places, a removed row revived, a blank id, no per-collection feed requests, the forced repair kept by a
+    refusal and spent by the repairer's, and Forget then one sync repairing exactly once over a real client while sending only
+    ids the site runs), `LibraryRepositoryTest` and `BackendSelectionTest` (Delete library clears the real notice only; Mock
+    mode never reads Forget's flag), `SyncViewModelTest` (Forget off while RUNNING), `SyncUiStateTest`, `DeveloperSectionTest`,
+    `SyncScreenCollectionNamesTest`, `BackendWiringGuardTest` (the repair page and `QueryRepairer` are built only in
+    `di/AppContainer.kt`, inside `Backend.Real(`; the doc id store is the client's and the lab's; the notice is written, and
+    Forget's flag read, only by the real engine) and `InstagramTransportWiringTest` (Mock mode has no repair).
+  - Emulator only, local servers (`AndroidWebPageTest`, `AndroidRepairPageTest`, `HiddenPageConsoleTest`): one POST with the
+    expected form and headers, tokens taken from a fake page and never posted back, a page without tokens sends nothing and is
+    kept, an unknown name or doc id is refused in the page; the repair page's user agent and client hints as the server sees
+    them, the 1440 px window, each request shape, each ending, a dead renderer; neither hidden page's console reaches logcat.
+
 ## Pacer
 
 `app/.../sync/pacing/`. The single gate for Instagram API calls: one at a time.
@@ -542,17 +838,27 @@ two requests on the owner's phone were answered HTTP 429 (spec `2026-10-08-webvi
   none raises it.
 - **What the Pacer counts.** One API call, one `fetch` ([Transport](#transport)). It does not see the hidden page's own
   traffic (the home-page load and the site's background requests while the page exists); that is bounded by the page's
-  life, not paced. Nor does it see a re-send: Chromium may re-send a GET on a dropped connection, as it would for the
-  website itself (spec 4, accepted).
+  life, not paced. Nor does it see a re-send: Chromium may re-send a GET or the GraphQL POST on a dropped connection, as it
+  would for the website itself (spec 4, accepted). The collections repair passes through the gate as one call (one run-budget unit, one
+  request-log entry) although what it loads, the owner's Saved page and the site's own requests, is not counted either
+  ([Collection names](#collection-names)).
 
 ## Sync engine
 
 `app/.../sync/SyncEngine.kt`. One run: session check (`currentUser()`), collection list, scope walks, one transaction per
 page (media, memberships, cursor), thumbnails on the CDN lane.
 
-- **Scopes.** Strategy A walks All Saved only, using `savedCollectionIds`; strategy B (the default, P3) walks All Saved
+- **Collections first.** After the session check the run lists the collections with their names (`fetchCollections`,
+  [Collection names](#collection-names)): the website's query, page by page, a stale first page repaired once (or, when Forget
+  armed it, the repair in place of the first page), the last names kept (with `Collection N` placeholders for an unnamed
+  collection an item lists) when the names can't be had: a repair that gave none (R14 included), a stale later page, or a
+  query the page could not send (R20). It checks the cursor of each page against those it has seen (R13), so a repeated one is
+  `ShapeChanged("page_info.end_cursor")`.
+- **Scopes.** Strategy A (the default now, P3: `reportsSavedCollectionIds` is true) walks All Saved only, using
+  `savedCollectionIds`, and sends no per-collection feed request; strategy B (a client that reports `false`) walks All Saved
   and then every collection. QUICK stops a scope after the first page that holds an item the scope already has (so on an
-  empty library it walks everything); FULL walks to the end.
+  empty library it walks everything); FULL walks to the end. So under strategy A a QUICK run records an item's collections
+  only for the pages it walks: an older saved item newly added to a collection is picked up by a FULL run, not a QUICK one.
 - **Reconcile.** FULL runs reconcile a scope only when its walk reached the end in that run. All Saved marks unseen items
   removed (and deletes their memberships, thumbnails and cached videos); a collection (strategy B) deletes its unseen
   memberships only (`deleteUnseen`).
@@ -560,7 +866,8 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
   - A FULL walk of All Saved that ends having seen nothing over a non-empty library stops as `STOPPED_SHAPE`
     (`"empty saved feed"`) instead of reconciling.
   - An empty collection list while the library has live collections is `ShapeChanged("empty collection list")`, thrown
-    after paging and before the transaction, so no collection is marked removed.
+    after paging and before the transaction, so no collection is marked removed. A listing that could not be had at all
+    (the fallback) marks nothing removed either.
   - Strategy A rewrites an item's memberships only among the collections this run listed
     (`deleteRealMembershipsExcept(pk, keep, known)`), so a membership in a collection the run didn't list is left alone. An
     item whose `savedCollectionIds` is null keeps its memberships.
@@ -770,6 +1077,16 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
 - **The library's account.** `libraryAccount` is `StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake))`, one per
   library (R84); the engine checks it and `library` gets `forgetAccount = { libraryAccount.forget() }`, so Delete library
   forgets the account of the library it deleted (`BackendSelectionTest` runs both modes).
+- **Collections wiring.** Inside `Backend.Real(` only, the client is `WebInstagramClient({ instagramTransport }, cookieStore,
+  docIds = SettingsDocIdStore(settings), repair = QueryRepairer(settings, handle = { settings.session.first().handle },
+  createPage = { AndroidRepairPage(context) }, now = System::currentTimeMillis, log = debugLog))`; the Adapter lab gets the same
+  `SettingsDocIdStore(settings)`. `syncEngine()` passes `setNamesStale = settings::setCollectionNamesStale`,
+  `repairForced = settings::collectionsForceRepair` and `clearRepairForced = settings::clearCollectionsForceRepair` for the real
+  backend and no-ops ("not forced") for the fake one, and `log = debugLog`; `library` gets
+  `clearNamesStale = { if (!usesFake) settings.setCollectionNamesStale(false) }`. Mock mode builds none of the repair: `BackendWiringGuardTest` pins that
+  `AndroidRepairPage(` and `QueryRepairer(` are constructed only in `di/AppContainer.kt`, once each, nested in that exact
+  shape, and that the `Backend.Fake(` arguments are free of them; `InstagramTransportWiringTest` that a Mock client has no repair
+  behind it and that a real container without a stored handle builds no page.
 - **Lazy transport and CDN client.** The Instagram transport (`instagramTransportLazy`, a `Lazy<WebViewTransport>` that the
   container's two hooks ask `isInitialized()`, see [Transport](#transport)) and `cdnHttp` (whose user agent comes from
   `WebSettings.getDefaultUserAgent`, a WebView provider load) are built by the first request that needs them, so
@@ -812,6 +1129,11 @@ Mock mode switch.
 
 - **Developer section.** The Sync screen shows it only when `BuildConfig.DEBUG` (below Storage).
   - Its "Adapter lab" button is enabled only while the session is Valid.
+  - Its "Forget collections query id" button is shown only with the real backend (never in Mock mode) and needs no session: it
+    arms one forced repair for the next sync, which sends no names query and goes straight to it
+    ([Collection names](#collection-names)). Like the Mock mode switch it is off until the latest run has been read and while
+    that run is RUNNING (`SyncViewModel.forgetQueryIdEnabled`, and `forgetQueryId()` refuses then too). A failed write is said on
+    the section's own message line.
   - Its Mock mode switch is shown when the `SyncViewModel` holds a `MockModeSwitch` (the app always passes one in debug
     builds). The row reads "Mock mode (fake library)" and shows the mode this PROCESS runs in (`AppContainer.usesFake`, not
     the stored choice, which only takes effect on the next start).
@@ -826,7 +1148,8 @@ Mock mode switch.
   neither the entry point nor the screen.
 - **Screen.** One button per `LabCall` (Who am I, Collections, All Saved (page 1), First collection (page 1), Media info
   (first saved item)), all disabled while a call is in flight or the session isn't Valid; the last two also wait for an id
-  (a collection id from Collections, a media pk from All Saved). Under the buttons the latest result shows the call, the
+  (a collection id from Collections, a media pk from All Saved). Collections is one POST of the website's query with the
+  stored doc id (see [Adapter lab core](#adapter-lab-core)); First collection still GETs a collection's feed. Under the buttons the latest result shows the call, the
   HTTP code, the classification and the shape in a monospace, sideways-scrolling, selectable `Text`, then the path of the
   scrubbed copy.
 - **View model.** `AdapterLabViewModel` talks to the lab through the `LabRunner` interface (`AdapterLabRunner` is the thin
@@ -994,7 +1317,8 @@ Mock mode switch.
 | Instagram access | Private web endpoints, isolated in the `:instagram` JVM module | No official API exposes saved items, and the endpoints change without notice. |
 | API transport | Every API call is a same-origin `fetch()` in a hidden instagram.com WebView page (`WebViewTransport`); the OkHttp client stays only for the cookieless CDN and as the JVM-test transport | OkHttp's first two requests got HTTP 429, and copying headers cannot copy Chromium's TLS and HTTP/2 fingerprint. The page's cookies, client hints and Sec-Fetch headers are the browser's own. |
 | Video | Streamed on demand with per-item link refresh; LRU cache keyed by media `pk` | Gigabytes saved, and no bulk-download pattern. |
-| Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds | Detecting removals needs a full walk, so it stays an explicit, paced action. |
+| Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds (an older item newly added to a collection included) | Detecting removals needs a full walk, so it stays an explicit, paced action. |
+| Collection names | The website's own GraphQL query, sent by the hidden page; when its doc id goes stale a second, desktop-mode hidden page learns the current one from the site (at most once per 24 h); the last names are kept when that fails | The website answers the first design's collections-list call with a 404. A query id changes with every site deploy, and the owner wants the names to keep working with no computer: no rebuild, no reinstall. |
 | Sync trigger | Manual only, executed by WorkManager | The fewest requests; runs survive leaving the app and resume. |
 | Mock mode (P1) | Debug builds read `use_fake` from the SharedPreferences file `backend` (default `true`), so a fresh debug install, and every emulator, starts on the fake library and never needs a login. Release builds always use the real backend. A Developer section on the Sync screen (debug builds only) flips the flag and restarts the process; it is disabled while a run is RUNNING. | An emulator must never be logged into Instagram, and the real backend should be impossible to reach by accident on a dev build. |
 | Separate libraries (P2) | The fake library keeps `reels.db` and `filesDir/thumbs` (existing emulator installs keep their data); the real library is `library.db` and `filesDir/library-thumbs`. The `api_request` log behind the real 24 h budget always lives in `library.db`, even in Mock mode, so real session checks and lab calls made in Mock mode count against the same budget. | Flipping Mock mode must never mix fake items into the real library or lose the real budget. |

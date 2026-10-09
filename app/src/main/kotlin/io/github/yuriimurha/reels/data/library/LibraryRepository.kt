@@ -52,6 +52,11 @@ class LibraryRepository(
     /** R84: forgets the library's account (`LibraryAccount.forget`). */
     private val forgetAccount: suspend () -> Unit = {},
     /**
+     * C-M5: clears "Couldn't refresh collection names" with the names it spoke of. The real library passes the settings' flag;
+     * Mock mode's fake library passes nothing (the flag is the real library's).
+     */
+    private val clearNamesStale: suspend () -> Unit = {},
+    /**
      * Runs first in [deleteLibrary] (the app passes the WebView transport's `reset()`): Delete library is how the owner switches
      * accounts, so the page, and what it remembers of a login or a challenge, must not outlive the library. A failure of it is
      * swallowed (cancellation excepted): a page that will not die must not stop the delete.
@@ -104,6 +109,7 @@ class LibraryRepository(
      * Wipes synced items, collections, history, thumbnails and cached videos, and forgets which Instagram account the library
      * belonged to (R84), so the next sync may be another account's. Keeps the session and the request log (spec 9.5). The
      * account is forgotten only after the rows are gone: the other order could leave a library with no owner to check against.
+     * Then the names notice is cleared (C-M5); a failure there is swallowed, since only the notice would be wrong.
      *
      * Once the rows are gone nothing after them may fail the delete or stop the rest: forgetting the account is a settings write,
      * and a thumbnail or a cached video may not be removable. Each is tried, and what was left is reported in the result
@@ -128,6 +134,13 @@ class LibraryRepository(
             throw e
         } catch (e: Exception) {
             accountRecordKept = true
+        }
+        try {
+            clearNamesStale()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Intentionally ignored: only the notice would be wrong, until the next sync writes it again.
         }
         var cachedFilesKept = false
         withContext(Dispatchers.IO) {

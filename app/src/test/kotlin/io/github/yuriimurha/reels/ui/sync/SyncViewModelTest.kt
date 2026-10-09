@@ -18,6 +18,7 @@ import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.Account
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.SessionProbe
+import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import io.github.yuriimurha.reels.instagram.web.cookieValue
 import io.github.yuriimurha.reels.session.RecordingCookieStore
 import io.github.yuriimurha.reels.session.SessionRepository
@@ -39,6 +40,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -113,11 +115,13 @@ class SyncViewModelTest {
         realPacer: Pacer? = null,
         forgetAccount: suspend () -> Unit = {},
         clearVideoCache: () -> Unit = {},
+        /** The collections query's Developer action and names notice, as the screen wires them for the real backend. */
+        realCollections: Boolean = false,
     ): SyncViewModel {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, now = clock)
         val file = PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") }
-        val settings = SettingsStore(FlakyDataStore(file) { storageFailure })
+        settings = SettingsStore(FlakyDataStore(file) { storageFailure })
         session = SessionRepository(cookies, probe, pacer, settings)
         return SyncViewModel(
             SyncController(db, scheduler, now = clock),
@@ -127,10 +131,15 @@ class SyncViewModelTest {
             requiresSession = requiresSession,
             mockSwitch = mockSwitch,
             realPacer = realPacer,
+            forgetCollectionsQueryId = if (realCollections) settings::forgetCollectionsQueryId else null,
+            collectionNamesStale = if (realCollections) settings.collectionNamesStale else flowOf(false),
             now = clock,
             io = StandardTestDispatcher(testScheduler),
         )
     }
+
+    /** The settings of the ViewModel built last. */
+    private lateinit var settings: SettingsStore
 
     /** The process's real Pacer as Mock mode sees it: its own log and cooldown, on the same clock as the ViewModel. */
     private fun kotlinx.coroutines.test.TestScope.realPacer(log: InMemoryRequestLog, cooldowns: InMemoryCooldownStore) =
@@ -182,6 +191,130 @@ class SyncViewModelTest {
         runCurrent()
         assertNull(viewModel.ui.value.banner)
         assertTrue(viewModel.ui.value.canStart)
+    }
+
+    // ---- Spec 2026-10-09 §3.3: Forget collections query id, and the names notice ----
+
+    /** The screen is up and the latest run has been read, so Forget is on (when no run is RUNNING). */
+    private suspend fun kotlinx.coroutines.test.TestScope.forgetReady(viewModel: SyncViewModel) {
+        backgroundScope.launch { viewModel.forgetQueryIdEnabled.collect {} }
+        viewModel.forgetQueryIdEnabled.first { it }
+    }
+
+    @Test
+    fun forgetQueryIdArmsOneForcedRepairAndClearsTheRepairLimit() = runTest {
+        val viewModel = viewModel(realCollections = true)
+        val query = WebGraphQl.SAVED_COLLECTIONS.friendlyName
+        settings.setGraphqlDocId(query, "777")
+        settings.setCollectionsRepairAt(START - 60_000)
+        assertTrue(viewModel.canForgetQueryId)
+        forgetReady(viewModel)
+
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        awaitStored { settings.collectionsForceRepair() }
+
+        assertTrue(settings.collectionsForceRepair(), "so the next sync repairs once")
+        assertNull(settings.collectionsRepairAt(), "so that repair is not refused by the last one's 24 h")
+        assertEquals("777", settings.graphqlDocId(query), "no made-up id is stored")
+        assertNull(viewModel.developerMessage.value)
+        assertEquals(0, probe.calls, "it sends nothing")
+    }
+
+    /** Waits, in real time (DataStore writes on a thread of its own), until [condition] holds. */
+    private suspend fun awaitStored(condition: suspend () -> Boolean) = withContext(Dispatchers.IO) {
+        withTimeout(10_000) { while (!condition()) delay(10) }
+    }
+
+    /** Mock mode's fake library has no query to forget: the ViewModel offers no action and does nothing. */
+    @Test
+    fun withoutTheActionForgetDoesNothing() = runTest {
+        val viewModel = viewModel()
+        settings.setCollectionsRepairAt(START)
+        assertFalse(viewModel.canForgetQueryId)
+        forgetReady(viewModel)
+
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+
+        assertFalse(settings.collectionsForceRepair())
+        assertEquals(START, settings.collectionsRepairAt())
+    }
+
+    /** A write that fails is said under the button, never thrown: an exception out of this scope ends the app. */
+    @Test
+    fun aForgetThatCannotBeWrittenIsSaidOnTheScreen() = runTest {
+        val viewModel = viewModel(realCollections = true)
+        forgetReady(viewModel)
+        storageFailure = java.io.IOException("disk full at /data/user/0")
+
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+
+        assertEquals("Couldn't forget the collections query id", viewModel.developerMessage.value)
+        assertFalse(settings.collectionsForceRepair())
+
+        storageFailure = null
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        awaitStored { settings.collectionsForceRepair() }
+        assertNull(viewModel.developerMessage.value, "a tap that works clears it")
+    }
+
+    /**
+     * R21: Forget is off while the latest run is RUNNING (a tap mid-repair would erase its attempt record) and until that run has
+     * been read, like the Mock mode switch; a tap then does nothing.
+     */
+    @Test
+    fun forgetIsOffWhileARunIsRunningAndUntilTheRunHasLoaded() = runTest {
+        val viewModel = viewModel(realCollections = true)
+        settings.setCollectionsRepairAt(START)
+        assertFalse(viewModel.forgetQueryIdEnabled.value, "nothing has been read yet")
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        assertFalse(settings.collectionsForceRepair(), "refused before the run has loaded")
+
+        backgroundScope.launch { viewModel.forgetQueryIdEnabled.collect {} }
+        viewModel.forgetQueryIdEnabled.first { it }
+        val id = db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = START))
+        viewModel.forgetQueryIdEnabled.first { !it }
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        assertFalse(settings.collectionsForceRepair(), "refused while RUNNING")
+        assertEquals(START, settings.collectionsRepairAt(), "the running repair's attempt record is kept")
+
+        db.syncDao().updateRun(db.syncDao().run(id)!!.copy(status = SyncStatus.DONE))
+        viewModel.forgetQueryIdEnabled.first { it }
+        viewModel.forgetQueryId()
+        advanceUntilIdle()
+        awaitStored { settings.collectionsForceRepair() }
+        assertNull(settings.collectionsRepairAt())
+    }
+
+    @Test
+    fun theNamesNoticeFollowsTheStoredFlag() = runTest {
+        val viewModel = viewModel(realCollections = true)
+        backgroundScope.launch { viewModel.ui.collect {} }
+        runCurrent()
+        assertNull(viewModel.ui.value.collectionNamesNotice)
+
+        settings.setCollectionNamesStale(true)
+        assertEquals("Couldn't refresh collection names", viewModel.ui.first { it.collectionNamesNotice != null }.collectionNamesNotice)
+
+        settings.setCollectionNamesStale(false)
+        viewModel.ui.first { it.collectionNamesNotice == null }
+    }
+
+    /** Mock mode's screen shows the fake library: a stale flag the real library left behind is not its notice. */
+    @Test
+    fun withoutTheFlagTheNoticeIsNeverShown() = runTest {
+        val viewModel = viewModel()
+        settings.setCollectionNamesStale(true)
+        backgroundScope.launch { viewModel.ui.collect {} }
+        runCurrent()
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertNull(viewModel.ui.value.collectionNamesNotice)
     }
 
     // ---- H2: Mock mode shows the REAL Pacer's state as one line ----

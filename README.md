@@ -20,6 +20,7 @@ First time through, do sections 1 to 5 in order. Sections 6 to 10 are reference 
 |---|---|
 | M0 Skeleton, M1 Mock app | Done. Home, grid, viewer, search and sync work on a built-in fake library of 2,000 items in 8 collections. |
 | M2 Session | Code done. Logging in through Instagram's own page (or pasting a `sessionid`) needs your on-phone check ([section 8](#8-on-phone-checklist)). |
+| Collection names | Code done and tested against fakes and local test servers only. The collections and their names come from the website's own query, and the app learns the query's new id from the site when Instagram changes it. It has never met Instagram: do the box [After the collection names update](#after-the-collection-names-update) on your phone. |
 | M3 Adapter lab | Code done. A debug-only lab sends one request per endpoint and saves scrubbed copies of the answers. The parsers follow the open-source clients' known response shapes and have never met Instagram, so running the lab and handing the answers back is yours ([section 7](#7-adapter-lab-and-the-spike-handback)). |
 | M4 Real sync | Code done and tested against fakes and a local test server only. Sync, Full sync, resume, budgets, cooldowns, the challenge stop and thumbnails need your first real sync ([section 5](#5-first-real-sync)). |
 | M5 Video | Code done: reels play on demand and are cached. Needs your on-phone check ([section 6](#6-watching-videos)). |
@@ -114,7 +115,8 @@ Then open **Reels** on the phone. A fresh debug install is in Mock mode.
   posts.
 - **Sync** (the status chip, top right: "Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and a problem):
   - **Sync** fetches what's new. **Full sync** also removes what you unsaved on Instagram, applies moves between
-    collections, and fetches any thumbnails an earlier run skipped. **Delete library** wipes the local copy (your
+    collections (a Sync records which collections an item is in only for the items it walks, so an older save you newly add to
+    a collection shows in it after the next Full sync), and fetches any thumbnails an earlier run skipped. **Delete library** wipes the local copy (your
     login is kept).
   - Progress, budgets and any cooldown show here. When a run has stopped or paused, the two buttons become **Resume**
     and **Discard paused run**; **Cancel** shows while a run is going.
@@ -200,7 +202,8 @@ Thumbnails and videos are not sent that way.
 Do this once, on the phone, with the throwaway account. You need the Mac set up (section 1), the phone connected
 (section 2) and the account's login (and its 2FA device). If you are installing an update that changed how the app talks
 to Instagram, do [the box after step 6](#after-an-update-that-changes-how-the-app-talks-to-instagram) right after step 2,
-instead of step 3 (the box covers the login), and only then steps 4 and 5.
+instead of step 3 (the box covers the login), and only then steps 4 and 5. If you are installing the collection names
+update, do [its box](#after-the-collection-names-update) instead of step 5's first Sync.
 
 1. **Install the debug build** on the phone (skip if section 3 already did; the exports from step 1.4 must be done in
    this terminal):
@@ -219,13 +222,15 @@ instead of step 3 (the box covers the login), and only then steps 4 and 5.
    in a Claude session before you sync.
 5. **Tap Sync.** Android 13 and later may ask for notification permission: allow it, so the "Syncing saved reels"
    notification shows. You can leave the app while it runs; the run carries on in the background.
-   - A run checks the session (one request), lists your collections, walks All Saved, then walks **every collection
-     one by one**. That is the safe default until the lab confirms that saved items say which collections they are
-     in; it costs more requests but is always correct.
+   - A run checks the session (one request), lists your collections with their names (one request per 12 collections,
+     the automatic "All posts" included), then walks All Saved once, taking each item's collections from the item itself.
+     It does not walk each collection's feed, so it sends fewer requests than the first design did. If Instagram has
+     changed the names query since the app was built, the run repairs it once (below) and goes on.
    - On an empty library nothing is known yet to stop at, so the first Sync fetches everything, up to the budget below.
-     Later Syncs stop each feed at the first page that holds an item already in the library.
+     Later Syncs stop the All Saved walk at the first page that holds an item already in the library (the names query still goes first, one request).
    - Watch the **Syncing** section: the phase line, **Collections**, **New items**, **Items seen**,
-     **Thumbnails cached**, **Failures**, **Requests (all attempts)** and **Requests in 24 h**.
+     **Thumbnails cached**, **Failures**, **Requests (all attempts)** and **Requests in 24 h**. **Collections** counts the
+     feeds the run walks, which is All Saved alone (`1 / 1`), not the number of your collections.
    - A run of 300 requests takes roughly an hour (gaps plus breaks), so a library of a few thousand reels may need
      several runs.
 6. **When Sync has succeeded** (no banner, and **History → Last sync** shows a time), look at the grid and the
@@ -278,6 +283,109 @@ installed (step 1 above), the phone connected by USB and the exports of step 1.4
 If the answer is a 429 ("Instagram is limiting requests"), or the line says `-> load http 429` (Instagram refused the
 home page itself, before any API request), **wait**: the cooldown banner on Sync shows how long. Don't tap again to retry;
 a second 429 within 24 hours means a 24-hour cooldown. Paste the lines first.
+
+### After the collection names update
+
+The first design asked Instagram for the list of collections with a call the website answers with a 404, so a sync stopped
+at "Listing collections". Now the collections and their names come from the website's own query, sent by the same hidden
+page. When Instagram changes that query's id, the app learns the new one from the site itself: a second hidden page views
+your own Saved page once, in desktop mode, at most every 24 hours. A sync no longer walks each collection's feed (it reads
+each item's collections from All Saved), so it sends fewer requests. None of this has met Instagram yet, so do these steps
+once, in order, on the phone, after the box above has passed (the hidden page loads and one request answers 200), with Mock
+mode off and Sync saying "Logged in as @handle". In a terminal on the Mac, from the repo folder (skip this export if you
+already did step 1.4 in this terminal):
+
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" ANDROID_HOME="$HOME/Library/Android/sdk" PATH="$PATH:$HOME/Library/Android/sdk/platform-tools"
+```
+
+Wait for any cooldown to end first: while Sync shows "Cooling down after a rate limit: N min left" the app sends nothing.
+Don't reinstall or clear the app's data to skip it.
+
+1. **Install** the update. It keeps your login, your library and the app's settings:
+
+   ```bash
+   SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
+   ```
+
+2. **Clear the phone's log**, before you open Sync, so it holds every request from here on:
+
+   ```bash
+   adb -d logcat -c
+   ```
+
+3. **One sync.** Open **Sync** and tap **Sync** once, then leave it until it ends. On an empty library it fetches everything
+   (a few requests for a small account). Then print the log and keep a copy of it on the Desktop:
+
+   ```bash
+   adb -d logcat -d -s InstagramHttp > ~/Desktop/reels-names-step3.txt && cat ~/Desktop/reels-names-step3.txt
+   ```
+
+   **Expect** `GET api/v1/accounts/edit/web_form_data/ -> 200`, one `GRAPHQL PolarisProfileSavedTabContentQuery -> 200 (... ms)`
+   line (one request for the names while you have fewer than a dozen collections), then `GET api/v1/feed/saved/posts/ -> 200`
+   lines, and no `feed/collection` line. The phase line goes "Checking session", "Listing collections", "Syncing All Saved",
+   and the run ends with no banner and no "Couldn't refresh collection names". If Instagram has already changed the names
+   query, this step shows `collections query stale`, `repair: start` and `repair: learned new id` instead: that is the
+   repair working, so go on to step 4 and then **skip step 5** (a second repair minutes later would only load the site's
+   pages once more): do step 5b.
+4. **Check the collection names on the grid.** Open **Reels** (the **Saved** home). **Look for:** All Saved, Uncategorized
+   and each of your collections under its Instagram name (not "Collection 1"), each with its count, each collection's grid
+   holding the posts you know are in it, and **no** "All posts" card and no audio card (Instagram's automatic collections are
+   left out). If the collections exist but are **empty** while All Saved has items, the `collection_id` the names query sends
+   is not in the same format as the `saved_collection_ids` on the items: stop here, do not run a Full sync, and paste the log
+   (step 6).
+5. **Forget collections query id, then one sync.** Clear the log first:
+
+   ```bash
+   adb -d logcat -c
+   ```
+
+   On **Sync**, scroll to **Developer** and tap **Forget collections query id** once (it is greyed out while a sync is
+   running). It sends nothing: it only tells the next sync to skip the names query and learn the query's id from the site
+   instead. Then tap **Sync** once and wait. The repair loads your Saved page in a hidden desktop-mode page, so "Listing
+   collections" can take up to 45 seconds. Then print the log and keep a copy:
+
+   ```bash
+   adb -d logcat -d -s InstagramHttp > ~/Desktop/reels-names-step5.txt && cat ~/Desktop/reels-names-step5.txt
+   ```
+
+   **Expect** the session check's `GET` line, then `collections query forced`, `repair: start` and
+   `repair: learned new id` (and no `GRAPHQL` line before them: the names came from the site's own request), then the
+   saved-feed `GET` lines. The run ends with no banner, Sync shows **no** "Couldn't refresh collection names", and the
+   **Saved** screen shows the same names as in step 4. If the log says `repair: failed (<reason>)` instead: for
+   `login page`, `challenge page` or `http 429` the run stops with its banner (the session needs you, or a cooldown started,
+   as for any request: see [When a run stops](#when-a-run-stops-the-red-banner-on-sync)); for any other reason (`limit`,
+   `no handle`, `no query`, `page error`, `http <code>`, `reply stale`, `reply transient`, `shape ...`) the sync still ends
+   on the names it already had and Sync says "Couldn't refresh collection names": that is the fallback working. Either way,
+   don't tap **Forget** again to retry before you have pasted the log, because every repair loads the site's pages once more.
+
+**5b. One more sync,** with the id the repair learned. Clear the log first:
+
+```bash
+adb -d logcat -c
+```
+
+Then tap **Sync** once, wait for it to end, and print the log and keep a copy:
+
+```bash
+adb -d logcat -d -s InstagramHttp > ~/Desktop/reels-names-step5b.txt && cat ~/Desktop/reels-names-step5b.txt
+```
+
+**Expect** one `GRAPHQL PolarisProfileSavedTabContentQuery -> 200` line and no `collections query stale` or
+`collections query forced` line: the learned id works and nothing is repaired.
+
+6. **Paste the logs** into a Claude session, with what the screens showed (the **Saved** cards' names and counts, and any
+   banner or notice on Sync). This prints the copies kept above, in order (a step you skipped has no file and is left out):
+
+   ```bash
+   cat ~/Desktop/reels-names-step3.txt ~/Desktop/reels-names-step5.txt ~/Desktop/reels-names-step5b.txt 2>/dev/null
+   ```
+
+   The lines are safe to paste: only paths, codes and times, never a cookie, a token, a doc id or a page. Delete the three
+   files from the Desktop once you have pasted them.
+
+If any step answers 429 (Sync says "Instagram is limiting requests", or the log says `-> 429` or `repair: failed (http 429)`),
+**wait**: the cooldown banner on Sync shows how long. Don't tap again to retry, and paste the log first.
 
 ### The limits, in numbers
 
@@ -391,6 +499,8 @@ rate-limit answer starts the usual cooldown (1 hour, then 24 hours) and the lab 
 don't tap again to retry. The screen shows the call, the HTTP code, how the app classified the answer (`ok`, or the
 kind of failure), and the response **shape** (key names, types and lengths; identifying values are redacted). It also
 saves a scrubbed copy (synthetic ids, handles, captions and links) on the phone, and the path shows under the result.
+**Collections** is one POST of the website's own names query with the id the app has stored (the other buttons are GETs). If
+Instagram no longer runs that id it shows the classification `StaleQuery`; the lab never repairs it, only a sync does.
 
 **Run it once.**
 
@@ -467,17 +577,23 @@ adb -d logcat -s InstagramHttp
 ```
 
 (Ctrl-C stops it.) Debug builds log one line per request to Instagram's API: `GET <path> -> <code> (<ms> ms)`, for example
-`GET api/v1/accounts/edit/web_form_data/ -> 200 (412 ms)`. A run of three or more digits in the path shows as `<n>`. A reply
+`GET api/v1/accounts/edit/web_form_data/ -> 200 (412 ms)`, or for the collection names
+`GRAPHQL PolarisProfileSavedTabContentQuery -> 200 (380 ms)`. A run of three or more digits in the path shows as `<n>`. A reply
 that is not 2xx adds a second line, a redacted summary (`<-- 429 reply: ...`). Where there is no HTTP code the line says what
 happened instead (`timeout`, `login page`, `challenge page`, `load http 429`, `load http 429 (remembered)` for a 429 home
 page that a cancelled request ran into, `cancelled`, ...). Other lines can appear: `page closed (idle)` (the hidden page was
 closed after 5 minutes without a request), `page closed (owner needed)` (closed at once because the session expired or
 needs verification, or the login screen opened to fix that), and `transport reset failed: <Class>` or `transport close
-failed: <Class>` (the page could not be closed; the class name only). No cookie, token or header is logged: the app never
-sees them. One `GET` line is one call: at most one API request; a line without an HTTP status sent none (it ended before
-the request, or the page's request failed). The browser may re-send a GET after a dropped
-connection, as it would for the website itself, and the app does not see that. The hidden page's own load of instagram.com,
-thumbnails and videos are not in this log. A release build logs nothing.
+failed: <Class>` (the page could not be closed; the class name only), `collections query stale` (Instagram no longer runs the
+stored names query id) or `collections query forced` (Forget asked for a repair), then `repair: start`,
+`repair: learned new id` or `repair: failed (<reason>)` (the repair page's one attempt; never an id, a handle or a page). No
+cookie, token or header is logged: the app never sees them. One `GET` or `GRAPHQL` line is one call: at most one API
+request; a line without an HTTP status sent none (it ended before the request, or the page's request failed; `no tokens`
+means the page could not send the names query). A repair is one call too, with no `GET` or `GRAPHQL` line of its own: count
+one for each `repair: start`, and one for a `repair: failed (limit)` or `repair: failed (no handle)`, which loaded nothing
+but still counts. The browser may re-send a GET or the GraphQL POST after a dropped connection, as it would for the website
+itself, and the app does not see that. The hidden page's own load of instagram.com, the repair page's view of your Saved
+page, thumbnails and videos are not in this log. A release build logs nothing.
 
 ### M2: session
 
@@ -499,7 +615,7 @@ thumbnails and videos are not in this log. A release build logs nothing.
   page sends the mobile website's `1217981644879628`. The WebView's own `X-Requested-With: io.github.yuriimurha.reels` header
   was seen on the emulator on every request the WebView makes itself, and the app cannot turn it off.) How to look:
   - If an error message appears, is it in your phone's language?
-  - Does any tap show up twice in logcat (two `GET` lines for one request)?
+  - Does any tap show up twice in logcat (two `GET` or `GRAPHQL` lines for one request)?
   - If you hit a checkpoint: did the `sessionid` change during it?
 
 ### M3: Adapter lab and the seven spike questions
@@ -510,11 +626,8 @@ thumbnails and videos are not in this log. A release build logs nothing.
   - [ ] **1. Endpoints and headers.** Each button's HTTP code and classification should read `200` and `ok`. **Needs
     you:** nothing more (the `X-IG-App-ID` the mobile site sends is known: `1217981644879628`). **Report:** the code and
     classification of the five buttons.
-  - [ ] **2. `saved_collection_ids`.** In **All Saved (page 1)**, under `items` → `[0]` → `media`: is there a
-    `saved_collection_ids` array, and is it filled for an item you know sits in a collection? **Report:** yes, no, or
-    present-but-empty. If yes, a Claude session flips `SAVED_COLLECTION_IDS_CONFIRMED` (in
-    `instagram/src/main/kotlin/io/github/yuriimurha/reels/instagram/web/WebInstagramClient.kt`), and sync walks only
-    All Saved. If no, nothing changes.
+  - [x] **2. `saved_collection_ids`.** Answered yes on 2026-10-09: every saved item lists its collections, so
+    `SAVED_COLLECTION_IDS_CONFIRMED` is `true` and sync walks only All Saved. Nothing to report.
   - [ ] **3. A save timestamp.** Any key in an `items` entry or its `media` that holds a time and is not `taken_at`
     (a `number(10 digits)` that looks like a Unix time, or a name that mentions saving). **Report:** the key names,
     or "none".
@@ -536,15 +649,17 @@ thumbnails and videos are not in this log. A release build logs nothing.
 Run section 5 first. Keep the second terminal's logcat running during these.
 
 - [ ] **QUICK sync.** Tap **Sync** on the empty real library. **Look for:** the phase moves through "Checking
-  session", "Listing collections" and "Syncing All Saved", then each collection; logcat shows one request every
-  4–12 s and a longer pause (60–180 s) after every 15–30; **Requests in 24 h** rises by about the number of `GET`
-  lines in logcat; the run ends with no banner (or pauses at "Run budget reached, tap Resume": tap
+  session", "Listing collections" and "Syncing All Saved" (no phase for a single collection: they are not walked one by
+  one); logcat shows one request every
+  4–12 s and a longer pause (60–180 s) after every 15–30; **Requests in 24 h** rises by about the number of `GET` and
+  `GRAPHQL` lines in logcat, plus one per repair the run tried (`repair: start`, `repair: failed (limit)` or
+  `repair: failed (no handle)`); the run ends with no banner (or pauses at "Run budget reached, tap Resume": tap
   **Resume**); the grid has thumbnails. **Report:** the Sync screen's counters at the end (Collections, New items,
   Items seen, Thumbnails cached, Failures, Requests, Requests in 24 h), how long it took, and any banner.
 - [ ] **Cancel and resume.** During a run tap **Cancel**, then **Resume**. **Look for:** it carries on from where it
   stopped (**Items seen** and **Requests (all attempts)** keep their totals and rise; it doesn't fetch the finished
   pages again). **Report:** a pass, or what you saw.
-- [ ] **A second Sync, later.** **Look for:** a handful of requests (each feed stops at the first known item), and the
+- [ ] **A second Sync, later.** **Look for:** a handful of requests (the names query, then All Saved stops at the first known item), and the
   new saves appear. **Report:** Requests (all attempts).
 - [ ] **FULL sync,** only after a Sync has succeeded. **Look for:** it ends with no banner. For a real test: unsave a
   reel on the throwaway account (and move another into a different collection) first; after the Full sync the unsaved
@@ -559,11 +674,11 @@ Run section 5 first. Keep the second terminal's logcat running during these.
   further request after the stop, also when you open a reel that isn't cached. After **Resolve on Instagram** and
   **Check again**, **Resume** works. **Report:** the banner, the logcat lines around the stop, and whether the check
   needed a new login.
-- [ ] **Collection feeds end correctly (R72).** After a Full sync, for each collection compare the count on its card in
-  **Saved** with the number of saves in that collection on Instagram. **Look for:** equal counts. A collection that
-  is short, especially by a round number such as a page size, may have ended early. (A feed that ends early drops the
-  later items from that collection, not from All Saved, until the next good Full sync.) **Report:** collection by collection, "phone N,
-  Instagram M", and whether **First collection (page 1)** showed `more_available`.
+- [ ] **Collections hold the right posts.** After a Full sync, for each collection compare the count on its card in
+  **Saved** with the number of saves in that collection on Instagram. **Look for:** equal counts, and the posts you know are
+  in it. A sync reads each item's collections from All Saved and walks no collection feed, so there is no feed end to check;
+  a plain Sync notices an older save newly added to a collection only after the next Full sync. **Report:** collection by
+  collection, "phone N, Instagram M".
 - [ ] **Thumbnails.** **Look for:** every tile has an image. If some are blank the run still ended Done: Instagram's
   image servers told the app to slow down, and the next **Full sync** fetches them. **Report:** **Failures** and
   **Thumbnails cached** against **Items seen**.
@@ -784,10 +899,38 @@ The text after the colon says what broke. Nothing was deleted by any of these.
   items. If you really did unsave everything, use **Delete library**, then **Sync**. Otherwise try again later.
 - **`more_available` or `next_max_id`**: a page didn't say whether more pages follow, or said "more" with no cursor.
   The app treats that as a broken answer rather than the end of the feed.
+- **`data.viewer.collections_unified_with_auto_collections`, `edges…`, `page_info…`**: the collection names query's answer
+  isn't the shape the app expects. Run the Adapter lab's **Collections** and paste the result and the log. (A repair's answer
+  of another shape does not stop the run: it keeps the last names, see [collection names](#sync-collection-names).)
+- **`page_info.end_cursor`**: a page of collections said there was more but gave no cursor, or its cursor was the one the
+  app sent (the second page was asked for with a variable the site ignores), or a cursor came round again. Nothing was
+  deleted; paste the log.
 - **`items[N]…`, `items`, `$`, `status`, `user`**: a required field is missing, or the answer isn't JSON, or Instagram
   said `fail`. Run the Adapter lab and paste the result.
 - **`http.<code>` or `http.<code>.unreadable`**: an HTTP error the app doesn't classify (an unreadable answer is
   reported conservatively, because it could hide a rate limit).
+
+### Sync: collection names
+
+- **"Couldn't refresh collection names"** (on Sync, under **Library**): the app could not get the names, and could not
+  learn the names query's current id (or may not try: a repair runs at most once in 24 hours). The sync went on: your
+  collections kept their last names, nothing was removed, and a collection that an item lists but the app has never named is
+  called **"Collection 1"**, **"Collection 2"**, and so on (one that a sync had marked removed comes back under its old
+  name). The next sync that gets the names renames them and the notice goes, and **Delete library** clears it too. To see
+  why, run `adb -d logcat -d -s InstagramHttp` and read the last lines about the names:
+  - `GRAPHQL PolarisProfileSavedTabContentQuery -> no tokens`: the hidden page had nothing to send the names query with, so
+    nothing was sent and no repair was tried;
+  - `repair: failed (<reason>)` with the reason `limit` (a repair ran less than 24 hours ago), `no handle` (the app doesn't
+    know the account's handle), `http <code>` (Instagram answered the Saved page with an error), `no query` (the Saved page
+    didn't send the query within 45 seconds), `page error` (this phone's WebView can't make the repair page, or it failed),
+    `reply stale` or `reply transient` (the site's own answer could not be used either) or `shape <path>` (the site's own
+    answer was not the shape the app expects). A `login page`, `challenge page` or `http 429` reason is no fallback: the run
+    stops with its banner ([When a run stops](#when-a-run-stops-the-red-banner-on-sync)).
+
+  Paste the log. Waiting a day and tapping **Sync** is the retry; a debug build's **Forget collections query id**
+  (Sync → Developer) arms one repair for the next sync, outside the 24 hours, once per tap.
+- **A collection still called "Collection N" after a sync with no notice**: Instagram sent that collection with an empty name,
+  and the app shows a placeholder rather than a blank. Paste the log.
 
 ### Sync: another Instagram account
 
@@ -807,6 +950,8 @@ limit), so the app stopped downloading thumbnails for the rest of that run. The 
 - **Sync, Full sync, Resume:** a run is going, a cooldown is active, or the session isn't "Logged in as @handle" (with
   Mock mode off).
 - **Mock mode switch:** a run is going, or the screen hasn't read the latest run yet.
+- **Forget collections query id (Sync → Developer):** shown only with Mock mode off; it needs no session. Greyed out while a
+  run is going, or while the screen hasn't read the latest run yet.
 - **Adapter lab (Sync → Developer):** the session isn't "Logged in as @handle". In the lab, **First collection** and
   **Media info** also wait for an id from **Collections** and **All Saved**, and every button waits while a call is out.
 - **Delete library:** a run is going.
@@ -816,7 +961,9 @@ limit), so the app stopped downloading thumbnails for the rest of that run. The 
 "Log in on the Sync screen to use the lab." (no valid session). A line under the buttons, "`<button>`: `<text>`", names the
 call that failed: "Cooling down after a rate limit" or "The 24-hour request budget is used up" (nothing was sent),
 "Unexpected Instagram response at `<path>`" (note the path), "Instagram is limiting requests" (a cooldown has started: stop
-tapping), "The call failed", or "Couldn't save the scrubbed copy".
+tapping), "query not sent: no tokens" (**Collections** only: the hidden page had nothing to send the query with, so nothing
+was sent), "The call failed", or "Couldn't save the scrubbed copy". **Collections** showing the classification `StaleQuery`
+means Instagram no longer runs the stored names query id: the lab doesn't repair it, a Sync does.
 
 ### The viewer: messages over a video
 
