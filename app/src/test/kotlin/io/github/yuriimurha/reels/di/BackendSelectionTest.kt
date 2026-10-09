@@ -10,6 +10,7 @@ import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.fake.FakeFailures
 import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Test
@@ -178,6 +179,27 @@ class BackendSelectionTest {
 
     @Test
     fun deleteLibraryForgetsTheFakeLibrarysAccount() = deleteLibraryForgetsTheAccountOf(useFake = true)
+
+    /**
+     * C-M5: "Couldn't refresh collection names" is the real library's. Deleting the real library clears it with the names it
+     * spoke of; deleting Mock mode's fake library leaves it alone.
+     */
+    private fun deleteLibraryClearsTheNamesNoticeOf(useFake: Boolean) = runBlocking {
+        val container = container(useFake)
+        try {
+            container.settings.setCollectionNamesStale(true)
+            container.library.deleteLibrary()
+            assertEquals(useFake, container.settings.collectionNamesStale.first(), if (useFake) "the real library's notice stays" else "cleared")
+        } finally {
+            container.videoCache.cache.release()
+        }
+    }
+
+    @Test
+    fun deletingTheRealLibraryClearsTheNamesNotice() = deleteLibraryClearsTheNamesNoticeOf(useFake = false)
+
+    @Test
+    fun deletingTheFakeLibraryLeavesTheRealNamesNotice() = deleteLibraryClearsTheNamesNoticeOf(useFake = true)
 
     /**
      * R18/R21: Forget's flag is the real library's. A Mock mode sync with the flag set (the real library left it) asks the fake

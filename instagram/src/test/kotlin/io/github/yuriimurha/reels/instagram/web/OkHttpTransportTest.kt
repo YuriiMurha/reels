@@ -140,6 +140,13 @@ class OkHttpTransportTest {
         )
     }
 
+    /** T-F3: the query's friendly name and built-in doc id are the website's own (spelled out here, never read back). */
+    @Test
+    fun theSavedCollectionsQueryIsTheWebsitesOwn() {
+        assertEquals("PolarisProfileSavedTabContentQuery", WebGraphQl.SAVED_COLLECTIONS.friendlyName)
+        assertEquals("27584326974521636", WebGraphQl.SAVED_COLLECTIONS.builtInDocId)
+    }
+
     @Test
     fun graphqlSendsOnePostWithTheQueryForm() = runTest {
         server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "application/json").body("""{"data":{}}""").build())

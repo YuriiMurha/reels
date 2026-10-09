@@ -50,11 +50,14 @@ internal object WebParsers {
 
     /**
      * R12 (a): what the reply's own GraphQL errors say, read like any reply's message ([ErrorClassifier.markedFailure] over each
-     * entry's `message`, `summary` and `description`): a challenge, a rate limit or a logout reported in the body of a 2xx.
+     * entry's `message`, `summary`, `description` and, as [ErrorClassifier.classify] reads a reply, `error_type`): a challenge,
+     * a rate limit or a logout reported in the body of a 2xx.
      */
     private fun inBandFailure(errors: List<JsonObject>): InstagramException? =
         ErrorClassifier.markedFailure(
-            errors.flatMap { entry -> listOfNotNull(entry.string("message"), entry.string("summary"), entry.string("description")) },
+            errors.flatMap { entry ->
+                listOfNotNull(entry.string("message"), entry.string("summary"), entry.string("description"), entry.string("error_type"))
+            },
         )
 
     /**

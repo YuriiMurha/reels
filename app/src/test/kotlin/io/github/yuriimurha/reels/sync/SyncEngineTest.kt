@@ -119,13 +119,14 @@ class SyncEngineTest {
         beforeRun: suspend () -> Unit = {},
         repairForced: suspend () -> Boolean = { false },
         clearRepairForced: suspend () -> Unit = {},
+        setNamesStale: suspend (Boolean) -> Unit = { namesStale += it },
     ): SyncEngine {
         clock = { testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
             eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account, beforeRun = beforeRun,
-            setNamesStale = { namesStale += it }, repairForced = repairForced, clearRepairForced = clearRepairForced,
+            setNamesStale = setNamesStale, repairForced = repairForced, clearRepairForced = clearRepairForced,
             log = { engineLog += it },
         )
     }
@@ -1713,12 +1714,15 @@ class SyncEngineTest {
         assertEquals(setOf("c2", "c3"), sighted.toSet())
         assertEquals(mapOf("c1" to "Workouts", sighted[0] to "Collection 1", sighted[1] to "Collection 2"), names())
         assertEquals(listOf("c1") + sighted, liveCollections().map { it.id }, "placed after the last collection")
+        // T-F4: each one a place of its own, one past the last: 1, then 2.
+        assertEquals(listOf(0, 1, 2), liveCollections().map { it.position })
         assertMembershipsMatch(library, listOf("c1", "c2", "c3"))
 
         // The numbering goes on across runs.
         val newest = library.addNewSaves(1, setOf("c9")).single()
         assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
         assertEquals("Collection 3", names()["c9"])
+        assertEquals(3, liveCollections().single { it.id == "c9" }.position, "then 3")
         assertEquals(listOf(newest.pk), pks("c9"))
 
         // A later good names fetch renames them: same ids, the site's names.
@@ -1776,6 +1780,55 @@ class SyncEngineTest {
         client.fake.library.addNewSaves(1, setOf("c9"))
         runSync(engine, SyncMode.QUICK)
         assertEquals("Collection 3", names()["c9"])
+    }
+
+    /** T-F5: in a good listing, a new placeholder is numbered past the ones that stay: never a second "Collection 1". */
+    @Test
+    fun aNewPlaceholderInAListingNeverRepeatsOneThatStays() = runTest {
+        val client = ScriptedNames(smallClient())
+        val engine = engine(client)
+        client.names = listOf(RemoteCollection("c1", "", coverMediaPk = null), RemoteCollection("c2", "Recipes", coverMediaPk = null))
+        runSync(engine, SyncMode.QUICK)
+        assertEquals(mapOf("c1" to "Collection 1", "c2" to "Recipes"), names(), "precondition")
+
+        client.names = client.names + RemoteCollection("c3", "", coverMediaPk = null)
+        runSync(engine, SyncMode.QUICK)
+
+        assertEquals(mapOf("c1" to "Collection 1", "c2" to "Recipes", "c3" to "Collection 2"), names())
+    }
+
+    /** T-F6: an item that lists a blank collection id makes no "" collection, not even while the names are the last good ones. */
+    @Test
+    fun aBlankCollectionIdOnAnItemMakesNoCollection() = runTest {
+        val client = ScriptedNames(smallClient())
+        client.staleAt = setOf(null)
+        val withBlankIds = object : InstagramClient by client {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                val page = client.savedMedia(collectionId, cursor)
+                return page.copy(items = page.items.map { it.copy(savedCollectionIds = listOf("") + it.savedCollectionIds.orEmpty()) })
+            }
+        }
+
+        assertEquals(SyncStatus.DONE, runSync(engine(withBlankIds), SyncMode.QUICK).status)
+
+        assertNull(db.collectionDao().collection(""), "no \"\" row")
+        assertEquals(setOf("c1", "c2", "c3"), names().keys, "the real ones got their placeholders")
+    }
+
+    /** T-F2: a names notice that can't be written never stops the sync, on a good listing or a fallback: only the notice is wrong. */
+    @Test
+    fun aNoticeThatCannotBeWrittenNeverStopsTheSync() = runTest {
+        val client = ScriptedNames(smallClient())
+        val engine = engine(client, setNamesStale = { throw java.io.IOException("disk full") })
+
+        val good = runSync(engine, SyncMode.QUICK)
+        assertEquals(SyncStatus.DONE, good.status, "a good listing: ${good.lastError}")
+
+        client.staleAt = setOf(null)
+        val fallback = runSync(engine, SyncMode.FULL)
+        assertEquals(SyncStatus.DONE, fallback.status, "a fallback: ${fallback.lastError}")
+        assertNull(fallback.lastError)
+        assertEquals(mapOf("c1" to "Workouts", "c2" to "Recipes", "c3" to "Travel"), names())
     }
 
     @Test

@@ -47,10 +47,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * Spec 2026-10-09 §3.3 on the real Sync screen: the real backend's Developer section offers "Forget collections query id" and
- * the screen says "Couldn't refresh collection names" while the names are the last good ones; Mock mode (the fake library) has
- * neither. How the screen hands the ViewModel the settings for the real backend only is pinned in `BackendWiringGuardTest`;
- * `BuildConfig.DEBUG` is true in the debug unit tests, so the Developer section is there.
+ * Spec 2026-10-09 §3.3 on the real Sync screen: the real backend's Developer section offers "Forget collections query id" (off
+ * while a run is RUNNING) and the screen says "Couldn't refresh collection names" while the names are the last good ones. That
+ * Mock mode gets neither (no action, no flag) is the screen's wiring, pinned in `BackendWiringGuardTest`: a test here could only
+ * check this file's own helper. `BuildConfig.DEBUG` is true in the debug unit tests, so the Developer section is there.
  */
 @RunWith(AndroidJUnit4::class)
 class SyncScreenCollectionNamesTest {
@@ -144,8 +144,9 @@ class SyncScreenCollectionNamesTest {
         assertEquals(1_000L, runBlocking { settings.collectionsRepairAt() }, "the running repair's attempt record is kept")
     }
 
+    /** The screen given no action (as Mock mode's is: the wiring is pinned in `BackendWiringGuardTest`) shows no button. */
     @Test
-    fun mockModeHasNoForgetButton() {
+    fun noActionOffersNoForgetButton() {
         show(realBackend = false)
         awaitUntil { shown("Adapter lab") }
         compose.onAllNodesWithText("Forget collections query id").assertCountEquals(0)
@@ -166,16 +167,6 @@ class SyncScreenCollectionNamesTest {
     fun noNoticeWhileTheNamesAreFresh() {
         show(realBackend = true)
         awaitUntil { shown("Log in") } // the stored state has been read
-        compose.waitForIdle()
-        compose.onAllNodesWithText("Couldn't refresh collection names").assertCountEquals(0)
-    }
-
-    /** The flag is the real library's: Mock mode's screen never says it, even when the real library left it set. */
-    @Test
-    fun mockModeNeverShowsTheNotice() {
-        runBlocking { settings.setCollectionNamesStale(true) }
-        show(realBackend = false)
-        awaitUntil { shown("Adapter lab") }
         compose.waitForIdle()
         compose.onAllNodesWithText("Couldn't refresh collection names").assertCountEquals(0)
     }

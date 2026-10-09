@@ -178,8 +178,9 @@ class QueryRepairerTest {
         assertEquals(listOf("repair: start", "repair: failed (page error)"), lines)
     }
 
+    /** The account's own Saved page, the one query watched, and the 45 s bound (desktop mode is `AndroidRepairPage`'s own). */
     @Test
-    fun loadsTheOwnSavedPageInDesktopMode() = runTest {
+    fun watchesTheOwnSavedPageForTheQueryWithinTheBound() = runTest {
         val page = FakePage { watched() }
         repairer({ page }).repair(WebGraphQl.SAVED_COLLECTIONS)
         assertEquals(

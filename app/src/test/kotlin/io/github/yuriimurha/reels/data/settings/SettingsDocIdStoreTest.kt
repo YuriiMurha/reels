@@ -30,9 +30,10 @@ class SettingsDocIdStoreTest {
     private fun settings(file: File = File(tmp.root, "settings.preferences_pb"), now: Long = 1L) =
         SettingsStore.open(scope = scope, now = { now }) { file }
 
+    /** T-F3: spelled out, not read back from the query: a store that answered anything else would fail. */
     @Test
     fun theDefaultIsTheBuiltInId() = runTest {
-        assertEquals(builtIn, SettingsDocIdStore(settings()).docId(query))
+        assertEquals("27584326974521636", SettingsDocIdStore(settings()).docId(query))
     }
 
     @Test

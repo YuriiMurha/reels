@@ -86,6 +86,8 @@ class AppContainer(context: Context) {
             db, thumbnails,
             clearVideoCache = { videoCache.clear() },
             forgetAccount = { libraryAccount.forget() },
+            // C-M5: "Couldn't refresh collection names" goes with the real library's names; Mock mode's delete leaves it alone.
+            clearNamesStale = { if (!usesFake) settings.setCollectionNamesStale(false) },
             beforeSessionChange = ::resetInstagramTransport,
             debugLog = debugLog,
         )

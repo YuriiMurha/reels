@@ -310,9 +310,9 @@ class WebParsersTest {
     @Test
     fun namesAreKeptAsIs() {
         val odd = "Q\"uote 😀 שלום"
-        val page = collections(reply(node("17900000000000001", odd), node("17900000000000002", "")))
-        // An empty name stays empty here; sync gives it a placeholder (Task 5).
-        assertEquals(listOf(odd, ""), page.items.map { it.name })
+        val page = collections(reply(node("17900000000000001", odd), node("17900000000000002", ""), node("17900000000000003", "  Gym  ")))
+        // An empty name stays empty here; sync gives it a placeholder (Task 5). T-F7: white space around a name is the site's too.
+        assertEquals(listOf(odd, "", "  Gym  "), page.items.map { it.name })
     }
 
     @Test
@@ -402,6 +402,12 @@ class WebParsersTest {
         )
         assertNull(challenge.challengeUrl, "an in-band challenge has no URL")
         assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"checkpoint_required"}]}""")))
+
+        // T4 parity: an entry's `error_type` carries the same markers, read as ErrorClassifier.classify reads a reply's.
+        assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[{"error_type":"checkpoint_required"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"x","error_type":"feedback_required"}]}""")))
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"data":{},"errors":[{"error_type":"Login_Required"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{$rootNull,"errors":[{"error_type":"feedback_required"}]}""")))
 
         // Across entries, ErrorClassifier's precedence: a challenge, then a rate limit, then a logout.
         val login = """{"message":"login_required"}"""
