@@ -8,6 +8,7 @@ import io.github.yuriimurha.reels.instagram.web.InMemoryCookieStore
 import io.github.yuriimurha.reels.instagram.web.OkHttpTransport
 import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import io.github.yuriimurha.reels.instagram.web.cutResponse
+import io.github.yuriimurha.reels.instagram.web.formFields
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -16,9 +17,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.RecordedRequest
 import okhttp3.OkHttpClient
-import java.net.URLDecoder
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -68,13 +67,6 @@ class AdapterLabTest {
 
     private fun parse(text: String): JsonElement = Json.parseToJsonElement(text)
 
-    /** The urlencoded form of a GraphQL POST, decoded. */
-    private fun form(request: RecordedRequest): Map<String, String> =
-        request.body!!.utf8().split('&').associate { field ->
-            val (name, value) = field.split('=', limit = 2)
-            URLDecoder.decode(name, Charsets.UTF_8) to URLDecoder.decode(value, Charsets.UTF_8)
-        }
-
     @Test
     fun eachCallHitsExactlyOneExpectedPath() = runTest {
         val lab = lab()
@@ -105,7 +97,7 @@ class AdapterLabTest {
         assertEquals(listOf("GET", "POST", "GET", "GET", "GET"), requests.map { it.method })
         // The first page of each walk only: a lab call never carries a cursor.
         assertTrue(paths.all { it.queryParameter("max_id") == null })
-        assertEquals(WebGraphQl.savedCollectionsVariables(null), form(requests[1])[WebGraphQl.Field.VARIABLES])
+        assertEquals(WebGraphQl.savedCollectionsVariables(null), requests[1].formFields()[WebGraphQl.Field.VARIABLES])
         assertEquals(5, server.requestCount)
     }
 
@@ -118,7 +110,7 @@ class AdapterLabTest {
         val request = server.takeRequest()
         assertEquals("POST", request.method)
         assertEquals("/" + WebGraphQl.PATH, request.url.encodedPath)
-        val form = form(request)
+        val form = request.formFields()
         assertEquals("555", form[WebGraphQl.Field.DOC_ID])
         assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, form[WebGraphQl.Field.FRIENDLY_NAME])
         assertEquals(WebGraphQl.savedCollectionsVariables(null), form[WebGraphQl.Field.VARIABLES])

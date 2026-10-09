@@ -32,19 +32,26 @@ class WebInstagramClient(
     /** [url] is built by the caller first, so an invalid id throws before the lazy transport exists. */
     private suspend fun getJson(url: HttpUrl): JsonObject = transport.get(WebEndpoints.relative(url)).jsonOrThrow()
 
+    /**
+     * A page whose next cursor is the one it was asked with did not advance: fact CURSOR (the `after` variable) is unverified,
+     * and a server that ignores it would answer the same page forever. That is a shape change after one wasted request, never
+     * a loop of the same POST until the run budget refuses.
+     */
     override suspend fun collections(cursor: String?): Page<RemoteCollection> {
         val query = WebGraphQl.SAVED_COLLECTIONS
         // Read first: a store that can't answer throws before the lazy transport exists.
         val docId = docIds.docId(query)
         val reply = transport.graphql(query, docId, WebGraphQl.savedCollectionsVariables(cursor))
-        return WebParsers.collectionsGraphQl(WebParsers.graphQlJsonOrThrow(reply))
+        val page = WebParsers.collectionsGraphQl(WebParsers.savedCollectionsJsonOrThrow(reply))
+        if (page.nextCursor != null && page.nextCursor == cursor) throw InstagramException.ShapeChanged("page_info.end_cursor")
+        return page
     }
 
     /** No request of its own: the repair's page sent the query. The id is learned only once its reply parsed as a page. */
     override suspend fun repairCollections(): Page<RemoteCollection> {
         val query = WebGraphQl.SAVED_COLLECTIONS
         val repaired = repair.repair(query)
-        val page = WebParsers.collectionsGraphQl(WebParsers.graphQlJsonOrThrow(repaired.reply))
+        val page = WebParsers.collectionsGraphQl(WebParsers.savedCollectionsJsonOrThrow(repaired.reply))
         docIds.learned(query, repaired.docId)
         return page
     }

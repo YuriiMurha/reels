@@ -82,7 +82,7 @@ class AdapterLab(
         val reply = send(call, arg)
         val graphQl = call == LabCall.COLLECTIONS
         // One rule for every transport. A 3xx or 4xx whose body was cut still says what it was (a rate limit must arm the cooldown).
-        val error = if (graphQl) WebParsers.classifyGraphQl(reply) else classifyReply(reply)
+        val error = if (graphQl) WebParsers.classifySavedCollections(reply) else classifyReply(reply)
         if (reply.body == null && error is InstagramException.Transient) throw error
         val body = if (graphQl) reply.body?.let(WebParsers::withoutGuard) else reply.body
         val json = if (body.isNullOrEmpty()) null else runCatching { Json.parseToJsonElement(body) }.getOrNull()
@@ -136,8 +136,9 @@ class AdapterLab(
      */
     private fun idsOf(call: LabCall, json: JsonElement): LabIds = when (call) {
         LabCall.COLLECTIONS -> LabIds(
-            objectsIn((json as? JsonObject)?.let(WebParsers::collectionsRoot), "edges").firstNotNullOfOrNull { edge ->
-                (edge["node"] as? JsonObject)?.idString("collection_id")?.takeIf { WebParsers.isUserCollectionId(it) && isId(it) }
+            // Fact AUTO's user collection ids are digits only, so the id is also safe to chain into a path.
+            objectsIn((json as? JsonObject)?.let(WebParsers::savedCollectionsRoot), "edges").firstNotNullOfOrNull { edge ->
+                (edge["node"] as? JsonObject)?.idString("collection_id")?.takeIf(WebParsers::isUserCollectionId)
             },
             null,
         )

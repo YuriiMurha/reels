@@ -19,7 +19,7 @@ import java.time.Instant
  */
 internal object WebParsers {
     /** Where a reply to [WebGraphQl.SAVED_COLLECTIONS] holds the account's collections (spec 2026-10-09 §3.1). */
-    const val COLLECTIONS_ROOT = "data.viewer.collections_unified_with_auto_collections"
+    const val SAVED_COLLECTIONS_ROOT = "data.viewer.collections_unified_with_auto_collections"
 
     /** What the website puts before some JSON replies so they can't be run as a script. It is not part of the JSON. */
     private const val FOR_LOOP_GUARD = "for (;;);"
@@ -37,53 +37,78 @@ internal object WebParsers {
      */
     fun isUserCollectionId(id: String): Boolean = isPk(id)
 
-    /** The [COLLECTIONS_ROOT] object of [json], or null when the reply has none. */
-    fun collectionsRoot(json: JsonObject): JsonObject? =
+    /** The [SAVED_COLLECTIONS_ROOT] object of [json], or null when the reply has none. */
+    fun savedCollectionsRoot(json: JsonObject): JsonObject? =
         ((json["data"] as? JsonObject)?.get("viewer") as? JsonObject)?.get("collections_unified_with_auto_collections") as? JsonObject
 
+    /** True when the reply's `data` has a `viewer` key, whatever its value: the query ran, so its doc id is current (R12). */
+    private fun queryRan(json: JsonObject): Boolean = (json["data"] as? JsonObject)?.containsKey("viewer") == true
+
+    /** The entries of the reply's GraphQL `errors` array; none when it has no such array. */
+    private fun graphQlErrors(json: JsonObject?): List<JsonObject> =
+        (json?.get("errors") as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
+
     /**
-     * Task 1 fact STALE (assumed; verify on the phone): how the website answers a query whose doc id it no longer runs. Either
-     * a 2xx JSON reply with a non-empty `errors` array and no [COLLECTIONS_ROOT] (whatever its `status`), or a 400/404 that
-     * is not JSON at all (which [classifyReply] alone calls `ShapeChanged("http.<code>")`). [classified] is [classifyReply]'s
-     * answer and [json] the reply's JSON after the guard. Only a shape change can be stale: what [classifyReply] calls a
-     * challenge, a rate limit, a logout or a network problem keeps that meaning.
+     * R12 (a): what the reply's own GraphQL errors say, read like any reply's message ([ErrorClassifier.markedFailure] over each
+     * entry's `message`, `summary` and `description`): a challenge, a rate limit or a logout reported in the body of a 2xx.
      */
-    private fun isStale(reply: RawReply, classified: InstagramException?, json: JsonObject?): Boolean = when {
-        classified != null && classified !is ShapeChanged -> false
-        reply.code in STALE_HTTP_CODES -> json == null && (classified as? ShapeChanged)?.fieldPath == "http.${reply.code}"
-        reply.code in 200..299 -> json != null && collectionsRoot(json) == null && (json["errors"] as? JsonArray)?.isNotEmpty() == true
+    private fun inBandFailure(errors: List<JsonObject>): InstagramException? =
+        ErrorClassifier.markedFailure(
+            errors.flatMap { entry -> listOfNotNull(entry.string("message"), entry.string("summary"), entry.string("description")) },
+        )
+
+    /**
+     * Task 1 fact STALE (assumed; verify on the phone), bounded by R12: how the website answers a query whose doc id it no
+     * longer runs. Either a 2xx JSON reply with GraphQL `errors` and no `data.viewer` (`data` null, absent or empty: the query
+     * never ran), or a 400/404 that is not JSON at all (which [classifyReply] alone calls `ShapeChanged("http.<code>")`). A reply
+     * with `data.viewer` is never stale ([queryRan]). [classified] is [classifyReply]'s answer, [json] the reply's JSON after
+     * the guard. The caller has already taken every challenge, rate limit, logout and network problem out, in-band ones too.
+     */
+    private fun isStale(code: Int, classified: InstagramException?, json: JsonObject?, errors: List<JsonObject>): Boolean = when {
+        code in STALE_HTTP_CODES -> json == null && (classified as? ShapeChanged)?.fieldPath == "http.$code"
+        code in 200..299 -> json != null && errors.isNotEmpty() && !queryRan(json)
         else -> false
     }
 
     /**
-     * The failure a reply to [WebGraphQl.SAVED_COLLECTIONS] signals, or null when [collectionsGraphQl] may read it. The rule of
-     * every reply ([classifyReply]) applies to the body after a leading `for (;;);`, so a challenge, a rate limit or a logout
-     * keeps its meaning. Fact STALE's reply ([isStale]) is a [InstagramException.StaleQuery], never a shape change: only a
-     * new doc id can fix it. A JSON reply without the [COLLECTIONS_ROOT] that is not stale is `ShapeChanged(COLLECTIONS_ROOT)`.
+     * The failure a reply to [WebGraphQl.SAVED_COLLECTIONS] signals, or null when [collectionsGraphQl] may read it, in this
+     * order, on the body after a leading `for (;;);`:
+     * 1. the rule of every reply ([classifyReply]): a challenge, a rate limit, a logout or a network problem keeps its meaning;
+     * 2. the same markers in the reply's GraphQL `errors` (R12 a): a throttled 200 is [InstagramException.RateLimited];
+     * 3. fact STALE's reply ([isStale]) is [InstagramException.StaleQuery], never a shape change: only a new doc id can fix it;
+     * 4. errors from a query that ran but gave no [SAVED_COLLECTIONS_ROOT] (R12 b) are [InstagramException.Transient];
+     * 5. any other shape change [classifyReply] found; then a reply with the root is null, one without is
+     *    `ShapeChanged(SAVED_COLLECTIONS_ROOT)`.
      */
-    fun classifyGraphQl(reply: RawReply): InstagramException? {
-        val guarded = reply.body?.let(::withoutGuard)
-        val unguarded = if (guarded == reply.body) reply else RawReply(reply.code, reply.contentType, guarded, reply.redirected)
-        val classified = classifyReply(unguarded)
-        val json = guarded?.let(::parseObject)
-        if (isStale(reply, classified, json)) return InstagramException.StaleQuery(WebGraphQl.SAVED_COLLECTIONS.friendlyName)
+    fun classifySavedCollections(reply: RawReply): InstagramException? {
+        val body = reply.body?.let(::withoutGuard)
+        val classified = classifyReply(if (body == reply.body) reply else RawReply(reply.code, reply.contentType, body, reply.redirected))
+        if (classified != null && classified !is ShapeChanged) return classified
+        val json = body?.let(::parseObject)
+        val errors = graphQlErrors(json)
+        inBandFailure(errors)?.let { return it }
+        if (isStale(reply.code, classified, json, errors)) return InstagramException.StaleQuery(WebGraphQl.SAVED_COLLECTIONS.friendlyName)
+        val root = json?.let(::savedCollectionsRoot)
+        if (reply.code in 200..299 && json != null && queryRan(json) && root == null && errors.isNotEmpty()) {
+            return InstagramException.Transient()
+        }
         if (classified != null) return classified
-        return if (json != null && collectionsRoot(json) != null) null else ShapeChanged(COLLECTIONS_ROOT)
+        return if (root != null) null else ShapeChanged(SAVED_COLLECTIONS_ROOT)
     }
 
-    /** The JSON of a reply to [WebGraphQl.SAVED_COLLECTIONS], after the guard, or the failure [classifyGraphQl] finds in it. */
-    fun graphQlJsonOrThrow(reply: RawReply): JsonObject {
-        classifyGraphQl(reply)?.let { throw it }
+    /** The JSON of a reply to [WebGraphQl.SAVED_COLLECTIONS], after the guard, or the failure [classifySavedCollections] finds in it. */
+    fun savedCollectionsJsonOrThrow(reply: RawReply): JsonObject {
+        classifySavedCollections(reply)?.let { throw it }
         return parseObject(withoutGuard(reply.body!!)) ?: throw ShapeChanged("$")
     }
 
     /**
      * One page of the account's own collections from a reply to [WebGraphQl.SAVED_COLLECTIONS]: the nodes of
-     * [COLLECTIONS_ROOT]`.edges`, in order, less the automatic ones ([isUserCollectionId]). Paths in a [ShapeChanged] are
+     * [SAVED_COLLECTIONS_ROOT]`.edges`, in order, less the automatic ones ([isUserCollectionId]). Paths in a [ShapeChanged] are
      * relative to the root. A name is kept as the website sends it, an empty one too.
      */
     fun collectionsGraphQl(json: JsonObject): Page<RemoteCollection> {
-        val root = collectionsRoot(json) ?: throw ShapeChanged(COLLECTIONS_ROOT)
+        val root = savedCollectionsRoot(json) ?: throw ShapeChanged(SAVED_COLLECTIONS_ROOT)
         val edges = root["edges"] as? JsonArray ?: throw ShapeChanged("edges")
         val collections = edges.mapIndexedNotNull { i, element ->
             val edge = element as? JsonObject ?: throw ShapeChanged("edges[$i]")

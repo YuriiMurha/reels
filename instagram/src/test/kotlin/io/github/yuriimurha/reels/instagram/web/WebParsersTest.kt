@@ -283,11 +283,11 @@ class WebParsersTest {
     @Test
     fun aLeadingForLoopGuardIsStripped() {
         val guarded = graphQl("for (;;);" + reply(alpha))
-        assertNull(WebParsers.classifyGraphQl(guarded))
-        assertEquals(listOf("Alpha"), WebParsers.collectionsGraphQl(WebParsers.graphQlJsonOrThrow(guarded)).items.map { it.name })
+        assertNull(WebParsers.classifySavedCollections(guarded))
+        assertEquals(listOf("Alpha"), WebParsers.collectionsGraphQl(WebParsers.savedCollectionsJsonOrThrow(guarded)).items.map { it.name })
         // The guard hides nothing the reply says.
-        assertIs<LoginRequired>(WebParsers.classifyGraphQl(graphQl("for (;;);" + """{"require_login":true}""")))
-        assertIs<LoginRequired>(assertFailsWith<InstagramException> { WebParsers.graphQlJsonOrThrow(graphQl("""{"require_login":true}""")) })
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("for (;;);" + """{"require_login":true}""")))
+        assertIs<LoginRequired>(assertFailsWith<InstagramException> { WebParsers.savedCollectionsJsonOrThrow(graphQl("""{"require_login":true}""")) })
     }
 
     @Test
@@ -325,6 +325,7 @@ class WebParsersTest {
             reply(alpha, """{"node":{"collection_id":"17900000000000002","collection_name":null}}"""),
         )
         assertCollectionsShapeChange("edges[1].node", reply(alpha, """{"cursor":"x"}"""))
+        assertCollectionsShapeChange("edges[1].node", reply(alpha, """{"node":null,"cursor":"x"}"""))
         assertCollectionsShapeChange("edges[1]", reply(alpha, "7"))
         assertCollectionsShapeChange("edges", root(""""page_info":{"has_next_page":false}"""))
         assertCollectionsShapeChange("data.viewer.collections_unified_with_auto_collections", """{"data":{"viewer":{}}}""")
@@ -349,56 +350,101 @@ class WebParsersTest {
         assertEquals("3100000000000000009", alphaWithCover("3100000000000000009"))
     }
 
+    /** Fact STALE as R12 bounds it: the query did not run (no `data.viewer`), or the site answered a non-JSON 400/404. */
     @Test
-    fun classifyGraphQlCallsFactStalesReplyAStaleQuery() {
+    fun classifySavedCollectionsCallsFactStalesReplyAStaleQuery() {
         val stale = listOf(
             graphQl("""{"errors":[{"message":"x","severity":"CRITICAL"}],"data":null}"""),
             graphQl("""{"errors":[{"message":"x"}]}"""),
+            graphQl("""{"errors":[{"message":"x"}],"data":{}}"""),
             graphQl("""{"errors":[{"message":"x"}],"data":null,"status":"fail"}"""),
-            graphQl("for (;;);" + """{"errors":[{"message":"x"}],"data":{"viewer":null}}"""),
+            graphQl("for (;;);" + """{"errors":[{"message":"x","summary":"y","description":"z"}],"data":null}"""),
             graphQl("<html><body>Sorry, this page isn't available.</body></html>", code = 404, contentType = "text/html"),
             graphQl("Bad request", code = 400, contentType = "text/plain"),
         )
         for (reply in stale) {
-            val error = assertIs<InstagramException.StaleQuery>(WebParsers.classifyGraphQl(reply), reply.body)
+            val error = assertIs<InstagramException.StaleQuery>(WebParsers.classifySavedCollections(reply), reply.body)
             assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, error.query)
             assertFalse(WebGraphQl.SAVED_COLLECTIONS.builtInDocId in error.message.orEmpty(), "a StaleQuery never carries a doc id")
-            assertIs<InstagramException.StaleQuery>(assertFailsWith<InstagramException> { WebParsers.graphQlJsonOrThrow(reply) })
+            assertIs<InstagramException.StaleQuery>(assertFailsWith<InstagramException> { WebParsers.savedCollectionsJsonOrThrow(reply) })
+        }
+    }
+
+    /** R12 (a): an `errors` entry that names a rate limit, a logout or a challenge is that, never a stale query. */
+    @Test
+    fun anInBandRateLimitLoginOrChallengeKeepsItsMeaning() {
+        val rootNull = """"data":{"viewer":{"collections_unified_with_auto_collections":null}}"""
+        val wait = """{"message":"Please wait a few minutes before you try again."}"""
+        // The throttled account of the review: before R12 this was a stale query, and would have started a repair.
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{$rootNull,"errors":[$wait]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[$wait]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"summary":"feedback_required"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("for (;;);" + """{"errors":[$wait],""" + reply(alpha).removePrefix("{"))))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[$wait]}""", code = 400)))
+
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[{"message":"x","summary":"login_required"}]}""")))
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{$rootNull,"errors":[{"description":"Login_Required"}]}""")))
+
+        val challenge = assertIs<ChallengeRequired>(
+            WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[{"description":"challenge_required"}]}""")),
+        )
+        assertNull(challenge.challengeUrl, "an in-band challenge has no URL")
+        assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"checkpoint_required"}]}""")))
+
+        // Across entries, ErrorClassifier's precedence: a challenge, then a rate limit, then a logout.
+        val login = """{"message":"login_required"}"""
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[$login,$wait]}""")))
+        assertIs<ChallengeRequired>(
+            WebParsers.classifySavedCollections(graphQl("""{"data":null,"errors":[$wait,{"summary":"challenge_required"}]}""")),
+        )
+    }
+
+    /** R12 (b): with `data.viewer` the query ran, so its doc id is current: an error there is a passing failure, never stale. */
+    @Test
+    fun aReplyWhoseQueryRanIsNeverStale() {
+        val execution = """"errors":[{"message":"An unknown error occurred.","severity":"ERROR"}]"""
+        for (data in listOf(
+            """{"viewer":{"collections_unified_with_auto_collections":null}}""",
+            """{"viewer":{}}""",
+            """{"viewer":null}""",
+        )) {
+            assertIs<Transient>(WebParsers.classifySavedCollections(graphQl("""{"data":$data,$execution}""")), data)
+            assertIs<Transient>(WebParsers.classifySavedCollections(graphQl("for (;;);" + """{"data":$data,$execution}""")), data)
         }
     }
 
     @Test
-    fun classifyGraphQlKeepsEveryOtherFailure() {
-        assertIs<RateLimited>(WebParsers.classifyGraphQl(graphQl("""{"status":"fail"}""", code = 429)))
-        assertIs<LoginRequired>(WebParsers.classifyGraphQl(graphQl("""{"require_login":true}""")))
-        assertNull(assertIs<ChallengeRequired>(WebParsers.classifyGraphQl(RawReply(302, null, null, redirected = true))).challengeUrl)
-        assertIs<Transient>(WebParsers.classifyGraphQl(graphQl("<html>down</html>", code = 500, contentType = "text/html")))
-        assertIs<Transient>(WebParsers.classifyGraphQl(graphQl(null)))
+    fun classifySavedCollectionsKeepsEveryOtherFailure() {
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"status":"fail"}""", code = 429)))
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("""{"require_login":true}""")))
+        assertNull(assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(RawReply(302, null, null, redirected = true))).challengeUrl)
+        assertIs<Transient>(WebParsers.classifySavedCollections(graphQl("<html>down</html>", code = 500, contentType = "text/html")))
+        assertIs<Transient>(WebParsers.classifySavedCollections(graphQl(null)))
         // A challenge or a rate limit wins over the errors of a stale reply.
-        assertIs<ChallengeRequired>(WebParsers.classifyGraphQl(graphQl("""{"message":"challenge_required","errors":[{"message":"x"}]}""")))
-        assertIs<RateLimited>(WebParsers.classifyGraphQl(graphQl("""{"errors":[{"message":"x"}]}""", code = 429)))
+        assertIs<ChallengeRequired>(WebParsers.classifySavedCollections(graphQl("""{"message":"challenge_required","errors":[{"message":"x"}]}""")))
+        assertIs<RateLimited>(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"x"}]}""", code = 429)))
         // A cut 400 may have hidden a challenge, and a JSON 400 or a 410 is not fact STALE's reply: none is a stale query.
-        assertEquals("http.400.unreadable", assertIs<ShapeChanged>(WebParsers.classifyGraphQl(graphQl(null, code = 400))).fieldPath)
-        assertEquals("http.400", assertIs<ShapeChanged>(WebParsers.classifyGraphQl(graphQl("""{"status":"fail"}""", code = 400))).fieldPath)
-        assertEquals("http.410", assertIs<ShapeChanged>(WebParsers.classifyGraphQl(graphQl("gone", code = 410))).fieldPath)
+        assertEquals("http.400.unreadable", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl(null, code = 400))).fieldPath)
+        assertEquals("http.400", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl("""{"status":"fail"}""", code = 400))).fieldPath)
+        assertEquals("http.410", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl("gone", code = 410))).fieldPath)
         // A 200 that is not JSON keeps the rule of every other reply.
-        assertIs<LoginRequired>(WebParsers.classifyGraphQl(graphQl("<html>Log in</html>", contentType = "text/html")))
-        assertEquals("$", assertIs<ShapeChanged>(WebParsers.classifyGraphQl(graphQl("oops", contentType = "text/plain"))).fieldPath)
+        assertIs<LoginRequired>(WebParsers.classifySavedCollections(graphQl("<html>Log in</html>", contentType = "text/html")))
+        assertEquals("$", assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl("oops", contentType = "text/plain"))).fieldPath)
     }
 
     @Test
-    fun classifyGraphQlLetsAReplyWithTheRootBeParsed() {
-        assertNull(WebParsers.classifyGraphQl(graphQl(reply(alpha))))
+    fun classifySavedCollectionsLetsAReplyWithTheRootBeParsed() {
+        assertNull(WebParsers.classifySavedCollections(graphQl(reply(alpha))))
         // Errors beside the root (a partial answer) still carry the collections.
-        assertNull(WebParsers.classifyGraphQl(graphQl("""{"errors":[{"message":"x"}],""" + reply(alpha).removePrefix("{"))))
+        assertNull(WebParsers.classifySavedCollections(graphQl("""{"errors":[{"message":"x"}],""" + reply(alpha).removePrefix("{"))))
     }
 
     @Test
-    fun classifyGraphQlCallsDataWithoutTheRootOrErrorsAShapeChange() {
+    fun classifySavedCollectionsCallsDataWithoutTheRootOrErrorsAShapeChange() {
         for (body in listOf("""{"data":{"viewer":{}}}""", """{"data":{"viewer":null}}""", """{"data":{}}""", "{}", """{"errors":[]}""")) {
             assertEquals(
                 "data.viewer.collections_unified_with_auto_collections",
-                assertIs<ShapeChanged>(WebParsers.classifyGraphQl(graphQl(body)), body).fieldPath,
+                assertIs<ShapeChanged>(WebParsers.classifySavedCollections(graphQl(body)), body).fieldPath,
             )
         }
     }

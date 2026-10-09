@@ -6,9 +6,7 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.RecordedRequest
 import okhttp3.OkHttpClient
-import java.net.URLDecoder
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -68,13 +66,6 @@ class WebInstagramClientTest {
 
     private fun serveFixture(name: String) = serve(fixture(name))
 
-    /** The urlencoded form of a GraphQL POST, decoded. */
-    private fun form(request: RecordedRequest): Map<String, String> =
-        request.body!!.utf8().split('&').associate { field ->
-            val (name, value) = field.split('=', limit = 2)
-            URLDecoder.decode(name, Charsets.UTF_8) to URLDecoder.decode(value, Charsets.UTF_8)
-        }
-
     private fun reply(body: String) = RawReply(200, "application/json", body)
 
     private val staleBody = """{"errors":[{"message":"x","severity":"CRITICAL"}],"data":null}"""
@@ -131,7 +122,7 @@ class WebInstagramClientTest {
         val request = server.takeRequest()
         assertEquals("POST", request.method)
         assertEquals("/" + WebGraphQl.PATH, request.url.encodedPath)
-        val form = form(request)
+        val form = request.formFields()
         assertEquals("555", form[WebGraphQl.Field.DOC_ID])
         assertEquals(WebGraphQl.SAVED_COLLECTIONS.friendlyName, form[WebGraphQl.Field.FRIENDLY_NAME])
         assertEquals(WebGraphQl.savedCollectionsVariables(null), form[WebGraphQl.Field.VARIABLES])
@@ -142,7 +133,44 @@ class WebInstagramClientTest {
     fun aLaterPageSendsItsCursorInTheVariables() = runTest {
         serveFixture("collections_graphql.json")
         client().collections("c1")
-        assertEquals(WebGraphQl.savedCollectionsVariables("c1"), form(server.takeRequest())[WebGraphQl.Field.VARIABLES])
+        assertEquals(WebGraphQl.savedCollectionsVariables("c1"), server.takeRequest().formFields()[WebGraphQl.Field.VARIABLES])
+    }
+
+    /**
+     * Fact CURSOR is unverified: a server that ignores `after` answers page 1 again, with the same end_cursor. That must stop the
+     * walk after one wasted request, not repeat the same POST until the run budget refuses (every run).
+     */
+    @Test
+    fun aCursorThatDoesNotAdvanceIsAShapeChange() = runTest {
+        val sameCursor = """{"data":{"viewer":{"collections_unified_with_auto_collections":{"edges":[],""" +
+            """"page_info":{"has_next_page":true,"end_cursor":"c1"}}}}}"""
+        serve(sameCursor)
+        serve(sameCursor)
+        val client = client()
+        val first = client.collections(null)
+        assertEquals("c1", first.nextCursor)
+        val error = assertFailsWith<InstagramException.ShapeChanged> { client.collections(first.nextCursor) }
+        assertEquals("page_info.end_cursor", error.fieldPath)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun aCursorThatAdvancesIsFollowed() = runTest {
+        serve(
+            """{"data":{"viewer":{"collections_unified_with_auto_collections":{"edges":[],""" +
+                """"page_info":{"has_next_page":true,"end_cursor":"c2"}}}}}""",
+        )
+        assertEquals("c2", client().collections("c1").nextCursor)
+    }
+
+    @Test
+    fun anInBandRateLimitIsRateLimitedNeverAStaleQuery() = runTest {
+        serve(
+            """{"data":{"viewer":{"collections_unified_with_auto_collections":null}},""" +
+                """"errors":[{"message":"Please wait a few minutes before you try again."}]}""",
+        )
+        assertFailsWith<InstagramException.RateLimited> { client().collections(null) }
+        assertEquals(0, repairs)
     }
 
     @Test
@@ -202,7 +230,7 @@ class WebInstagramClientTest {
 
         serveFixture("collections_graphql.json")
         client.collections(first.nextCursor)
-        val form = form(server.takeRequest())
+        val form = server.takeRequest().formFields()
         assertEquals("777", form[WebGraphQl.Field.DOC_ID])
         assertEquals(WebGraphQl.savedCollectionsVariables("c1"), form[WebGraphQl.Field.VARIABLES])
     }
