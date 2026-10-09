@@ -620,18 +620,22 @@ current one from the site itself, on the phone, with no rebuild.
   as an unexpected exception. `WebInstagramClient.repairCollections()` learns the id only after the repaired reply has parsed
   as a page of collections, and `QueryRepairer` hands over only the reply of a 2xx: an id is never learned from an error
   status, a reply that did not parse or a stale one.
-- **The stale rule (R12, R17).** `WebParsers.classifySavedCollections` reads a reply to the query in this order, on the body
+- **The stale rule (R12, R17, R22).** `WebParsers.classifySavedCollections` reads a reply to the query in this order, on the body
   after a leading `for (;;);`:
   1. the rule of every reply (`classifyReply`): a challenge, a rate limit, a logout, a redirect or a network problem keeps its
      meaning;
   2. the same markers inside the reply's GraphQL `errors` entries (`message`, `summary`, `description` and `error_type`, the
-     last read as `ErrorClassifier.classify` reads a reply's), so a throttled 200 is `RateLimited` and a login or challenge
-     reported in the body keeps its meaning too, never a repair;
-  3. a stale query, `StaleQuery` (it carries the friendly name only): a 2xx JSON reply without `data.viewer` (`data` null,
-     absent, empty or another query's), with `errors` or without them (R17: so a doc id that names another persisted query,
-     planted or not, is repaired within a day instead of being sent again on every sync), or a 400 or 404 that is not JSON
-     (STALE, assumed, to be confirmed on the phone). Only a new doc id fixes that, so it is never a shape change, never
-     retried and never arms a cooldown;
+     last read as `ErrorClassifier.classify` reads a reply's; R22: and the reply's other error text, a plain-string entry, an
+     `errors` that is a bare string or one object, an envelope's `errorSummary` and `errorDescription`), so a throttled 200 is
+     `RateLimited` and a login or challenge reported in the body keeps its meaning too, never a repair;
+  3. a stale query, `StaleQuery` (it carries the friendly name, and no doc id): a 2xx JSON reply without `data.viewer` (`data`
+     null, absent, empty or another query's), with `errors` or without them (R17: so a doc id that names another persisted
+     query, planted or not, is repaired within a day instead of being sent again on every sync), or a 400 or 404 that is not
+     JSON (STALE, assumed, to be confirmed on the phone). Only a new doc id fixes that, so it is never a shape change, never
+     retried and never arms a cooldown. R22: a 2xx that is no GraphQL reply at all (no `data` key, no GraphQL `errors`
+     entries: an error envelope of the site's such as `{"error":1675030,...}`, or a bare status) stays stale too, since it may
+     be exactly how the site answers an outdated id and stopping every sync would be worse than one repair a day; but the
+     `StaleQuery` says so (`detail` `not graphql`, or `http <code>` for the non-JSON 400/404), and the log shows it;
   4. a reply whose `data` has `viewer` is never stale: with `errors` and no root it is `Transient` (a 2xx execution error,
      which follows the existing retry), with neither it is `ShapeChanged` at the root path.
 - **The parser.** The nodes of `edges`, in order, less the automatic collections: the owner's own have a `collection_id` of
@@ -749,12 +753,16 @@ current one from the site itself, on the phone, with no rebuild.
   write says "Couldn't forget the collections query id" under the button.
 - **Debug log** (tag `InstagramHttp`, debug builds only, never a doc id, handle, URL, token or body):
   `GRAPHQL PolarisProfileSavedTabContentQuery -> <code> (<ms> ms)` per query (with the error summary line for a non-2xx
-  reply; `no tokens` for a query the page could not send), `collections query stale` when the first page is stale or
+  reply; `no tokens` for a query the page could not send), `collections query stale` when the first page is stale (`collections query stale (not graphql)` or `(http <code>)` when
+  the stale reply was no GraphQL reply, R22) or
   `collections query forced` when Forget armed the repair, then the repairer's `repair: start` or `repair: failed (<reason>)`
   (`limit`, `no handle`, `http <code>`, `login page`, `challenge page`, `no query`, `page error`), and the engine's
-  `repair: learned new id` once the client has parsed the site's reply and kept its id (D-I2: never before), or
-  `repair: failed (reply stale)`, `repair: failed (reply transient)` or `repair: failed (shape <field path>)` (field names
-  and indices only) when the client could not use it.
+  `repair: learned new id` once the client has parsed the site's reply and kept its id (D-I2: never before), or, when the
+  client could not use it, `repair: failed (reply stale)` (`reply stale, not graphql` for an envelope), `repair: failed (reply transient)`,
+  `repair: failed (shape <field path>)` (field names and indices only), or, for a reply that itself reports a rate limit, a
+  logout or a challenge (R12, in its GraphQL `errors`; the run then stops with its banner), `repair: failed (reply rate
+  limit)`, `repair: failed (reply login)` or `repair: failed (reply challenge)`. The client hands the engine only its reply's
+  failures (`repairCollections(onReplyFailure)`); the repairer logs the repair's own.
 - **Traffic, and the pacing rule (CLAUDE.md).**
   - A normal sync sends fewer requests than before: the per-collection feeds are gone. The names query is one request per 12
     collections (`first: 12`), the automatic collections included, so a library of a few collections costs one.

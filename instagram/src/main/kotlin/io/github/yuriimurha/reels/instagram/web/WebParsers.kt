@@ -24,7 +24,7 @@ internal object WebParsers {
     /** What the website puts before some JSON replies so they can't be run as a script. It is not part of the JSON. */
     private const val FOR_LOOP_GUARD = "for (;;);"
 
-    /** HTTP statuses whose non-JSON reply fact STALE reads as a stale query ([isStale]). */
+    /** HTTP statuses whose non-JSON reply fact STALE reads as a stale query ([staleQuery]). */
     private val STALE_HTTP_CODES = setOf(400, 404)
 
     /** [body] without a leading [FOR_LOOP_GUARD]. */
@@ -49,30 +49,59 @@ internal object WebParsers {
         (json?.get("errors") as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
 
     /**
-     * R12 (a): what the reply's own GraphQL errors say, read like any reply's message ([ErrorClassifier.markedFailure] over each
-     * entry's `message`, `summary`, `description` and, as [ErrorClassifier.classify] reads a reply, `error_type`): a challenge,
-     * a rate limit or a logout reported in the body of a 2xx.
+     * R22: the reply's other error text, no GraphQL error object but a message all the same: the `errors` array's plain-string
+     * entries, an `errors` that is a bare string or a single object (its `message`, `summary`, `description`), and an error
+     * envelope's own `errorSummary` and `errorDescription`.
      */
-    private fun inBandFailure(errors: List<JsonObject>): InstagramException? =
+    private fun otherErrorTexts(json: JsonObject?): List<String> {
+        if (json == null) return emptyList()
+        val errors = json["errors"]
+        val inErrors = when (errors) {
+            is JsonArray -> errors.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
+            is JsonObject -> listOfNotNull(errors.string("message"), errors.string("summary"), errors.string("description"))
+            is JsonPrimitive -> listOfNotNull(errors.takeIf { it.isString }?.content)
+            else -> emptyList()
+        }
+        return inErrors + listOfNotNull(json.string("errorSummary"), json.string("errorDescription"))
+    }
+
+    /**
+     * R12 (a): what the reply's own GraphQL errors say, read like any reply's message ([ErrorClassifier.markedFailure] over each
+     * entry's `message`, `summary`, `description` and, as [ErrorClassifier.classify] reads a reply, `error_type`; and, R22, over
+     * the reply's other error text, [otherErrorTexts]): a challenge, a rate limit or a logout reported in the body of a 2xx.
+     */
+    private fun inBandFailure(errors: List<JsonObject>, strings: List<String>): InstagramException? =
         ErrorClassifier.markedFailure(
             errors.flatMap { entry ->
                 listOfNotNull(entry.string("message"), entry.string("summary"), entry.string("description"), entry.string("error_type"))
-            },
+            } + strings,
         )
+
+    /**
+     * True when [json] is a GraphQL reply at all: it has a `data` key (whatever its value) or GraphQL [errors] entries. An error
+     * envelope of the site's (`{"error":1675030,...}`) or a bare status (`{"status":"fail"}`) is neither.
+     */
+    private fun isGraphQlReply(json: JsonObject, errors: List<JsonObject>): Boolean = json.containsKey("data") || errors.isNotEmpty()
 
     /**
      * Task 1 fact STALE (assumed; verify on the phone), bounded by R12 and R17: how the website answers a query whose doc id it
      * no longer runs. Either a 2xx JSON reply without `data.viewer` (`data` null, absent, empty or another query's: the query
      * never ran), with GraphQL `errors` or without them (R17: so a doc id that names another persisted query is repaired within
-     * a day, not sent again on every sync), or a 400/404 that is not JSON at all (which [classifyReply] alone calls
-     * `ShapeChanged("http.<code>")`). A reply with `data.viewer` is never stale ([queryRan]). [classified] is [classifyReply]'s
-     * answer, [json] the reply's JSON after the guard. The caller has already taken every challenge, rate limit, logout and
-     * network problem out, in-band ones too.
+     * a day, not sent again on every sync; and an error envelope, which may be exactly how the site answers an outdated id,
+     * costs at most one repair a day and the last names, never a stopped sync), or a 400/404 that is not JSON at all (which
+     * [classifyReply] alone calls `ShapeChanged("http.<code>")`). A reply with `data.viewer` is never stale ([queryRan]).
+     * [classified] is [classifyReply]'s answer, [json] the reply's JSON after the guard. The caller has already taken every
+     * challenge, rate limit, logout and network problem out, in-band ones too. Null when it is not stale; else what the
+     * [InstagramException.StaleQuery] says of it (R22): null for a GraphQL reply ([isGraphQlReply]), `not graphql` for any other
+     * JSON, `http <code>` for the non-JSON 400/404.
      */
-    private fun isStale(code: Int, classified: InstagramException?, json: JsonObject?): Boolean = when {
-        code in STALE_HTTP_CODES -> json == null && (classified as? ShapeChanged)?.fieldPath == "http.$code"
-        code in 200..299 -> json != null && !queryRan(json)
-        else -> false
+    private fun staleQuery(code: Int, classified: InstagramException?, json: JsonObject?, errors: List<JsonObject>): InstagramException.StaleQuery? {
+        val detail = when {
+            code in STALE_HTTP_CODES && json == null && (classified as? ShapeChanged)?.fieldPath == "http.$code" -> "http $code"
+            code in 200..299 && json != null && !queryRan(json) -> if (isGraphQlReply(json, errors)) null else "not graphql"
+            else -> return null
+        }
+        return InstagramException.StaleQuery(WebGraphQl.SAVED_COLLECTIONS.friendlyName, detail)
     }
 
     /**
@@ -80,8 +109,8 @@ internal object WebParsers {
      * order, on the body after a leading `for (;;);`:
      * 1. the rule of every reply ([classifyReply]): a challenge, a rate limit, a logout or a network problem keeps its meaning;
      * 2. the same markers in the reply's GraphQL `errors` (R12 a): a throttled 200 is [InstagramException.RateLimited];
-     * 3. fact STALE's reply ([isStale], any 2xx JSON without `data.viewer` included, R17) is [InstagramException.StaleQuery],
-     *    never a shape change: only a new doc id can fix it;
+     * 3. fact STALE's reply ([staleQuery], any 2xx JSON without `data.viewer` included, R17) is [InstagramException.StaleQuery],
+     *    never a shape change: only a new doc id can fix it; it says what it was when no GraphQL reply (R22);
      * 4. errors from a query that ran but gave no [SAVED_COLLECTIONS_ROOT] (R12 b) are [InstagramException.Transient];
      * 5. any other shape change [classifyReply] found; then a reply with the root is null, one without is
      *    `ShapeChanged(SAVED_COLLECTIONS_ROOT)`.
@@ -92,8 +121,8 @@ internal object WebParsers {
         if (classified != null && classified !is ShapeChanged) return classified
         val json = body?.let(::parseObject)
         val errors = graphQlErrors(json)
-        inBandFailure(errors)?.let { return it }
-        if (isStale(reply.code, classified, json)) return InstagramException.StaleQuery(WebGraphQl.SAVED_COLLECTIONS.friendlyName)
+        inBandFailure(errors, otherErrorTexts(json))?.let { return it }
+        staleQuery(reply.code, classified, json, errors)?.let { return it }
         val root = json?.let(::savedCollectionsRoot)
         if (reply.code in 200..299 && json != null && queryRan(json) && root == null && errors.isNotEmpty()) {
             return InstagramException.Transient()

@@ -48,10 +48,15 @@ class WebInstagramClient(
     }
 
     /** No request of its own: the repair's page sent the query. The id is learned only once its reply parsed as a page. */
-    override suspend fun repairCollections(): Page<RemoteCollection> {
+    override suspend fun repairCollections(onReplyFailure: (InstagramException) -> Unit): Page<RemoteCollection> {
         val query = WebGraphQl.SAVED_COLLECTIONS
         val repaired = repair.repair(query)
-        val page = WebParsers.collectionsGraphQl(WebParsers.savedCollectionsJsonOrThrow(repaired.reply))
+        val page = try {
+            WebParsers.collectionsGraphQl(WebParsers.savedCollectionsJsonOrThrow(repaired.reply))
+        } catch (e: InstagramException) {
+            onReplyFailure(e)
+            throw e
+        }
         docIds.learned(query, repaired.docId)
         return page
     }

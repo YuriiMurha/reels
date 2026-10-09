@@ -233,3 +233,25 @@ Fixed in four commits and documented in a fifth:
 - **What the phone rollout settles.** AUTO and a real repair. STALE stays assumed (Forget no longer sends a wrong id), and CURSOR
   stays unverified until the account has more than 12 collection edges, the automatic ones included.
 - No agent contacted Instagram: fakes, MockWebServer and the emulator's local servers only, the emulator in Mock mode.
+
+## 2026-10-09: a stale reply says what it was; a repaired reply that stops the run says why
+
+Two follow-ups the final review of the collection-names change parked (PR #8), and what their own review changed:
+
+- **R22, the stale rule kept, its log made clearer.** The parked item proposed that a 2xx names reply that is no GraphQL reply
+  at all (an error envelope of the site's such as `{"error":1675030,...}`, a bare `{"status":"fail"}`) should stop being a
+  stale query. The review of that change showed the cost: if that envelope is how Instagram answers an outdated id, every
+  sync would stop with "Adapter needs repair" and never repair, which a phone without a computer can't get out of. So R17
+  stays (such a reply is stale: one repair a day at most, else the last names), and the stale query now says what it was
+  instead: the log reads `collections query stale (not graphql)` or `(http <code>)`, so "Instagram changed the id" can be
+  told from "Instagram answered something else". The reply's other error text (a plain-string `errors` entry, an `errors` that is a string or a
+  single object, an envelope's `errorSummary`/`errorDescription`) is now read for the rate-limit, login and challenge
+  markers too, so a throttle sent that way never starts a repair.
+- **The missing log line.** A repaired reply that itself reports a rate limit, a logout or a challenge (in its GraphQL
+  `errors`) stopped the run correctly, but the debug log ended at `repair: start`. The client now hands the engine only its
+  reply's failures (`repairCollections(onReplyFailure)`; never the repair page's own landings, which the repairer logs), and
+  the engine logs `repair: failed (reply rate limit|reply login|reply challenge)` (and the earlier `reply stale|reply
+  transient|shape ...`) from that one place.
+- Pacing: unchanged (no new request, no retry; a throttle written as a plain string no longer starts a repair).
+- Tests: `./gradlew check` 1285 (new: an envelope's own text keeping its meaning, the stale detail for envelopes and non-JSON pages, plain-string error entries, the
+  reply-failure callback's contract both ways, the log line on a stopping repaired reply, an envelope that repairs).

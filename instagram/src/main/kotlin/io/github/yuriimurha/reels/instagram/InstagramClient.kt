@@ -20,9 +20,12 @@ interface InstagramClient : SessionProbe {
      * own page sends the query, and the client reads the names from that reply and keeps its doc id for the next [collections].
      * Throws [InstagramException.RepairUnavailable] when the repair did not run or saw no query, and
      * [InstagramException.StaleQuery] (or any other classification) when the site's own reply is not a page of collections;
-     * nothing is learned then. The default is the fake backend's: it has no query to repair.
+     * nothing is learned then. [onReplyFailure] hears that classification first, and only it: a failure of the site's reply,
+     * never one of the repair itself (which the repairer reports on its own), so the caller can say which it was.
+     * The default is the fake backend's: it has no query to repair.
      */
-    suspend fun repairCollections(): Page<RemoteCollection> = throw InstagramException.Transient()
+    suspend fun repairCollections(onReplyFailure: (InstagramException) -> Unit = {}): Page<RemoteCollection> =
+        throw InstagramException.Transient()
 
     /** Saved items newest first. [collectionId] null means All Saved. */
     suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia>

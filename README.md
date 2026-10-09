@@ -353,7 +353,7 @@ Don't reinstall or clear the app's data to skip it.
    `repair: learned new id` (and no `GRAPHQL` line before them: the names came from the site's own request), then the
    saved-feed `GET` lines. The run ends with no banner, Sync shows **no** "Couldn't refresh collection names", and the
    **Saved** screen shows the same names as in step 4. If the log says `repair: failed (<reason>)` instead: for
-   `login page`, `challenge page` or `http 429` the run stops with its banner (the session needs you, or a cooldown started,
+   `login page`, `challenge page`, `http 429`, `reply login`, `reply challenge` or `reply rate limit` the run stops with its banner (the session needs you, or a cooldown started,
    as for any request: see [When a run stops](#when-a-run-stops-the-red-banner-on-sync)); for any other reason (`limit`,
    `no handle`, `no query`, `page error`, `http <code>`, `reply stale`, `reply transient`, `shape ...`) the sync still ends
    on the names it already had and Sync says "Couldn't refresh collection names": that is the fallback working. Either way,
@@ -585,7 +585,8 @@ page that a cancelled request ran into, `cancelled`, ...). Other lines can appea
 closed after 5 minutes without a request), `page closed (owner needed)` (closed at once because the session expired or
 needs verification, or the login screen opened to fix that), and `transport reset failed: <Class>` or `transport close
 failed: <Class>` (the page could not be closed; the class name only), `collections query stale` (Instagram no longer runs the
-stored names query id) or `collections query forced` (Forget asked for a repair), then `repair: start`,
+stored names query id; `collections query stale (not graphql)` or `(http <code>)` when it answered with an error envelope
+or a non-JSON page instead of a GraphQL error, which still repairs once a day but is worth pasting) or `collections query forced` (Forget asked for a repair), then `repair: start`,
 `repair: learned new id` or `repair: failed (<reason>)` (the repair page's one attempt; never an id, a handle or a page). No
 cookie, token or header is logged: the app never sees them. One `GET` or `GRAPHQL` line is one call: at most one API
 request; a line without an HTTP status sent none (it ended before the request, or the page's request failed; `no tokens`
@@ -924,8 +925,8 @@ The text after the colon says what broke. Nothing was deleted by any of these.
     know the account's handle), `http <code>` (Instagram answered the Saved page with an error), `no query` (the Saved page
     didn't send the query within 45 seconds), `page error` (this phone's WebView can't make the repair page, or it failed),
     `reply stale` or `reply transient` (the site's own answer could not be used either) or `shape <path>` (the site's own
-    answer was not the shape the app expects). A `login page`, `challenge page` or `http 429` reason is no fallback: the run
-    stops with its banner ([When a run stops](#when-a-run-stops-the-red-banner-on-sync)).
+    answer was not the shape the app expects). A `login page`, `challenge page`, `http 429`, `reply login`, `reply challenge`
+    or `reply rate limit` reason is no fallback: the run stops with its banner ([When a run stops](#when-a-run-stops-the-red-banner-on-sync)).
 
   Paste the log. Waiting a day and tapping **Sync** is the retry; a debug build's **Forget collections query id**
   (Sync → Developer) arms one repair for the next sync, outside the 24 hours, once per tap.
