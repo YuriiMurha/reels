@@ -255,3 +255,24 @@ Two follow-ups the final review of the collection-names change parked (PR #8), a
 - Pacing: unchanged (no new request, no retry; a throttle written as a plain string no longer starts a repair).
 - Tests: `./gradlew check` 1285 (new: an envelope's own text keeping its meaning, the stale detail for envelopes and non-JSON pages, plain-string error entries, the
   reply-failure callback's contract both ways, the log line on a stopping repaired reply, an envelope that repairs).
+
+## 2026-10-11: the phone rollout of the WebView transport and the collection names
+
+The first real runs against Instagram, on the owner's phone (throwaway account, 10 saved posts in 3 collections), with the
+build of main `b411e01` (PRs #7, #8, #9):
+
+- **2026-10-08 (PR #7's build):** the hidden page loaded and the login check answered `200`; the saved feed answered `200`;
+  the old `api/v1/collections/list/` answered `404`, which led to PR #8.
+- **First real Sync (2026-10-11 17:45):** DONE with 3 requests (session check, the GraphQL names query, the saved feed),
+  10 new items, 10 thumbnails, no failure, no repair (the built-in doc id was current). Three collections under their real
+  names, holding 4, 4 and 2 posts, All Saved 10; no "All posts" card and no placeholder. This confirms fact AUTO and that the
+  names query's `collection_id` matches the items' `saved_collection_ids` (strategy A records the memberships).
+- **Forget collections query id, then one Sync (17:53):** `collections query forced`, `repair: start`, `repair: learned new
+  id` (about 1.2 s), then the saved feed; DONE with 3 requests, the names intact, no "Couldn't refresh collection names".
+  The learned id equals the built-in one: the repair page read it from the real desktop Saved page's own request, so the
+  Chrome-on-Android "Desktop site" identity gets the desktop page and `ig_watch.js` catches the site's query.
+- **One more Sync (17:56):** one `GRAPHQL PolarisProfileSavedTabContentQuery -> 200` with the learned id, no repair.
+- Still open: STALE (seen only when Instagram really changes the id), CURSOR (needs more than 12 collection edges), the first
+  Full sync, video playback and the release-build checks.
+- Practical note: the phone's logcat main buffer is 256 KB and rotates within minutes, so the `InstagramHttp` lines of a run
+  must be read at once or captured live (`adb logcat -s InstagramHttp > file`).
