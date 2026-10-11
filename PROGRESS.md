@@ -272,7 +272,10 @@ build of main `b411e01` (PRs #7, #8, #9):
   The learned id equals the built-in one: the repair page read it from the real desktop Saved page's own request, so the
   Chrome-on-Android "Desktop site" identity gets the desktop page and `ig_watch.js` catches the site's query.
 - **One more Sync (17:56):** one `GRAPHQL PolarisProfileSavedTabContentQuery -> 200` with the learned id, no repair.
-- Still open: STALE (seen only when Instagram really changes the id), CURSOR (needs more than 12 collection edges), the first
-  Full sync, video playback and the release-build checks.
+- **First Full sync (18:00):** DONE with 3 requests, 10 seen, nothing removed, every membership kept.
+- **Video (18:03):** a reel played, looped and replayed offline from the cache in airplane mode. A reel Instagram no longer
+  has did not play; its Instagram page confirmed it is gone. Neither needed an API request (the stored links were fresh).
+- Still open: STALE (seen only when Instagram really changes the id), CURSOR (needs more than 12 collection edges), an
+  expired video link renewed and a 403/410 recovered, and the release-build checks.
 - Practical note: the phone's logcat main buffer is 256 KB and rotates within minutes, so the `InstagramHttp` lines of a run
   must be read at once or captured live (`adb logcat -s InstagramHttp > file`).
