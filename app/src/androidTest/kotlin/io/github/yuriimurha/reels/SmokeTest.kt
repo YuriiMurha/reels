@@ -12,6 +12,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDisplayed
@@ -328,8 +329,8 @@ class SmokeTest {
     private fun gridTitle(name: String) = hasText(name) and !hasTestTag("collection-name") and !hasClickAction()
     private val syncChip = hasClickAction() and
         (hasText("Not synced") or hasText("Syncing…") or hasText("Synced ", substring = true) or hasText("⚠", substring = true))
-    private val openOnInstagram = hasText("Open on Instagram")
-    private val muteControl = hasText("Mute") or hasText("Unmute")
+    private val openOnInstagram = hasContentDescription("Open on Instagram") // an icon button: its words are its content description
+    private val muteControl = hasContentDescription("Mute") or hasContentDescription("Unmute")
     private val carouselCounter = hasTestTag(CAROUSEL_COUNTER_TAG)
 
     private fun exists(matcher: SemanticsMatcher): Boolean = composeRule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()

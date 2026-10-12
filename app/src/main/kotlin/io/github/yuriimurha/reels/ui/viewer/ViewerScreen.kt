@@ -2,6 +2,7 @@ package io.github.yuriimurha.reels.ui.viewer
 
 import android.content.Intent
 import android.net.Uri
+import androidx.annotation.DrawableRes
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -19,14 +21,20 @@ import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TooltipAnchorPosition
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -44,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -58,6 +67,7 @@ import androidx.media3.ui.compose.ContentFrame
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemKey
+import io.github.yuriimurha.reels.R
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.media.VideoSource
@@ -363,9 +373,32 @@ private fun Overlay(
         unavailable?.let { message ->
             Text(message, color = Color.White, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 8.dp))
         }
-        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { onOpenInstagram(Permalinks.of(media.type, media.code)) }) { Text("Open on Instagram") }
-            if (isVideo) TextButton(onClick = onToggleMute) { Text(if (muted) "Unmute" else "Mute") }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OverlayIconButton("Open on Instagram", R.drawable.ic_open_in_new) { onOpenInstagram(Permalinks.of(media.type, media.code)) }
+            Spacer(Modifier.weight(1f))
+            // The sound belongs to video: a reel, a video post, or a carousel while its settled item is a video (spec 2026-10-12 §3.4).
+            if (isVideo) {
+                if (muted) OverlayIconButton("Unmute", R.drawable.ic_volume_off, onToggleMute)
+                else OverlayIconButton("Mute", R.drawable.ic_volume_up, onToggleMute)
+            }
+        }
+    }
+}
+
+/**
+ * An icon button over the picture: a white [icon] on a dark disc, so it reads on any frame. [label] is its content description
+ * and its tooltip (a long press shows it), and no text is drawn.
+ */
+@kotlin.OptIn(ExperimentalMaterial3Api::class) // androidx.annotation.OptIn is the one imported here, for UnstableApi
+@Composable
+private fun OverlayIconButton(label: String, @DrawableRes icon: Int, onClick: () -> Unit) {
+    TooltipBox(
+        positionProvider = TooltipDefaults.rememberTooltipPositionProvider(TooltipAnchorPosition.Above),
+        tooltip = { PlainTooltip { Text(label) } },
+        state = rememberTooltipState(),
+    ) {
+        IconButton(onClick = onClick, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), CircleShape)) {
+            Icon(painterResource(icon), contentDescription = label, tint = Color.White)
         }
     }
 }

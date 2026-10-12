@@ -9,6 +9,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -144,6 +145,12 @@ class ViewerScreenCarouselTest {
         return (0 until nodes.fetchSemanticsNodes().size).any { runCatching { nodes[it].isDisplayed() }.getOrDefault(false) }
     }
 
+    /** An icon button's words are its content description. */
+    private fun displayedDescription(description: String): Boolean {
+        val nodes = compose.onAllNodesWithContentDescription(description)
+        return (0 until nodes.fetchSemanticsNodes().size).any { runCatching { nodes[it].isDisplayed() }.getOrDefault(false) }
+    }
+
     private fun displayedText(text: String): Boolean {
         val nodes = compose.onAllNodesWithText(text)
         return (0 until nodes.fetchSemanticsNodes().size).any { runCatching { nodes[it].isDisplayed() }.getOrDefault(false) }
@@ -229,7 +236,7 @@ class ViewerScreenCarouselTest {
         compose.onAllNodesWithText("Can't load this item").assertCountEquals(1)
         compose.onNodeWithText("Can't load this item").assertIsDisplayed()
         compose.onAllNodesWithTag(VIDEO_SURFACE_TAG).assertCountEquals(0)
-        assertTrue(displayedText("Open on Instagram"), "the way out is right there")
+        assertTrue(displayedDescription("Open on Instagram"), "the way out is right there")
         assertTrue(displayedWith(CAROUSEL_COUNTER_TAG, "3/3"), "still on the video item")
         assertEquals(listOf("stop", "clear"), player.events.takeLast(2), "the player was stopped and emptied")
     }

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The launcher icon's foreground: a Pinterest-style masonry of four rounded tiles, with a play triangle on the bottom right one.
+    Everything sits inside the 21..87 safe zone of the 108 x 108 viewport (the launcher's mask may cut the rest); AppIconGuardTest
+    measures it. Left column x 30..52 (a tall tile, then a short one), right column x 56..78 (a short tile, then a tall one), 4 apart,
+    corner radius 4. Keep the paths free of groups and transforms: the test reads the raw path data.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Left column, tall: x 30..52, y 30..62 -->
+    <path
+        android:fillColor="#9FE1CB"
+        android:pathData="M34,30 h14 a4,4 0 0 1 4,4 v24 a4,4 0 0 1 -4,4 h-14 a4,4 0 0 1 -4,-4 v-24 a4,4 0 0 1 4,-4 z" />
+    <!-- Left column, short: x 30..52, y 66..78 -->
+    <path
+        android:fillColor="#5DCAA5"
+        android:pathData="M34,66 h14 a4,4 0 0 1 4,4 v4 a4,4 0 0 1 -4,4 h-14 a4,4 0 0 1 -4,-4 v-4 a4,4 0 0 1 4,-4 z" />
+    <!-- Right column, short: x 56..78, y 30..44 -->
+    <path
+        android:fillColor="#5DCAA5"
+        android:pathData="M60,30 h14 a4,4 0 0 1 4,4 v6 a4,4 0 0 1 -4,4 h-14 a4,4 0 0 1 -4,-4 v-6 a4,4 0 0 1 4,-4 z" />
+    <!-- Right column, tall: x 56..78, y 48..78 -->
+    <path
+        android:fillColor="#E1F5EE"
+        android:pathData="M60,48 h14 a4,4 0 0 1 4,4 v22 a4,4 0 0 1 -4,4 h-14 a4,4 0 0 1 -4,-4 v-22 a4,4 0 0 1 4,-4 z" />
+    <!-- The play triangle, centred in the tall right tile (whose centre is 67,63) -->
+    <path
+        android:fillColor="#0F6E56"
+        android:pathData="M62,56 L74,63 L62,70 z" />
+</vector>

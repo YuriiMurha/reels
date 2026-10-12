@@ -10,8 +10,10 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -166,7 +168,7 @@ class CarouselPagerTest {
         swipeItemsLeft()
 
         compose.onNodeWithText("Can't load this item").assertIsDisplayed()
-        compose.onNodeWithText("Open on Instagram").assertIsDisplayed().performClick()
+        compose.onNodeWithContentDescription("Open on Instagram").assertIsDisplayed().performClick()
         assertEquals("https://www.instagram.com/p/C1000001/", opened)
     }
 
@@ -221,16 +223,16 @@ class CarouselPagerTest {
         compose.onNodeWithTag(CAROUSEL_COVER_TAG).assertIsDisplayed()
     }
 
-    /** The mute control belongs to video: on a carousel it shows while the settled item is a video (Task 5 makes it an icon). */
+    /** The mute control belongs to video: on a carousel it shows while the settled item is a video (an icon). */
     @Test
     fun theMuteControlShowsOnlyOnAVideoItem() {
         showPosts()
-        compose.onAllNodesWithText("Mute").assertCountEquals(0)
+        compose.onAllNodesWithContentDescription("Mute").assertCountEquals(0)
 
         swipeItemsLeft()
         swipeItemsLeft()
 
-        compose.onNodeWithText("Mute").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Mute").assertIsDisplayed()
     }
 
     @Test

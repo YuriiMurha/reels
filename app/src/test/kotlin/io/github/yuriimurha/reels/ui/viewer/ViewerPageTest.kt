@@ -3,7 +3,9 @@ package io.github.yuriimurha.reels.ui.viewer
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -46,7 +48,7 @@ class ViewerPageTest {
     fun openOnInstagramUsesThePermalink() {
         var opened: String? = null
         show(mediaEntity("m1", MediaType.REEL), onOpenInstagram = { opened = it })
-        compose.onNodeWithText("Open on Instagram").performClick()
+        compose.onNodeWithContentDescription("Open on Instagram").performClick()
         assertEquals("https://www.instagram.com/reel/Cm1/", opened)
     }
 
@@ -60,7 +62,7 @@ class ViewerPageTest {
     @Test
     fun imagesHaveNoMuteButton() {
         show(mediaEntity("m1", MediaType.IMAGE))
-        compose.onAllNodesWithText("Mute").assertCountEquals(0)
+        compose.onAllNodesWithContentDescription("Mute").assertCountEquals(0)
     }
 
     @Test
@@ -89,7 +91,7 @@ class ViewerPageTest {
         show(mediaEntity("m1", MediaType.REEL), unavailable = "Offline: this video isn't cached yet", onOpenInstagram = { opened = it })
 
         compose.onNodeWithText("Offline: this video isn't cached yet").assertIsDisplayed()
-        compose.onNodeWithText("Open on Instagram").assertIsDisplayed().performClick()
+        compose.onNodeWithContentDescription("Open on Instagram").assertIsDisplayed().performClick()
         assertEquals("https://www.instagram.com/reel/Cm1/", opened)
     }
 
