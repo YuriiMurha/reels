@@ -1,0 +1,557 @@
+package io.github.yuriimurha.reels.data.media
+
+import android.content.Context
+import android.net.Uri
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.yuriimurha.reels.data.db.CarouselItemEntity
+import io.github.yuriimurha.reels.data.db.MediaEntity
+import io.github.yuriimurha.reels.data.library.LibraryDeletion
+import io.github.yuriimurha.reels.data.library.LibraryRepository
+import io.github.yuriimurha.reels.instagram.InstagramClient
+import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.RemoteMedia
+import io.github.yuriimurha.reels.instagram.fake.FakeFailures
+import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
+import io.github.yuriimurha.reels.instagram.fake.FakeLibrary
+import io.github.yuriimurha.reels.sync.SessionSignals
+import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
+import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
+import io.github.yuriimurha.reels.sync.pacing.Pacer
+import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.cacheWholeFile
+import io.github.yuriimurha.reels.testutil.inMemoryDb
+import io.github.yuriimurha.reels.testutil.mediaEntity
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import org.junit.After
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import java.io.File
+import java.util.Collections
+import kotlin.random.Random
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * A carousel's items on demand (spec 2026-10-12 §3.3): the stored ones as they are, else one `mediaInfo` on the interactive
+ * lane at most once per visit, for the lazy fill and the link renewal alike. The fake client, the real Conservative Pacer in
+ * virtual time, an in-memory Room.
+ */
+@UnstableApi
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(AndroidJUnit4::class)
+class CarouselRepositoryTest {
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private val context: Context = ApplicationProvider.getApplicationContext()
+    private val db = inMemoryDb()
+    private val fake = FakeInstagramClient(FakeLibrary(itemCount = 200))
+
+    /** What happens to the fake's reply on its way back (the request is already out): a test's way to act mid-request. */
+    private var onReply: suspend (RemoteMedia?) -> RemoteMedia? = { it }
+    private val client = object : InstagramClient by fake {
+        override suspend fun mediaInfo(mediaPk: String): RemoteMedia? = onReply(fake.mediaInfo(mediaPk))
+    }
+    private val fetcher = StubFetcher()
+    private val images by lazy { CarouselImageStore(File(tmp.root, "carousel")) }
+    private var sessionReady = true
+
+    private var databaseProvider: StandaloneDatabaseProvider? = null
+    private var builtCache: VideoCache? = null
+    private val videoCache: VideoCache
+        get() = builtCache ?: VideoCache(File(tmp.root, "video"), StandaloneDatabaseProvider(context).also { databaseProvider = it })
+            .also { builtCache = it }
+    private val cacheKeysAsked = Collections.synchronizedList(mutableListOf<String>())
+
+    /** A carousel of the fake library with a video at position 2 (every third item is one). */
+    private val post: RemoteMedia = fake.library.allSaved().first { it.type == MediaType.CAROUSEL && (it.carouselCount ?: 0) >= 3 }
+    private val pk = post.pk
+    private val media: MediaEntity = mediaEntity(pk, MediaType.CAROUSEL)
+
+    @After
+    fun close() {
+        builtCache?.cache?.release()
+        databaseProvider?.close()
+        db.close()
+    }
+
+    /** The repository, the Pacer and the test scheduler agree on the time: [START] plus whatever the test has waited. */
+    private fun TestScope.repository(sampleClip: Uri? = null): CarouselRepository {
+        val clock = { START + testScheduler.currentTime }
+        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = clock)
+        return CarouselRepository(
+            db.carouselItemDao(), db.mediaDao(),
+            PacedMediaInfo(client, pacer, SessionSignals.None, isSessionReady = { sessionReady }),
+            fetcher, images, pacer,
+            now = clock,
+            isVideoCached = { key -> cacheKeysAsked += key; videoCache.isFullyCached(key) },
+            sampleClip = sampleClip,
+        )
+    }
+
+    private suspend fun storePost() = db.mediaDao().upsert(listOf(media))
+
+    /** The post and three items with links from an earlier sync: two images, then a video whose link expires at [videoExpiresAt]. */
+    private suspend fun storeOldItems(
+        videoExpiresAt: Long? = START + 3_600_000,
+        firstImageUrl: String = oldImage(0),
+        videoUrl: String? = OLD_VIDEO,
+    ) {
+        storePost()
+        db.carouselItemDao().replace(
+            pk,
+            listOf(
+                CarouselItemEntity(pk, 0, MediaType.IMAGE, 1080, 1350, firstImageUrl, null, null),
+                CarouselItemEntity(pk, 1, MediaType.IMAGE, 1080, 1350, oldImage(1), null, null),
+                CarouselItemEntity(pk, 2, MediaType.VIDEO, 1080, 1920, oldImage(2), videoUrl, videoExpiresAt),
+            ),
+        )
+    }
+
+    private suspend fun rows() = db.carouselItemDao().items(pk)
+
+    private val mediaInfoCalls get() = fake.calls.filter { it.startsWith("mediaInfo:") }
+
+    private fun newImage(position: Int) = "fake://thumb/$pk-$position"
+
+    private fun newVideo(position: Int) = "fake://video/$pk-$position"
+
+    // --- items: stored, or the lazy fill ---
+
+    @Test
+    fun storedItemsAreReturnedWithoutARequest() = runTest {
+        storeOldItems()
+
+        val result = repository().items(media, CarouselRepository.Visit())
+
+        assertEquals(ItemsResult.Items(rows()), result)
+        assertEquals(3, (result as ItemsResult.Items).items.size)
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    @Test
+    fun aCarouselWithoutItemsFillsThemWithOneRequest() = runTest {
+        storePost()
+        val repository = repository()
+
+        val result = repository.items(media, CarouselRepository.Visit())
+
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        val items = assertIs<ItemsResult.Items>(result).items
+        assertEquals(rows(), items, "what was returned is what was stored")
+        assertEquals(List(post.carouselCount!!) { it }, items.map { it.position })
+        assertEquals(List(post.carouselCount!!) { newImage(it) }, items.map { it.imageUrl })
+        val video = items[2]
+        assertEquals(MediaType.VIDEO, video.type)
+        assertEquals(newVideo(2), video.videoUrl)
+        // R78's rule, as for reel links: a renewed link that names no expiry is good for an hour, so it is not asked for again at once.
+        assertTrue(video.videoUrlExpiresAt!! - START in RealVideoSourceResolver.ASSUMED_LIFETIME_MS..RealVideoSourceResolver.ASSUMED_LIFETIME_MS + 60_000)
+        assertNull(items[0].videoUrlExpiresAt, "an image has no video link to date")
+
+        assertEquals(ItemsResult.Items(items), repository.items(media, CarouselRepository.Visit()), "the next visit finds them stored")
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    /** Review Focus 2: one `mediaInfo` per visit, whatever came of it. A new visit may ask again. */
+    @Test
+    fun aSecondItemsCallInTheSameVisitSendsNothing() = runTest {
+        storePost()
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        fake.failures = FakeFailures { InstagramException.Transient() }
+
+        assertEquals(ItemsResult.CoverOnly(OFFLINE), repository.items(media, visit))
+        fake.failures = FakeFailures { null }
+        assertEquals(ItemsResult.CoverOnly(OFFLINE), repository.items(media, visit), "the visit spent its one request")
+        assertEquals(ItemImage.Failed(OFFLINE), repository.image(media, 0, visit))
+        assertEquals(VideoSource.Unavailable(OFFLINE), repository.video(media, 2, visit))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "nothing more was sent in this visit")
+        assertEquals(emptyList(), fetcher.fetched)
+
+        assertIs<ItemsResult.Items>(repository.items(media, CarouselRepository.Visit()), "a new visit asks again")
+        assertEquals(2, mediaInfoCalls.size)
+    }
+
+    /** R76: no usable session, no request; the post and its cover are left as they were. */
+    @Test
+    fun withoutASessionNothingIsSentAndTheCoverStays() = runTest {
+        storePost()
+        sessionReady = false
+
+        assertEquals(ItemsResult.CoverOnly(NEEDS_ATTENTION), repository().items(media, CarouselRepository.Visit()))
+
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(listOf(media), db.mediaDao().byPks(listOf(pk)), "the post and its cover are untouched")
+        assertEquals(emptyList(), rows())
+    }
+
+    @Test
+    fun offlineFillKeepsTheCover() = runTest {
+        storePost()
+        fake.failures = FakeFailures { InstagramException.Transient() }
+
+        assertEquals(ItemsResult.CoverOnly(OFFLINE), repository().items(media, CarouselRepository.Visit()))
+
+        assertEquals(listOf(media), db.mediaDao().byPks(listOf(pk)))
+        assertEquals(emptyList(), rows())
+    }
+
+    /** R4: a reply whose items are unknown (an unreadable child) stores nothing and keeps the cover. */
+    @Test
+    fun aReplyWithoutItemsKeepsTheCover() = runTest {
+        storePost()
+        onReply = { it?.copy(carouselItems = null) }
+
+        assertEquals(ItemsResult.CoverOnly(CANT_LOAD), repository().items(media, CarouselRepository.Visit()))
+
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(emptyList(), rows())
+    }
+
+    @Test
+    fun aGoneCarouselSaysSo() = runTest {
+        storePost()
+        fake.library.unsave(pk)
+
+        assertEquals(ItemsResult.CoverOnly(GONE), repository().items(media, CarouselRepository.Visit()))
+        assertEquals(listOf(media), db.mediaDao().byPks(listOf(pk)), "a failed fill never deletes the post or its cover")
+
+        // An item whose link was refused says so too, after its one renewal.
+        storeOldItems()
+        val visit = CarouselRepository.Visit()
+        assertEquals(ItemImage.Failed(GONE), repository().image(media, 0, visit))
+        assertEquals(2, mediaInfoCalls.size)
+        assertEquals(oldImage(0), rows()[0].imageUrl, "and its stored items stay")
+    }
+
+    @Test
+    fun aPostThatIsNotACarouselHasNoItemsToAskFor() = runTest {
+        val reel = mediaEntity(pk, MediaType.REEL)
+        db.mediaDao().upsert(listOf(reel))
+
+        assertEquals(ItemsResult.CoverOnly(null), repository().items(reel, CarouselRepository.Visit()))
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /** A post no longer in the library (Delete library ran while it was open) has nowhere to keep items: nothing is asked. */
+    @Test
+    fun aPostNoLongerInTheLibrarySendsNothing() = runTest {
+        val repository = repository()
+
+        assertEquals(ItemsResult.CoverOnly(CANT_LOAD), repository.items(media, CarouselRepository.Visit()))
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 0, CarouselRepository.Visit()))
+        assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(media, 2, CarouselRepository.Visit()))
+
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(emptyList(), fetcher.fetched)
+    }
+
+    /**
+     * The post's row went while its request was out (Delete library): storing its items would break the foreign key. That is
+     * a failure the viewer shows, never a crash, for the lazy fill and for the renewal alike.
+     */
+    @Test
+    fun aPostDeletedWhileItsRequestWasOutGivesTheCoverNotACrash() = runTest {
+        storePost()
+        onReply = { reply -> db.mediaDao().deleteAll(); reply }
+
+        assertEquals(ItemsResult.CoverOnly(CANT_LOAD), repository().items(media, CarouselRepository.Visit()))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(emptyList(), rows())
+
+        storeOldItems()
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository().image(media, 0, CarouselRepository.Visit()))
+        assertEquals(2, mediaInfoCalls.size)
+        assertEquals(emptyList(), rows())
+    }
+
+    /**
+     * A visit whose one request was cancelled on the way (the viewer left the item) has still spent it: the request may have
+     * gone out, so the visit sends no other.
+     */
+    @Test
+    fun aCancelledRequestStillSpendsTheVisit() = runTest {
+        storePost()
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        val requested = CompletableDeferred<Unit>()
+        onReply = { requested.complete(Unit); awaitCancellation() }
+        val job = launch { repository.items(media, visit) }
+        // The repository reads the post's row first (a real I/O thread), so the request is out a moment later, in real time.
+        withContext(Dispatchers.Default) { withTimeout(5_000) { requested.await() } }
+        job.cancel()
+        runCurrent()
+        assertTrue(job.isCancelled)
+        onReply = { it }
+
+        assertEquals(ItemsResult.CoverOnly(CANT_LOAD), repository.items(media, visit))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertIs<ItemsResult.Items>(repository.items(media, CarouselRepository.Visit()), "a new visit asks again")
+    }
+
+    // --- images ---
+
+    @Test
+    fun anImageIsDownloadedOnceAndThenServedFromTheStore() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> url.toByteArray() }
+        val repository = repository()
+
+        val first = assertIs<ItemImage.File>(repository.image(media, 0, CarouselRepository.Visit()))
+        assertContentEquals(oldImage(0).toByteArray(), File(first.path).readBytes())
+        assertEquals(images.path(pk, 0), first.path)
+
+        assertEquals(first, repository.image(media, 0, CarouselRepository.Visit()), "the next visit reads the file")
+        assertEquals(listOf(oldImage(0)), fetcher.fetched, "one download")
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * Review Focus 3: the stored link is refused (the fetcher's null is a 403, 404 or 410), so the post's links are renewed
+     * once: one `mediaInfo`, the items replaced, the image fetched again from its new link. When that fails too, the item
+     * says it can't load, and nothing in this visit asks Instagram again.
+     */
+    @Test
+    fun anExpiredImageLinkIsRenewedOncePerVisit() = runTest {
+        storeOldItems()
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 0, visit))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(listOf(oldImage(0), newImage(0)), fetcher.fetched, "the stored link, then the renewed one")
+        assertEquals(List(post.carouselCount!!) { newImage(it) }, rows().map { it.imageUrl }, "the items were replaced")
+
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 1, visit))
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 0, visit))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "no second request in this visit")
+        assertEquals(listOf(oldImage(0), newImage(0), newImage(1), newImage(0)), fetcher.fetched)
+        assertNull(images.path(pk, 0))
+    }
+
+    @Test
+    fun aRenewedLinkLoadsTheImageAndTheRestOfTheVisitUsesTheNewLinks() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> if (url.startsWith("fake://")) url.toByteArray() else null }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        val first = assertIs<ItemImage.File>(repository.image(media, 0, visit))
+        assertContentEquals(newImage(0).toByteArray(), File(first.path).readBytes())
+        assertIs<ItemImage.File>(repository.image(media, 1, visit))
+
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(listOf(oldImage(0), newImage(0), newImage(1)), fetcher.fetched, "item 1 went straight to its renewed link")
+    }
+
+    /** Two items refused at the same moment share the visit's one renewal; the second waits for it and uses its links. */
+    @Test
+    fun itemsRefusedTogetherShareOneRenewal() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> if (url.startsWith("fake://")) url.toByteArray() else null }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        val first = async { repository.image(media, 0, visit) }
+        val second = async { repository.image(media, 1, visit) }
+
+        assertIs<ItemImage.File>(first.await())
+        assertIs<ItemImage.File>(second.await())
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    /** Task 1: an item Instagram sent no image for has an empty link. Nothing is fetched for it; it is renewed like a refused one. */
+    @Test
+    fun anItemWithoutAnImageLinkIsRenewedOnceToo() = runTest {
+        storeOldItems(firstImageUrl = "")
+        fetcher.answer = { url -> url.toByteArray() }
+
+        assertIs<ItemImage.File>(repository().image(media, 0, CarouselRepository.Visit()))
+
+        assertEquals(listOf(newImage(0)), fetcher.fetched, "no download of an empty link")
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    @Test
+    fun anImageThatCannotBeDownloadedOfflineSaysSoWithoutARenewal() = runTest {
+        storeOldItems()
+        fetcher.answer = { throw java.io.IOException("no route") }
+
+        assertEquals(ItemImage.Failed(OFFLINE), repository().image(media, 0, CarouselRepository.Visit()))
+
+        assertEquals(emptyList(), fake.calls, "a renewal can't help when the CDN can't be reached")
+    }
+
+    /** A CDN 429 is not offline and not a dead link: the item can't load, and Instagram is not asked. */
+    @Test
+    fun aCdnRateLimitIsAFailureWithoutARenewal() = runTest {
+        storeOldItems()
+        fetcher.answer = { throw CdnRateLimited() }
+
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository().image(media, 0, CarouselRepository.Visit()))
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    @Test
+    fun anImageOfAPostWithoutStoredItemsFillsThemFirst() = runTest {
+        storePost()
+        fetcher.answer = { url -> url.toByteArray() }
+
+        assertIs<ItemImage.File>(repository().image(media, 1, CarouselRepository.Visit()))
+
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(listOf(newImage(1)), fetcher.fetched)
+        assertEquals(post.carouselCount, rows().size)
+    }
+
+    // --- videos ---
+
+    @Test
+    fun aFreshVideoLinkPlaysWithoutARequest() = runTest {
+        storeOldItems(videoExpiresAt = START + RealVideoSourceResolver.FRESH_MARGIN_MS + 1)
+
+        val source = repository().video(media, 2, CarouselRepository.Visit())
+
+        assertEquals(VideoSource.Play(Uri.parse(OLD_VIDEO), "${pk}_2"), source)
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(emptyList(), cacheKeysAsked, "a fresh link needs no cache check")
+    }
+
+    /** The same rule as reel links: a link with at most [RealVideoSourceResolver.FRESH_MARGIN_MS] left is renewed, once a visit. */
+    @Test
+    fun aStaleVideoLinkIsRenewedOnce() = runTest {
+        storeOldItems(videoExpiresAt = START + RealVideoSourceResolver.FRESH_MARGIN_MS)
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        assertEquals(VideoSource.Play(Uri.parse(newVideo(2)), "${pk}_2"), repository.video(media, 2, visit))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(newVideo(2), rows()[2].videoUrl)
+
+        assertEquals(VideoSource.Play(Uri.parse(newVideo(2)), "${pk}_2"), repository.video(media, 2, visit), "the renewed link is stored")
+        // The player was refused the renewed link: the visit's one renewal is spent.
+        assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(media, 2, visit, forceRefresh = true))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "no second request in this visit")
+
+        // A new visit may renew again; a reply that brings back the very link the player was refused is not played again.
+        assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(media, 2, CarouselRepository.Visit(), forceRefresh = true))
+        assertEquals(2, mediaInfoCalls.size)
+    }
+
+    /** Task 1: a video item without a link is renewed the same way. */
+    @Test
+    fun aVideoItemWithoutALinkIsRenewed() = runTest {
+        storeOldItems(videoUrl = null, videoExpiresAt = null)
+
+        assertEquals(VideoSource.Play(Uri.parse(newVideo(2)), "${pk}_2"), repository().video(media, 2, CarouselRepository.Visit()))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    /** R78: the bytes are on disk under the item's own key, so the link that names them is beside the point. */
+    @Test
+    fun aCachedVideoPlaysWhateverItsLinksAge() = runTest {
+        storeOldItems(videoExpiresAt = START - 1)
+        videoCache.cacheWholeFile("${pk}_2", File(tmp.root, "clip.mp4").apply { writeBytes(ByteArray(3_000) { it.toByte() }) })
+
+        assertEquals(VideoSource.Play(Uri.parse(OLD_VIDEO), "${pk}_2"), repository().video(media, 2, CarouselRepository.Visit()))
+
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(listOf("${pk}_2"), cacheKeysAsked, "the item's key, never the post's")
+    }
+
+    @Test
+    fun anImageItemIsNotAVideo() = runTest {
+        storeOldItems()
+
+        assertEquals(VideoSource.Unavailable(CANT_LOAD), repository().video(media, 0, CarouselRepository.Visit()))
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /** R3: Mock mode plays the bundled clip for every video item, under the item's own key, whatever its stored link. */
+    @Test
+    fun mockModeVideoItemsPlayTheBundledClip() = runTest {
+        storeOldItems(videoExpiresAt = START - 1)
+        val clip = Uri.parse("android.resource://io.github.yuriimurha.reels/raw/sample_clip")
+        val repository = repository(sampleClip = clip)
+
+        assertEquals(VideoSource.Play(clip, "${pk}_2"), repository.video(media, 2, CarouselRepository.Visit()))
+        assertEquals(VideoSource.Play(clip, "${pk}_2"), repository.video(media, 2, CarouselRepository.Visit(), forceRefresh = true))
+        assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(media, 0, CarouselRepository.Visit()))
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    // --- Delete library ---
+
+    /** Review Focus 5: Delete library removes the downloaded item images with the rows. */
+    @Test
+    fun deleteLibraryRemovesTheImages() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> url.toByteArray() }
+        val repository = repository()
+        val paths = listOf(0, 1).map { assertIs<ItemImage.File>(repository.image(media, it, CarouselRepository.Visit())).path }
+        val library = LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs")), carouselImages = images)
+
+        assertEquals(LibraryDeletion.COMPLETE, library.deleteLibrary())
+
+        for (path in paths) assertTrue(!File(path).exists(), "$path was left behind")
+        assertEquals(emptyList(), rows())
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 0, CarouselRepository.Visit()), "the post is gone, and so is its image")
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    @Test
+    fun imagesThatCannotBeRemovedAreReportedByDeleteLibrary() = runTest {
+        storeOldItems()
+        val dir = File(images.write(pk, 0, byteArrayOf(1))).parentFile!!
+        val library = LibraryRepository(db, ThumbnailStore(File(tmp.root, "thumbs")), carouselImages = images)
+        assertTrue(dir.setWritable(false), "precondition: a folder whose files cannot be removed")
+        try {
+            assertEquals(LibraryDeletion.CACHED_FILES_KEPT, library.deleteLibrary())
+        } finally {
+            dir.setWritable(true)
+        }
+        assertEquals(emptyList(), rows(), "the rows are gone all the same")
+    }
+
+    // --- fakes ---
+
+    private class StubFetcher : MediaFetcher {
+        val fetched: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        var answer: (String) -> ByteArray? = { null }
+
+        override suspend fun fetch(url: String): ByteArray? {
+            fetched += url
+            return answer(url)
+        }
+    }
+
+    private companion object {
+        const val START = 1_800_000_000_000L
+        const val OLD_VIDEO = "https://cdn.example.test/old/v2.mp4?oe=1"
+        const val CANT_LOAD = "Can't load this item"
+        const val OFFLINE = "Offline: this item isn't cached yet"
+        const val GONE = "This item is no longer available on Instagram"
+        const val NEEDS_ATTENTION = "Instagram session needs attention (Sync screen)"
+
+        fun oldImage(position: Int) = "https://cdn.example.test/old/i$position.jpg?oe=1"
+    }
+}

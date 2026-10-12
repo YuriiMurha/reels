@@ -10,13 +10,17 @@ import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.db.LegacyRequestLogCopy
 import io.github.yuriimurha.reels.data.db.ReelsDatabase
 import io.github.yuriimurha.reels.data.library.LibraryRepository
+import io.github.yuriimurha.reels.data.media.CarouselImageStore
+import io.github.yuriimurha.reels.data.media.CarouselRepository
 import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.HttpMediaFetcher
 import io.github.yuriimurha.reels.data.media.MediaEviction
+import io.github.yuriimurha.reels.data.media.PacedMediaInfo
 import io.github.yuriimurha.reels.data.media.RealVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
+import io.github.yuriimurha.reels.data.media.sampleClipUri
 import io.github.yuriimurha.reels.data.settings.SettingsDocIdStore
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
@@ -78,12 +82,16 @@ class AppContainer(context: Context) {
 
     val thumbnails: ThumbnailStore by lazy { ThumbnailStore(File(context.filesDir, if (usesFake) "thumbs" else "library-thumbs")) }
 
+    /** Carousel items' downloaded images (R1). Each library has its own folder, like its thumbnails and its video cache. */
+    val carouselImages: CarouselImageStore by lazy { CarouselImageStore(File(context.filesDir, if (usesFake) "fake-carousel" else "carousel")) }
+
     /** R84: the Instagram account this process's library belongs to, kept per library in [settings]. */
     val libraryAccount: LibraryAccount by lazy { StoredLibraryAccount(settings, SyncWorker.kindOf(usesFake)) }
 
     val library: LibraryRepository by lazy {
         LibraryRepository(
             db, thumbnails,
+            carouselImages = carouselImages,
             clearVideoCache = { videoCache.clear() },
             forgetAccount = { libraryAccount.forget() },
             // C-M5: "Couldn't refresh collection names" goes with the real library's names; Mock mode's delete leaves it alone.
@@ -124,6 +132,30 @@ class AppContainer(context: Context) {
                 isSessionReady = { session.state.first() is SessionState.Valid },
             )
         }
+    }
+
+    /**
+     * A carousel's items on demand (spec 2026-10-12 §3.3): stored ones as they are, else at most one `mediaInfo` a visit, on the
+     * interactive lane under the same session gates as the video resolver (R76/R79); images through the backend's CDN fetcher
+     * on its Pacer's CDN lane. Mock mode builds it over the fake client, fetcher and the fake backend's own Pacer, never the real
+     * transport or the real Pacer, and its video items play the bundled clip (R3).
+     */
+    val carouselRepository: CarouselRepository by lazy {
+        // Exhaustive on purpose, like syncEngine(): a new backend forces a decision about the session gate its requests pass.
+        val info = when (backend) {
+            is Backend.Fake -> PacedMediaInfo(backend.client, backend.pacer, SessionSignals.None, isSessionReady = { true })
+            is Backend.Real -> PacedMediaInfo(
+                backend.client, instagramPacer, session,
+                // No request to Instagram without a valid session (R76), as for video links.
+                isSessionReady = { session.state.first() is SessionState.Valid },
+            )
+        }
+        CarouselRepository(
+            db.carouselItemDao(), db.mediaDao(), info, backend.fetcher, carouselImages, backend.pacer,
+            isVideoCached = { key -> videoCache.isFullyCached(key) },
+            sampleClip = if (usesFake) sampleClipUri(context.packageName) else null,
+            log = debugLog,
+        )
     }
 
     val cookieStore: CookieStore by lazy { AndroidCookieStore() }
@@ -271,7 +303,7 @@ class AppContainer(context: Context) {
         }
         return SyncEngine(
             backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals,
-            eviction = MediaEviction { pks -> pks.forEach { videoCache.remove(it) } },
+            eviction = MediaEviction { pks -> pks.forEach { videoCache.remove(it); carouselImages.deleteFor(it) } },
             sessionUsable = sessionUsable,
             libraryAccount = libraryAccount,
             beforeRun = beforeRun,

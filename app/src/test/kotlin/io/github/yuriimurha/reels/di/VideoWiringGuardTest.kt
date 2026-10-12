@@ -58,11 +58,18 @@ class VideoWiringGuardTest {
         assertTrue("clearVideoCache" in libraries.single() && "videoCache.clear()" in libraries.single(), "Delete library: ${libraries.single()}")
     }
 
-    /** A video request carries no cookies (spec 8.3): nothing on the video path may touch the jar or Instagram's API client. */
+    /**
+     * A video request carries no cookies (spec 8.3), and neither does a carousel image (spec 2026-10-12 §4): nothing on the
+     * video or carousel path may touch the jar or Instagram's API client. Its one request goes through the client it is given.
+     */
     @Test
     fun theVideoPathNeverTouchesACookieJar() {
         val forbidden = Regex("""CookieHandler|CookieManager|CookieStore|cookieStore|CookieJar|instagramHttp|instagramTransport|InstagramTransport|WebViewTransport|setDefaultRequestProperties|"Cookie"""")
-        for (path in listOf("data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt", "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt")) {
+        for (path in listOf(
+            "data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt",
+            "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt",
+            "data/media/PacedMediaInfo.kt", "data/media/CarouselRepository.kt", "data/media/CarouselImageStore.kt",
+        )) {
             val hit = forbidden.find(main(path))
             assertTrue(hit == null, "$path must not use a cookie jar or the API client: ${hit?.value}")
         }
