@@ -106,6 +106,21 @@ class CarouselRepository(
         VideoSource.Unavailable(CANT_LOAD)
     }
 
+    /**
+     * R16: the player could not reach the CDN at all for the VIDEO item at [position] (no connection). Unless every byte of it
+     * is cached under `{pk}_{position}`, the item was never watched through and cannot play offline: it says
+     * "Offline: this item isn't cached yet". With all its bytes cached the connection was not what failed: "Can't load this
+     * item". Sends nothing.
+     */
+    suspend fun unreachable(media: MediaEntity, position: Int): VideoSource.Unavailable = try {
+        val cached = withContext(ioDispatcher) { isVideoCached("${media.pk}_$position") }
+        VideoSource.Unavailable(if (cached) CANT_LOAD else OFFLINE)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        VideoSource.Unavailable(CANT_LOAD)
+    }
+
     private suspend fun loadItems(media: MediaEntity, visit: Visit): ItemsResult {
         if (media.type != MediaType.CAROUSEL) return ItemsResult.CoverOnly(null)
         val stored = dao.items(media.pk)

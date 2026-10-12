@@ -209,9 +209,13 @@ class ViewerViewModel(
         return current.awaitOrNull { carousels.video(media, item.position, current.visit) }
     }
 
-    /** As [recover], for a carousel's video item: one forced renewal per item per visit, and the repository's own visit rule. */
+    /**
+     * As [recover], for a carousel's video item: one forced renewal per item per visit, and the repository's own visit rule. The
+     * player not reaching the CDN at all is no link problem: the item says it is offline unless its bytes are all cached (R16).
+     */
     private suspend fun recoverItem(media: MediaEntity, index: Int, error: Throwable): VideoSource {
         val current = carouselVisit?.takeIf { it.media.pk == media.pk } ?: return VideoSource.Unavailable(CANT_LOAD_ITEM)
+        if (isNetworkError(error)) return carousels.unreachable(media, index)
         if (!isExpiredLinkError(error) || !current.refreshed.add(index)) return VideoSource.Unavailable(CANT_LOAD_ITEM)
         val item = current.awaitItems()?.videoItemAt(index) ?: return VideoSource.Unavailable(CANT_LOAD_ITEM)
         // As for a post (R79): the next post's prefetch must not hold this renewal up in the interactive lane.

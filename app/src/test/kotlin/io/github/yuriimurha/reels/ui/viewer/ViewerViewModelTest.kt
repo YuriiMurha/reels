@@ -154,6 +154,9 @@ class ViewerViewModelTest {
     private val videoCacheAsked: MutableList<String> = Collections.synchronizedList(mutableListOf())
     private var sessionReady = true
 
+    /** What the video cache answers for every key: by default no video is fully cached. */
+    private var videoCached = false
+
     /** Mock mode's clip (R3): every video item plays it, under its own `pk_position` key. */
     private val sampleClip = Uri.parse("android.resource://io.github.yuriimurha.reels/raw/sample_clip")
 
@@ -165,7 +168,7 @@ class ViewerViewModelTest {
             db.carouselItemDao(), db.mediaDao(),
             PacedMediaInfo(client, pacer, SessionSignals.None, isSessionReady = { sessionReady }),
             fetcher, CarouselImageStore(File(tmp.root, "carousel")), pacer,
-            isVideoCached = { key -> videoCacheAsked += key; false },
+            isVideoCached = { key -> videoCacheAsked += key; videoCached },
             now = clock,
             sampleClip = sampleClip,
         )
@@ -386,6 +389,52 @@ class ViewerViewModelTest {
         assertEquals(VideoSource.Unavailable("Can't load this item"), viewModel.recover(carousel, playbackFailure(404), position = 2))
         assertEquals(emptyList(), videoCacheAsked)
         assertEquals(emptyList(), mediaInfoCalls)
+    }
+
+    /**
+     * R16: offline, a video item the owner never watched through cannot play, and says so as an unviewed image does. The player
+     * not reaching the CDN (no connection, or a timeout) is no link problem: nothing is renewed and nothing is sent.
+     */
+    @Test
+    fun anUnreachableVideoItemThatIsNotCachedSaysItIsOffline() = runTest {
+        storeCarousel()
+        val viewModel = viewModel(carousels = carouselRepository(this))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+        viewModel.onItemSettled(pk, 2)
+
+        for (failure in listOf(networkFailure(), networkFailure(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT))) {
+            assertEquals(VideoSource.Unavailable("Offline: this item isn't cached yet"), viewModel.recover(carousel, failure, position = 2))
+        }
+        assertEquals(listOf("${pk}_2", "${pk}_2"), videoCacheAsked, "the item's own cache key, each time")
+        assertEquals(emptyList(), mediaInfoCalls, "no renewal")
+
+        // Its renewal is untouched: a refused link still gets the visit's one renewal afterwards.
+        assertTrue(viewModel.recover(carousel, playbackFailure(403), position = 2) is VideoSource.Play)
+    }
+
+    /** R16's other side: with all its bytes cached, a video item's failure is not the connection, and keeps the general copy. */
+    @Test
+    fun anUnreachableVideoItemWhoseBytesAreCachedCannotLoad() = runTest {
+        storeCarousel()
+        videoCached = true
+        val viewModel = viewModel(carousels = carouselRepository(this))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+
+        assertEquals(VideoSource.Unavailable("Can't load this item"), viewModel.recover(carousel, networkFailure(), position = 2))
+        assertEquals(emptyList(), mediaInfoCalls)
+    }
+
+    /** R16 is for carousel items only: a reel that cannot reach the CDN keeps its own copy, and asks nothing. */
+    @Test
+    fun anUnreachableReelKeepsItsOwnCopy() = runTest {
+        val viewModel = viewModel()
+        val page = reel("m1", fresh)
+        viewModel.onSettled(page)
+
+        assertEquals(VideoSource.Unavailable("Can't play this video"), viewModel.recover(page, networkFailure()))
+        assertEquals(emptyList(), videoCacheAsked)
     }
 
     /** A refused item's renewal must not queue behind the next post's prefetch in the interactive lane (R79, as for reels). */
@@ -1453,6 +1502,10 @@ class ViewerViewModelTest {
 
     private fun playbackFailure(code: Int) =
         PlaybackException("source error", invalidResponse(code), PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS)
+
+    /** The player could not reach the CDN at all, as Media3 reports no connection ([code]) or a timeout. */
+    private fun networkFailure(code: Int = PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED) =
+        PlaybackException("source error", IOException("no connection"), code)
 
     private companion object {
         const val START = 1_800_000_000_000L

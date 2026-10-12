@@ -3,6 +3,7 @@ package io.github.yuriimurha.reels.ui.viewer
 import androidx.media3.datasource.HttpDataSource
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.media.VideoSource
@@ -81,6 +82,17 @@ suspend fun playSettledPages(
         afterResolved(page)
     }
 }
+
+/**
+ * True when [error] is the player not reaching the server at all: the connection failed (no network, no route, an unknown
+ * host) or timed out. A carousel video item whose bytes are not all cached then says it is offline (R16); a refused link or a
+ * decoder failure is not this.
+ */
+fun isNetworkError(error: Throwable): Boolean =
+    (error as? PlaybackException)?.errorCode in NETWORK_ERROR_CODES
+
+private val NETWORK_ERROR_CODES =
+    setOf(PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED, PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT)
 
 /**
  * True when [error] (or anything in its cause chain) is the CDN refusing a link with 403 or 410: the link expired or was

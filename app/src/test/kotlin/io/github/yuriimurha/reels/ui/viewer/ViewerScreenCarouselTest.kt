@@ -40,8 +40,12 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.IOException
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+
+/** The copy of an offline item never viewed (R16), written out: the tests check the words, not a constant. */
+private const val OFFLINE = "Offline: this item isn't cached yet"
 
 /**
  * The real viewer over the Mock-mode container (debug build, fake backend, the bundled clip), with a player the test can
@@ -242,6 +246,24 @@ class ViewerScreenCarouselTest {
         assertTrue(displayedDescription("Open on Instagram"), "the way out is right there")
         assertTrue(displayedWith(CAROUSEL_COUNTER_TAG, "3/3"), "still on the video item")
         assertEquals(listOf("stop", "clear"), player.events.takeLast(2), "the player was stopped and emptied")
+    }
+
+    /** R16: offline, a video item never watched through says so on the item, as an unviewed image does; not "Can't load this item". */
+    @Test
+    fun anUncachedVideoItemThePlayerCannotReachSaysItIsOffline() {
+        onCarouselA(items = 2)
+        awaitUntil("A's video item to play") { player.events.lastOrNull() == "set:${a.pk}_2" }
+
+        compose.runOnIdle {
+            val error = PlaybackException("offline", IOException("no connection"), PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED)
+            player.listeners.toList().forEach { it.onPlayerError(error) }
+        }
+
+        awaitUntil("the item's message") { compose.onAllNodesWithText(OFFLINE).fetchSemanticsNodes().isNotEmpty() }
+        compose.onAllNodesWithText(OFFLINE).assertCountEquals(1)
+        compose.onNodeWithText(OFFLINE).assertIsDisplayed()
+        compose.onAllNodesWithText("Can't load this item").assertCountEquals(0)
+        assertTrue(displayedWith(CAROUSEL_COUNTER_TAG, "3/3"), "still on the video item")
     }
 
     /** Like [awaitUntil], but answers whether [condition] came to hold, so the assertion after it can say what happened instead. */
