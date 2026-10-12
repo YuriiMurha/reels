@@ -84,13 +84,13 @@ class MediaGridTest {
      * tiles show whole between 50 and [END] dp. Two columns of 9:16 tiles about 340 dp tall each (with their two lines of
      * text), so the first two rows are whole (tiles 0 to 3) and the third (tiles 4 and 5) only begins.
      */
-    private fun showGrid() {
+    private fun showGrid(height: Int = 800) {
         compose.setContent {
             ReelsTheme {
                 state = rememberLazyStaggeredGridState()
                 scope = rememberCoroutineScope()
                 val items = flowOf(PagingData.from(List(40) { mediaEntity("m$it", thumbPath = null) })).collectAsLazyPagingItems()
-                Box(Modifier.size(300.dp, 800.dp)) {
+                Box(Modifier.size(300.dp, height.dp)) {
                     MediaGrid(items, onOpen = {}, state = state, contentPadding = PaddingValues(top = 50.dp, bottom = 30.dp))
                 }
             }
@@ -151,6 +151,27 @@ class MediaGridTest {
         assertTrue(before.top < px(50) && before.bottom > px(50), "the setup: tile 0 is partly under the top bar, $before")
         run { state.revealTile(0) }
         assertNear(px(50), tile(0)!!.top, "top")
+    }
+
+    /**
+     * Task 6 minor 3: in a grid shorter than a tile (landscape, a short split-screen window: here 300 dp, so tiles show between
+     * 50 and 270 dp, against tiles about 340 dp tall) no tile is ever wholly in view. Going back to one aligns it by its top: the
+     * picture's top stays in view instead of being scrolled under the top bar to bring its bottom in.
+     */
+    @Test
+    fun revealTileAlignsATileTallerThanTheVisibleRunByItsTop() {
+        showGrid(height = 300)
+        val before = tile(0)!!
+        assertTrue(before.height > px(300 - 50 - 30), "the setup: tile 0 is taller than the visible run, $before")
+        assertNear(px(50), before.top, "the setup: tile 0 starts at the top")
+        run { state.revealTile(0) }
+        assertNear(px(50), tile(0)!!.top, "tile 0 stays aligned by its top")
+
+        run { state.scrollBy(px(200)) }
+        val second = tile(2)!!
+        assertTrue(second.top > px(50) && second.top < px(270), "the setup: tile 2's top is in view, its bottom is not, $second")
+        run { state.revealTile(2) }
+        assertNear(px(50), tile(2)!!.top, "tile 2 aligns by its top")
     }
 
     private companion object {

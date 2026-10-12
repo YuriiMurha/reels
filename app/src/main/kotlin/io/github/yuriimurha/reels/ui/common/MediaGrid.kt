@@ -89,7 +89,9 @@ fun MediaTile(media: MediaEntity?, onClick: () -> Unit, modifier: Modifier = Mod
 /**
  * Brings the tile at [index] into view: the one of the post the viewer closed on, which the post shrinks back into (Motion.kt).
  * A tile already wholly in view stays where it is (going back from the post that was opened lands where it was tapped); a tile
- * partly hidden scrolls just enough; any other scrolls to the top. The scroll is instant, so the shrink retargets at once.
+ * partly hidden scrolls just enough; any other scrolls to the top. A tile taller than the visible run (landscape, a short
+ * split-screen window) can never be wholly in view: it aligns by its top, never scrolled past it. The scroll is instant, so the
+ * shrink retargets at once.
  */
 suspend fun LazyStaggeredGridState.revealTile(index: Int) {
     // What is in view comes from the grid's first layout after its return. The caller's effect has started after it in every run
@@ -103,7 +105,7 @@ suspend fun LazyStaggeredGridState.revealTile(index: Int) {
     val end = info.viewportEndOffset - info.afterContentPadding
     when {
         tile == null -> scrollToItem(index)
-        tile.offset.y < 0 -> scrollBy(tile.offset.y.toFloat())
+        tile.offset.y < 0 || tile.size.height > end -> scrollBy(tile.offset.y.toFloat())
         tile.offset.y + tile.size.height > end -> scrollBy((tile.offset.y + tile.size.height - end).toFloat())
     }
 }
