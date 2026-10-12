@@ -115,6 +115,16 @@ class AppContainer(context: Context) {
         VideoCache(File(context.cacheDir, if (usesFake) "fake-video" else "video"), StandaloneDatabaseProvider(context))
     }
 
+    /**
+     * R20: a carousel whose stored items changed shape (a slide deleted, a type swapped) loses its downloaded item images and
+     * its items' cached videos, which are keyed by position; the sync and a renewal both use this. Never the post's own video
+     * or thumbnail. Each step for each pk on its own, as the reconcile's eviction.
+     */
+    private val carouselItemEviction: MediaEviction = MediaEviction.eachStep(
+        { videoCache.removeCarouselItems(it) },
+        { carouselImages.deleteFor(it) },
+    )
+
     /** The WebView's own user agent for video requests, read once and only when a video is first played. */
     val videoUserAgent: String by lazy { WebSettings.getDefaultUserAgent(context) }
 
@@ -155,6 +165,7 @@ class AppContainer(context: Context) {
             isVideoCached = { key -> videoCache.isFullyCached(key) },
             sampleClip = if (usesFake) sampleClipUri(context.packageName) else null,
             log = debugLog,
+            itemEviction = carouselItemEviction,
         )
     }
 
@@ -309,6 +320,7 @@ class AppContainer(context: Context) {
                 { videoCache.removeCarouselItems(it) }, // R6: its carousel items' videos, cached under `{pk}_{position}`
                 { carouselImages.deleteFor(it) },
             ),
+            carouselEviction = carouselItemEviction,
             sessionUsable = sessionUsable,
             libraryAccount = libraryAccount,
             beforeRun = beforeRun,

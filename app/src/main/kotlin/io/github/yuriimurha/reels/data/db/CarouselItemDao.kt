@@ -31,3 +31,15 @@ interface CarouselItemDao {
     @Query("DELETE FROM carousel_item")
     suspend fun deleteAll()
 }
+
+/**
+ * R20: whether [new], in place of [old], puts something else at a position: the count changed, or the type at some position
+ * did (a slide deleted, an image and a video swapped). A carousel's downloaded images and cached item videos are keyed by
+ * position (`{pk}_{position}`), so they must go then, or the shifted positions would show the old ones. Nothing stored before
+ * ([old] empty) has nothing cached to go stale. A reorder that keeps every position's type is not seen: a known gap, since
+ * telling it would mean comparing links, whose CDN paths may not stay the same when Instagram signs them again.
+ */
+fun itemShapeChanged(old: List<CarouselItemEntity>, new: List<CarouselItemEntity>): Boolean =
+    old.isNotEmpty() && old.shape() != new.shape()
+
+private fun List<CarouselItemEntity>.shape() = map { it.position to it.type }.sortedBy { it.first }

@@ -439,6 +439,26 @@ class BackendWiringGuardTest {
         assertTrue(Regex("""\bcarouselImages\s*=\s*carouselImages\b""").containsMatchIn(library), "Delete library: $library")
     }
 
+    /**
+     * R20: a carousel whose items changed shape loses its item images and its items' cached videos, never the post's own
+     * video, and the sync and a renewal drop the same things (`SyncEngineTest`, `CarouselRepositoryTest` run the rule).
+     */
+    @Test
+    fun aReshapedCarouselDropsItsItemMediaInTheSyncAndOnARenewal() {
+        val container = main("di/AppContainer.kt")
+        val declaration = Regex("""val carouselItemEviction\b[^=]*=\s*MediaEviction\.eachStep\(""").find(container)
+        assertTrue(declaration != null, "carouselItemEviction is one MediaEviction.eachStep")
+        val steps = callArguments(container.substring(declaration.range.first), "MediaEviction.eachStep(").first()
+        for (call in listOf("videoCache.removeCarouselItems", "carouselImages.deleteFor")) {
+            assertTrue(Regex("""\{\s*${Regex.escape(call)}\(\s*it\s*\)\s*}""").containsMatchIn(steps), "the drop must have { $call(it) }: $steps")
+        }
+        assertFalse(Regex("""videoCache\.remove\(""").containsMatchIn(steps), "never the post's own video: $steps")
+        val engine = callArguments(container, "SyncEngine(").single()
+        assertTrue(Regex("""\bcarouselEviction\s*=\s*carouselItemEviction\b""").containsMatchIn(engine), "the sync: $engine")
+        val repository = callArguments(container, "CarouselRepository(").single()
+        assertTrue(Regex("""\bitemEviction\s*=\s*carouselItemEviction\b""").containsMatchIn(repository), "a renewal: $repository")
+    }
+
     @Test
     fun theSyncScreenShowsTheBackendsPacer() {
         val screen = main("ui/sync/SyncScreen.kt")

@@ -118,6 +118,7 @@ class SyncEngineTest {
         store: ThumbnailStore = thumbs,
         sessionSignals: SessionSignals = signals,
         eviction: MediaEviction = MediaEviction { },
+        carouselEviction: MediaEviction = MediaEviction { },
         sessionUsable: suspend (Int) -> RunSession = { RunSession.USABLE },
         beforeRun: suspend () -> Unit = {},
         repairForced: suspend () -> Boolean = { false },
@@ -128,7 +129,7 @@ class SyncEngineTest {
         val pacer = Pacer(PacingPolicy.Fast, log, cooldowns, Random(1), now = { testScheduler.currentTime })
         return SyncEngine(
             client, pacer, db, mediaFetcher, store, sessionSignals, Random(1), now = { testScheduler.currentTime },
-            eviction = eviction, sessionUsable = sessionUsable, libraryAccount = account, beforeRun = beforeRun,
+            eviction = eviction, carouselEviction = carouselEviction, sessionUsable = sessionUsable, libraryAccount = account, beforeRun = beforeRun,
             setNamesStale = setNamesStale, repairForced = repairForced, clearRepairForced = clearRepairForced,
             log = { engineLog += it },
         )
@@ -2346,6 +2347,79 @@ class SyncEngineTest {
         assertEquals(SyncStatus.PAUSED, run.status)
         assertTrue(run.lastError.orEmpty().startsWith("Unexpected error"), "the injected failure stopped the run: ${run.lastError}")
         assertEquals(stored, storedItems(carousel.pk), "the page rolled back, and its items with it")
+    }
+
+    // R20: a carousel's item images and item videos are cached by position, so a new item list of another shape drops them.
+
+    /** What the engine's carousel eviction was told. */
+    private val reshaped = mutableListOf<String>()
+
+    private fun TestScope.recordingReshapes(client: InstagramClient) = engine(client, carouselEviction = { reshaped += it })
+
+    /** A poster deletes a slide: the positions after it now show other items, so the post's cached item media go. */
+    @Test
+    fun aCarouselThatLostASlideDropsItsCachedItemMediaOnceThePageIsCommitted() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val fewer = carousel.carouselItems!!.filterNot { it.position == 1 }.map { it.copy(position = if (it.position > 1) it.position - 1 else it.position) }
+
+        assertEquals(SyncStatus.DONE, runSync(recordingReshapes(CarouselItemsOf(fake, carousel.pk, fewer)), SyncMode.FULL).status)
+
+        assertEquals(fewer.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: the new set is stored")
+        assertEquals(listOf(carousel.pk), reshaped, "exactly that post")
+    }
+
+    /** The same items with renewed links (the usual case): the images and videos the owner viewed stay, so they show offline. */
+    @Test
+    fun aCarouselWhoseItemsKeepTheirShapeKeepsItsCachedItemMedia() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val renewed = carousel.carouselItems!!.map { it.copy(imageUrl = "${it.imageUrl}-renewed", videoUrl = it.videoUrl?.let { url -> "$url-renewed" }) }
+
+        assertEquals(SyncStatus.DONE, runSync(recordingReshapes(CarouselItemsOf(fake, carousel.pk, renewed)), SyncMode.FULL).status)
+
+        assertEquals(renewed.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: the renewed links are stored")
+        assertEquals(emptyList(), reshaped, "nothing dropped: no post's items changed shape")
+    }
+
+    /** The same count with an image where a video was: that position's cached media is another item's, so they go. */
+    @Test
+    fun aCarouselWhoseItemChangedTypeDropsItsCachedItemMedia() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val swapped = carousel.carouselItems!!.map {
+            if (it.type == MediaType.VIDEO) it.copy(type = MediaType.IMAGE, videoUrl = null, videoUrlExpiresAt = null) else it
+        }
+
+        assertEquals(SyncStatus.DONE, runSync(recordingReshapes(CarouselItemsOf(fake, carousel.pk, swapped)), SyncMode.FULL).status)
+
+        assertEquals(listOf(carousel.pk), reshaped)
+    }
+
+    /** The drop runs after the commit, as the reconcile's eviction does: a page that rolls back keeps its old items, and drops nothing. */
+    @Test
+    fun aPageThatRollsBackDropsNoCachedItemMedia() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_memberships BEFORE INSERT ON collection_media BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+        )
+
+        val run = runSync(recordingReshapes(CarouselItemsOf(fake, carousel.pk, carousel.carouselItems!!.take(1))), SyncMode.FULL)
+
+        assertEquals(SyncStatus.PAUSED, run.status)
+        assertEquals(emptyList(), reshaped)
+    }
+
+    /** A failing drop must not strand the run: the items are already committed. */
+    @Test
+    fun aFailingCarouselDropDoesNotStopTheRun() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val engine = engine(CarouselItemsOf(fake, carousel.pk, carousel.carouselItems!!.take(1)), carouselEviction = { throw java.io.IOException("disk full") })
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+        assertEquals(1, storedItems(carousel.pk).size)
     }
 
     private class ThrowingSignals : SessionSignals {

@@ -13,6 +13,7 @@ import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import io.github.yuriimurha.reels.instagram.fake.FakeFailures
 import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
@@ -104,6 +105,8 @@ class CarouselRepositoryTest {
             now = clock,
             isVideoCached = { key -> cacheKeysAsked += key; videoCache.isFullyCached(key) },
             sampleClip = sampleClip,
+            // The container's R20 steps, over this test's own cache and image store.
+            itemEviction = MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { images.deleteFor(it) }),
         )
     }
 
@@ -418,6 +421,39 @@ class CarouselRepositoryTest {
     }
 
     /**
+     * D3: a FULL sync's reconcile unsaves the post while its image is on the way. The row stays (marked removed) and the
+     * reconcile's eviction has already run, so a file written now would stay until Delete library: it is not written.
+     */
+    @Test
+    fun anImageOfAPostUnsavedWhileItDownloadedIsNotKept() = runTest {
+        storeOldItems()
+        fetcher.answer = { url ->
+            db.mediaDao().markRemoved(listOf(pk), START)
+            images.deleteFor(pk) // the reconcile's eviction, right after its commit
+            url.toByteArray()
+        }
+
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository().image(media, 1, CarouselRepository.Visit()))
+
+        assertNull(images.path(pk, 1))
+        assertTrue(File(tmp.root, "carousel").list().isNullOrEmpty(), "no file was written")
+    }
+
+    /** D3/C3: a post a sync found unsaved is not in any list the viewer shows, so a visit still open on it asks Instagram nothing. */
+    @Test
+    fun anUnsavedPostSendsNothing() = runTest {
+        storePost()
+        db.mediaDao().markRemoved(listOf(pk), START)
+
+        assertEquals(ItemsResult.CoverOnly(CANT_LOAD), repository().items(media, CarouselRepository.Visit()), "no fill")
+        storeOldItems(videoExpiresAt = START - 1)
+        db.mediaDao().markRemoved(listOf(pk), START)
+        assertEquals(VideoSource.Unavailable(CANT_LOAD), repository().video(media, 2, CarouselRepository.Visit()), "no renewal")
+
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
      * Review Focus 3: the stored link is refused (the fetcher's null is a 403, 404 or 410), so the post's links are renewed
      * once: one `mediaInfo`, the items replaced, the image fetched again from its new link. When that fails too, the item
      * says it can't load, and nothing in this visit asks Instagram again.
@@ -636,6 +672,74 @@ class CarouselRepositoryTest {
         assertEquals(VideoSource.Play(clip, "${pk}_2"), repository.video(media, 2, CarouselRepository.Visit(), forceRefresh = true))
         assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(media, 0, CarouselRepository.Visit()))
         assertEquals(emptyList(), fake.calls)
+    }
+
+    // --- R20: items of another shape take the post's cached item media with them ---
+
+    /** What earlier visits left: the images of items 0 and 1, and every byte of item 2's video. */
+    private fun cacheEveryItem() {
+        images.write(pk, 0, byteArrayOf(0))
+        images.write(pk, 1, byteArrayOf(1))
+        videoCache.cacheWholeFile("${pk}_2", File(tmp.root, "clip.mp4").apply { writeBytes(ByteArray(3_000) { it.toByte() }) })
+    }
+
+    /** Which of item 0's image, item 1's image and item 2's video are still cached. */
+    private fun cachedItems() = listOf(images.path(pk, 0) != null, images.path(pk, 1) != null, videoCache.isFullyCached("${pk}_2"))
+
+    /** The fake's first three items (image, image, video: the stored shape), changed by [change] on their way back. */
+    private fun replyWithFirstThree(change: (List<RemoteCarouselItem>) -> List<RemoteCarouselItem> = { it }) {
+        onReply = { reply -> reply?.copy(carouselItems = change(reply.carouselItems!!.take(3))) }
+    }
+
+    /** The poster deleted slide 1: the video moved to position 1, so position 1's image and position 2's video are stale. */
+    @Test
+    fun aRenewalThatLostASlideDropsTheCachedItemMedia() = runTest {
+        storeOldItems()
+        cacheEveryItem()
+        replyWithFirstThree { items -> items.filterNot { it.position == 1 }.map { if (it.position == 2) it.copy(position = 1) else it } }
+
+        repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+
+        assertEquals(listOf(MediaType.IMAGE, MediaType.VIDEO), rows().map { it.type }, "precondition: the new set is stored")
+        assertEquals(listOf(false, false, false), cachedItems(), "every image and video of the post's items went")
+    }
+
+    /** The usual renewal: the same items with new links. What the owner viewed stays, so it still shows offline. */
+    @Test
+    fun aRenewalWithTheSameItemsKeepsTheCachedItemMedia() = runTest {
+        storeOldItems()
+        cacheEveryItem()
+        replyWithFirstThree()
+
+        assertEquals(VideoSource.Play(Uri.parse(newVideo(2)), "${pk}_2"), repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true))
+
+        assertEquals(newImage(0), rows()[0].imageUrl, "precondition: the renewed links are stored")
+        assertEquals(listOf(true, true, true), cachedItems(), "nothing dropped")
+    }
+
+    /** The same count, but a video where an image was: position 1's image is another item's now, so the post's cached media go. */
+    @Test
+    fun aRenewalThatChangedAnItemsTypeDropsTheCachedItemMedia() = runTest {
+        storeOldItems()
+        cacheEveryItem()
+        replyWithFirstThree { items ->
+            items.map { if (it.position == 1) it.copy(type = MediaType.VIDEO, videoUrl = newVideo(1), videoUrlExpiresAt = null) else it }
+        }
+
+        repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+
+        assertEquals(listOf(MediaType.IMAGE, MediaType.VIDEO, MediaType.VIDEO), rows().map { it.type }, "precondition: stored")
+        assertEquals(listOf(false, false, false), cachedItems())
+    }
+
+    /** The lazy fill has nothing stored to compare with, and so nothing cached to drop. */
+    @Test
+    fun aFillDropsNothing() = runTest {
+        storePost()
+        images.write(pk, 0, byteArrayOf(0))
+
+        assertIs<ItemsResult.Items>(repository().items(media, CarouselRepository.Visit()))
+        assertTrue(images.path(pk, 0) != null)
     }
 
     // --- Delete library ---

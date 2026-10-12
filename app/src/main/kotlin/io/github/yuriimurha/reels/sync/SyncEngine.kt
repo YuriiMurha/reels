@@ -11,6 +11,7 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.db.ThumbnailTarget
+import io.github.yuriimurha.reels.data.db.itemShapeChanged
 import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.data.media.CdnRateLimited
 import io.github.yuriimurha.reels.data.media.MediaEviction
@@ -48,6 +49,12 @@ class SyncEngine(
     private val now: () -> Long = System::currentTimeMillis,
     /** Told which items a reconcile removed, so their cached videos go with their thumbnails (spec 8.3). */
     private val eviction: MediaEviction = MediaEviction { },
+    /**
+     * R20: told which carousels a page stored items of another shape for ([itemShapeChanged]: a slide deleted, a type swapped),
+     * once that page is committed, so their downloaded item images and cached item videos (keyed by position) go. Never the
+     * post itself: its row, cover and items stay.
+     */
+    private val carouselEviction: MediaEviction = MediaEviction { },
     /**
      * R82: asked from inside the Pacer's gate right before every request (the session check included), with the epoch the run
      * started under. Anything but [RunSession.USABLE] stops the run with nothing more sent: a challenge or an expiry another
@@ -410,6 +417,7 @@ class SyncEngine(
             cursor = outcome.cursor
             outcome.removedPks.forEach(thumbnails::delete)
             evictVideos(outcome.removedPks)
+            dropCarouselItemMedia(outcome.reshapedCarousels)
             cacheThumbnails(progress, outcome.needThumbnails.map { ThumbnailTarget(it.pk, it.thumbnailUrl) })
         }
         progress.update { it.copy(collectionsDone = it.collectionsDone + 1) }
@@ -428,14 +436,27 @@ class SyncEngine(
         }
     }
 
+    /** R20, after the page that stored [pks]' new items is committed: the same housekeeping rule as [evictVideos]. */
+    private fun dropCarouselItemMedia(pks: List<String>) {
+        if (pks.isEmpty()) return
+        try {
+            carouselEviction.evict(pks)
+        } catch (e: Exception) {
+            // Intentionally ignored: the items are committed; a stale file or cached video only takes space.
+        }
+    }
+
     private class PageOutcome(
         val cursor: SyncCursorEntity,
         val needThumbnails: List<RemoteMedia>,
         val removedPks: List<String>,
+        /** Carousels whose stored items changed shape on this page (R20). */
+        val reshapedCarousels: List<String>,
     )
 
     /**
-     * One page in one transaction: media, carousel items, memberships, cursor and (at the end of a FULL walk) reconcile.
+     * One page in one transaction: media, carousel items, memberships, cursor and (at the end of a FULL walk) reconcile. Files
+     * are never touched here: what the page makes stale (a removed post's, a reshaped carousel's) goes once it is committed.
      * With [placeholders] (the names are the last good ones), a collection an item lists that none of them names is added
      * ([addPlaceholder]).
      */
@@ -456,8 +477,12 @@ class SyncEngine(
 
         mediaDao.upsert(page.items.map { it.toEntity(existing[it.pk], at) })
         // A carousel's items, with their post. null or an empty list says nothing about them (R2): the stored ones stay.
+        val reshaped = mutableListOf<String>()
         page.items.forEach { item ->
-            item.carouselItems?.takeIf { it.isNotEmpty() }?.let { carouselDao.replace(item.pk, it.map { c -> c.toEntity(item.pk) }) }
+            val remote = item.carouselItems?.takeIf { it.isNotEmpty() } ?: return@forEach
+            val items = remote.map { c -> c.toEntity(item.pk) }
+            if (itemShapeChanged(carouselDao.items(item.pk), items)) reshaped += item.pk
+            carouselDao.replace(item.pk, items)
         }
         val memberships = page.items.mapIndexed { offset, item ->
             val known = members[item.pk]
@@ -504,7 +529,7 @@ class SyncEngine(
         progress.update { r ->
             r.copy(newItems = r.newItems + page.items.count { it.pk !in existing }, seenItems = r.seenItems + page.items.size)
         }
-        return PageOutcome(next, page.items.filter { existing[it.pk]?.thumbPath == null }, removed)
+        return PageOutcome(next, page.items.filter { existing[it.pk]?.thumbPath == null }, removed, reshaped)
     }
 
     /**

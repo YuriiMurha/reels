@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.data.db.CarouselItemDao
 import io.github.yuriimurha.reels.data.db.CarouselItemEntity
 import io.github.yuriimurha.reels.data.db.MediaDao
 import io.github.yuriimurha.reels.data.db.MediaEntity
+import io.github.yuriimurha.reels.data.db.itemShapeChanged
 import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
@@ -65,6 +66,11 @@ class CarouselRepository(
     private val sampleClip: Uri? = null,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val log: ((String) -> Unit)? = null,
+    /**
+     * R20: told the post whose renewal stored items of another shape ([itemShapeChanged]), once they are stored, so its
+     * downloaded item images and cached item videos (keyed by position) go. The container's is the sync's own.
+     */
+    private val itemEviction: MediaEviction = MediaEviction { },
 ) {
     /**
      * One visit of a post, from the moment the viewer shows it until it leaves it: the visit's one `mediaInfo`, and what it
@@ -195,8 +201,9 @@ class CarouselRepository(
     }
 
     private suspend fun renew(media: MediaEntity, purpose: String): Renewal {
-        // A post no longer in the library (Delete library ran while it was open) has nowhere to keep items: nothing is asked.
-        if (mediaDao.byPks(listOf(media.pk)).isEmpty()) return SPENT
+        // A post no longer in the library (Delete library ran while it was open, or a sync found it unsaved) needs no items:
+        // nothing is asked.
+        if (!isLive(media.pk)) return SPENT
         val outcome = info.fetch(media.pk)
         log?.invoke("$purpose: ${outcome.summary()}")
         return when (outcome) {
@@ -209,15 +216,30 @@ class CarouselRepository(
     /**
      * The post's fresh items, in place of whatever was stored. A reply without them stores nothing and keeps the stored ones.
      * When the post's row went while the request was out (Delete library), the foreign key refuses the write: that throws, into
-     * the public call's guard, which answers "Can't load this item"; the visit stays spent.
+     * the public call's guard, which answers "Can't load this item"; the visit stays spent. Items of another shape than the
+     * stored ones (R20) take the post's cached item media with them, once they are stored.
      */
     private suspend fun store(pk: String, remote: List<RemoteCarouselItem>?): Renewal {
-        // R4: the reply does not say what the items are (no carousel_media, an unreadable child).
+        // R2 and R4: the reply does not say what the items are (no carousel_media, an empty one, an unreadable child). An empty
+        // list is a shape blip far more often than a carousel without items, so it never replaces the stored ones with nothing.
         if (remote.isNullOrEmpty()) return Renewal.Failed(CANT_LOAD)
         val fetchedAt = now()
         val items = remote.map { it.toEntity(pk).withAssumedLifetime(fetchedAt) }.sortedBy { it.position }
+        val reshaped = itemShapeChanged(dao.items(pk), items)
         dao.replace(pk, items)
+        if (reshaped) dropItemMedia(pk)
         return Renewal.Items(items)
+    }
+
+    /** R20's housekeeping, off the caller's thread: the items are stored, so a file or a cached video left behind only takes space. */
+    private suspend fun dropItemMedia(pk: String) {
+        try {
+            withContext(ioDispatcher) { itemEviction.evict(listOf(pk)) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Intentionally ignored, as the sync's eviction is.
+        }
     }
 
     /** Downloads [url] on the CDN lane into the image store. An empty [url] (Instagram sent no image) is refused without a request. */
@@ -231,11 +253,15 @@ class CarouselRepository(
             return failedImage(Download.Offline, "offline")
         }
         if (bytes == null) return failedImage(Download.Refused, "refused")
-        // A post deleted while its image was on the way (Delete library) keeps no file behind. The check and the write are not
-        // one step, so a delete in between can still leave one; it only takes space until the next Delete library.
-        if (mediaDao.byPks(listOf(pk)).isEmpty()) return failedImage(Download.Failed, "post gone")
+        // A post deleted (Delete library) or unsaved (a sync's reconcile, whose eviction may already have run) while its image
+        // was on the way keeps no file behind: nothing would remove it later. The check and the write are not one step, so a
+        // delete in between can still leave one; it only takes space until the next Delete library.
+        if (!isLive(pk)) return failedImage(Download.Failed, "post gone")
         return Download.Stored(withContext(ioDispatcher) { images.write(pk, position, bytes) })
     }
+
+    /** True while the post [pk] is in the library: stored, and not marked removed. Every viewer list shows only such posts. */
+    private suspend fun isLive(pk: String): Boolean = mediaDao.byPks(listOf(pk)).singleOrNull()?.let { it.removedAt == null } == true
 
     private fun failedImage(download: Download, reason: String): Download {
         log?.invoke("carousel image failed ($reason)")
