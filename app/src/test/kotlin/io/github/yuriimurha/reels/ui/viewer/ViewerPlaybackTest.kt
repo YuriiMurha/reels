@@ -1,24 +1,40 @@
 package io.github.yuriimurha.reels.ui.viewer
 
 import android.net.Uri
+import android.os.Looper
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.media.VideoSource
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.testutil.KotlinSource
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
+import java.io.File
+import java.util.Collections
+import kotlin.concurrent.thread
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * The settle flow over the playable unit (Review Focus 1): a post, or one item of a carousel post. The player only ever
@@ -224,4 +240,63 @@ class ViewerPlaybackTest {
     }
 
     private data class PlaceholderKey(val index: Int)
+
+    /** Every call the viewer makes on the player, marked when it did not come on the main thread (Media3 allows no other). */
+    private class ThreadCheckingPlayer(player: Player) : ForwardingPlayer(player) {
+        val calls: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
+        private fun record(call: String) {
+            calls += if (Looper.myLooper() == Looper.getMainLooper()) call else "$call off the main thread (${Thread.currentThread().name})"
+        }
+
+        override fun stop() {
+            record("stop")
+            super.stop()
+        }
+
+        override fun clearMediaItems() {
+            record("clear")
+            super.clearMediaItems()
+        }
+    }
+
+    /**
+     * Task 6 minor 1: the viewer's two player-calling effects run through [onMainThread], so the player is only ever called on
+     * the main thread, even when what wakes the effect resumes it on another thread (here, a channel fed from a background
+     * thread, with the effect started on the IO dispatcher).
+     */
+    @Test
+    fun thePlayerEffectsCallThePlayerOnTheMainThreadWhateverWakesThem() {
+        val exo = ExoPlayer.Builder(ApplicationProvider.getApplicationContext()).build()
+        val player = ThreadCheckingPlayer(exo)
+        val wakes = Channel<Int>()
+        val scope = CoroutineScope(Dispatchers.IO + Job())
+        try {
+            val effect = scope.launch { onMainThread { repeat(3) { wakes.receive(); player.stop(); player.clearMediaItems() } } }
+            thread(name = "waker") { runBlocking { repeat(3) { wakes.send(it) } } }
+            // Robolectric's main looper is this test's thread: run it until the effect is done.
+            val deadline = System.currentTimeMillis() + 10_000
+            while (!effect.isCompleted) {
+                check(System.currentTimeMillis() < deadline) { "the effect never finished: ${player.calls}" }
+                shadowOf(Looper.getMainLooper()).idle()
+                Thread.sleep(5)
+            }
+            assertEquals(List(3) { listOf("stop", "clear") }.flatten(), player.calls.toList())
+        } finally {
+            scope.cancel()
+            exo.release()
+        }
+    }
+
+    /** ...and both of the screen's effects that call the player go through it (the source is pinned: no semantics can see a thread). */
+    @Test
+    fun bothOfTheScreensPlayerEffectsRunOnTheMainThread() {
+        val screen = KotlinSource.code(File("src/main/kotlin/io/github/yuriimurha/reels/ui/viewer/ViewerScreen.kt").readText())
+        for (call in listOf("viewModel.followSettledPages(", "playIfStillSettled(")) {
+            val at = screen.indexOf(call)
+            assertTrue(at >= 0, "ViewerScreen no longer calls $call: update this pin")
+            val effect = screen.substring(screen.lastIndexOf("LaunchedEffect(", at), at)
+            assertTrue("onMainThread {" in effect, "the effect around $call must run in onMainThread { }: $effect")
+        }
+    }
 }

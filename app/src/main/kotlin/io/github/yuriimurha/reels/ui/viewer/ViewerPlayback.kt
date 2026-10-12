@@ -7,10 +7,13 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.media.VideoSource
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withContext
 
 /** What the viewer shows under a video that cannot play: the thumbnail, this, and Open on Instagram (spec 8.5). */
 internal const val CANT_PLAY = "Can't play this video"
@@ -39,6 +42,13 @@ data class SettledPage(val index: Int, val media: MediaEntity?, val position: In
     /** The unit to play here, or null while the page is a placeholder. */
     val playable: Playable? get() = media?.let { Playable(it.pk, position) }
 }
+
+/**
+ * Runs [effect], which calls the player, on the main thread, whatever thread wakes it: Media3 allows no other. The screen's
+ * effects run there in the app (the Recomposer's dispatcher); a test's dispatcher may resume one on the thread that woke it (a
+ * Room thread that applied a snapshot, say), where the player throws. Pinned by `ViewerPlaybackTest`.
+ */
+internal suspend fun onMainThread(effect: suspend CoroutineScope.() -> Unit) = withContext(Dispatchers.Main.immediate, effect)
 
 /**
  * The settled page as the screen reports it, or null while its list and its pager disagree (C1). [media] is the list's row at

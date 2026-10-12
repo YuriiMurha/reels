@@ -6,6 +6,9 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
@@ -15,6 +18,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onChildren
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
@@ -26,6 +30,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.testutil.KotlinSource
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,7 +38,9 @@ import kotlinx.coroutines.flow.update
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * A carousel post in the viewer (spec 2026-10-12 §3.2), with the fake library's shape: items at positions 0, 1 are images,
@@ -113,6 +120,66 @@ class CarouselPagerTest {
         compose.onAllNodesWithText("@creator_2").assertCountEquals(0)
         assertEquals(1, state.settled, "the pager reported the item it settled on")
         assertEquals(listOf(0, 1), settledReports)
+    }
+
+    /**
+     * T1: only a settled page is reported, never the page under a finger that is still down. Reported mid-drag, a video item
+     * would start (with its sound) under the finger, and a fling would download the image of every item it passed.
+     */
+    @Test
+    fun aHeldDragPastHalfAnItemReportsNoSettle() {
+        showPager()
+        compose.onNodeWithTag(CAROUSEL_PAGER_TAG).performTouchInput {
+            down(center); moveBy(Offset(-width * 0.2f, 0f)); moveBy(Offset(-width * 0.2f, 0f)); moveBy(Offset(-width * 0.2f, 0f))
+        }
+        compose.waitForIdle()
+        assertEquals(listOf(0), settledReports, "the finger is still down: nothing has settled")
+    }
+
+    /** T5: the bright dot is the item shown, and moves with it. */
+    @Test
+    fun theBrightDotFollowsTheItem() {
+        showPosts()
+        assertEquals(0, brightDot())
+
+        swipeItemsLeft()
+        assertEquals(1, brightDot())
+
+        swipeItemsLeft()
+        assertEquals(2, brightDot())
+    }
+
+    /** T6: an item whose image is not in yet is the viewer's black, never item 0's cover (that is another picture). */
+    @Test
+    fun anItemWithoutItsImageIsNotShownAsTheCover() {
+        showPager() // the post has a stored cover, and no item has its image yet
+        compose.onNodeWithTag(CAROUSEL_COVER_TAG).assertIsDisplayed()
+
+        swipeItemsLeft()
+
+        compose.onNodeWithTag(CAROUSEL_COUNTER_TAG).assertTextEquals("2/3")
+        compose.onAllNodesWithTag(CAROUSEL_COVER_TAG).assertCountEquals(0)
+        compose.onAllNodesWithTag(carouselImageTag(1)).assertCountEquals(0)
+    }
+
+    /**
+     * T7: every carousel picture, an item's image and the cover alike, is fitted, never cropped: an item's stored size may be 0
+     * or mixed, so the viewer never sizes from it (Task 1). Semantics do not say how a picture is scaled, so the source is pinned.
+     */
+    @Test
+    fun everyCarouselPictureIsFitted() {
+        val source = File("src/main/kotlin/io/github/yuriimurha/reels/ui/viewer/CarouselPager.kt").readText()
+        val pictures = KotlinSource.callArguments(source, "Thumbnail(")
+        assertEquals(2, pictures.size, "an item's image and the cover: $pictures")
+        for (arguments in pictures) assertTrue(arguments.trim().endsWith("ContentScale.Fit"), "fitted: Thumbnail($arguments)")
+    }
+
+    /** The index of the one selected dot. */
+    private fun brightDot(): Int {
+        val dots = compose.onNodeWithTag(CAROUSEL_DOTS_TAG).onChildren().fetchSemanticsNodes()
+        val bright = dots.indices.filter { dots[it].config.getOrNull(SemanticsProperties.Selected) == true }
+        assertEquals(1, bright.size, "exactly one bright dot of ${dots.size}: $bright")
+        return bright.single()
     }
 
     @Test

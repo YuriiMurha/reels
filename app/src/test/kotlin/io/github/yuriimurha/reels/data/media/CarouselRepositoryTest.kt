@@ -95,7 +95,11 @@ class CarouselRepositoryTest {
     }
 
     /** The repository, the Pacer and the test scheduler agree on the time: [START] plus whatever the test has waited. */
-    private fun TestScope.repository(sampleClip: Uri? = null, cooldowns: InMemoryCooldownStore = InMemoryCooldownStore()): CarouselRepository {
+    private fun TestScope.repository(
+        sampleClip: Uri? = null,
+        cooldowns: InMemoryCooldownStore = InMemoryCooldownStore(),
+        log: ((String) -> Unit)? = null,
+    ): CarouselRepository {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
         return CarouselRepository(
@@ -105,6 +109,7 @@ class CarouselRepositoryTest {
             now = clock,
             isVideoCached = { key -> cacheKeysAsked += key; videoCache.isFullyCached(key) },
             sampleClip = sampleClip,
+            log = log,
             // The container's R20 steps, over this test's own cache and image store.
             itemEviction = MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { images.deleteFor(it) }),
         )
@@ -241,6 +246,56 @@ class CarouselRepositoryTest {
 
         assertEquals(listOf("mediaInfo:$pk"), fake.calls)
         assertEquals(emptyList(), rows())
+    }
+
+    /** R2 on the fill path: an empty `carousel_media` says nothing about the items, so the post stays cover-only, never empty. */
+    @Test
+    fun anEmptyFillLeavesThePostCoverOnly() = runTest {
+        storePost()
+        onReply = { it?.copy(carouselItems = emptyList()) }
+
+        assertEquals(ItemsResult.CoverOnly(CANT_LOAD), repository().items(media, CarouselRepository.Visit()))
+
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(emptyList(), rows())
+    }
+
+    /**
+     * T2, R2 on the renewal path: an empty reply says nothing about the items, so the stored ones stay. Replaced by nothing, every
+     * later visit of the post would spend a `mediaInfo` on a fill.
+     */
+    @Test
+    fun anEmptyRenewalKeepsTheStoredItems() = runTest {
+        storeOldItems()
+        onReply = { it?.copy(carouselItems = emptyList()) }
+
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository().image(media, 0, CarouselRepository.Visit()))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(3, rows().size, "the stored items stay")
+
+        assertIs<ItemsResult.Items>(repository().items(media, CarouselRepository.Visit()))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "the next visit needs no fill")
+    }
+
+    /**
+     * T4: the debug log (spec §4, Privacy) gets a line for each fill, renewal and failed image, and none names a link, a host
+     * or a pk.
+     */
+    @Test
+    fun theLogNamesNoLinkHostOrPk() = runTest {
+        val lines = mutableListOf<String>()
+        storePost()
+        repository(log = { lines += it }).items(media, CarouselRepository.Visit()) // the fill
+        storeOldItems()
+        repository(log = { lines += it }).image(media, 0, CarouselRepository.Visit()) // refused, renewed, refused again
+        fetcher.answer = { throw java.io.IOException("offline") }
+        repository(log = { lines += it }).image(media, 1, CarouselRepository.Visit()) // offline
+
+        for (kind in listOf("carousel fill:", "carousel renew:", "carousel image failed (refused)", "carousel image failed (offline)")) {
+            assertTrue(lines.any { it.startsWith(kind) }, "a line '$kind...': $lines")
+        }
+        val links = listOf("://", "cdn", "example", "fake", ".jpg", ".mp4")
+        assertTrue(lines.none { line -> pk in line || links.any { it in line } }, "no link, host or pk: $lines")
     }
 
     @Test

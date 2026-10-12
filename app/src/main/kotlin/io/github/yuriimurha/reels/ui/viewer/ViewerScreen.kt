@@ -78,10 +78,8 @@ import io.github.yuriimurha.reels.instagram.Permalinks
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.Thumbnail
 import io.github.yuriimurha.reels.ui.common.sharedMedia
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.withContext
 
 /** Test tag of the page that has the player (only the settled, playing page has one); the on-device smoke suite looks for it. */
 const val VIDEO_SURFACE_TAG = "video-surface"
@@ -160,11 +158,9 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
-    // Both effects below call the player, which must only ever be called on the main thread. They run there in the app; pinned
-    // to it, they also stay there where a test's unconfined dispatcher would resume them on whatever thread woke them (a Room
-    // thread that applied a snapshot, say: the player then threw).
+    // Both effects below call the player, which must only ever be called on the main thread ([onMainThread]).
     LaunchedEffect(pagerState, items) {
-        withContext(Dispatchers.Main.immediate) {
+        onMainThread {
             viewModel.followSettledPages(
                 // A new post, or a new item of the settled carousel (its pager reports it to the ViewModel, whose state this reads).
                 // The list moving under the post then arrives as that post at its new index only: a re-settle in place.
@@ -189,7 +185,7 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
     LaunchedEffect(failure) {
         val failed = failure ?: return@LaunchedEffect
         val media = failed.page.media ?: return@LaunchedEffect
-        withContext(Dispatchers.Main.immediate) {
+        onMainThread {
             playIfStillSettled(
                 Playable(media.pk, failed.page.position),
                 resolve = { viewModel.recover(media, failed.error, it.position) },

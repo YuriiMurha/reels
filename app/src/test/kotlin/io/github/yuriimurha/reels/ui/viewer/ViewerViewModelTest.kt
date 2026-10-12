@@ -683,6 +683,41 @@ class ViewerViewModelTest {
         }
     }
 
+    /**
+     * Task 4 (parked): the owner swipes past the post's first item before its resolve returned (here item 0 waits for the fill).
+     * That unit never reaches the prefetch hook, so the decision passes to the post's first unit whose resolve does return: the
+     * next post's prefetch still goes out, once, after the fill (R11: still once a post).
+     */
+    @Test
+    fun theNextPostIsPrefetchedWhenTheFirstItemWasSwipedPastBeforeItsResolveReturned() = runTest {
+        storeCarousel(withItems = false)
+        val reply = CompletableDeferred<Unit>()
+        onReply = { reply.await(); it }
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val job = following(viewModel, player, resolved, next = reel("m2", expiresAt = expired))
+        try {
+            player.settled.value = item(0)
+            eventually { while (mediaInfoCalls.isEmpty()) delay(10) }
+            runCurrent()
+            viewModel.onItemSettled(pk, 1)
+            player.settled.value = item(1) // swiped on while item 0 still waits for the fill
+            runCurrent()
+            assertEquals(emptyList(), resolver.calls, "nothing is prefetched before the visible post's own request")
+
+            reply.complete(Unit)
+            eventually { resolved.first { item(1) in it } }
+            runCurrent()
+            assertEquals(listOf(item(1)), resolved.value, "item 0 never reached the hook; item 1, the first unit resolved, did")
+            assertEquals(listOf("m2"), resolver.calls, "the next post's prefetch still went out, once")
+            assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+        } finally {
+            reply.complete(Unit)
+            job.cancel()
+        }
+    }
+
     /** An item swipe is not a new post: it keeps the visit (no new request) and the prefetch the post started. */
     @Test
     fun anItemSwipeKeepsTheVisitAndTheNextPostsPrefetch() = runTest {

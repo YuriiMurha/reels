@@ -1,6 +1,7 @@
 package io.github.yuriimurha.reels.ui.viewer
 
 import android.content.Context
+import android.os.Looper
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
@@ -41,6 +42,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.IOException
+import java.util.Collections
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -69,22 +71,43 @@ class ViewerScreenCarouselTest {
     private val b = mediaEntity("1000003", MediaType.CAROUSEL, author = "creator_3").copy(carouselCount = 5)
     private val reel = mediaEntity("1000002", MediaType.REEL, author = "creator_2")
 
-    /** What the screen does to the one player: `stop`, `clear`, `set:<cache key>`; and the listeners it added, to raise an error. */
+    /**
+     * What the screen does to the one player: `stop`, `clear`, `set:<cache key>`; and the listeners it added, to raise an error.
+     * Every call is also checked for its thread: Media3 allows the main thread only ([offMain], asserted after each test).
+     */
     private class RecordingPlayer(player: Player) : ForwardingPlayer(player) {
         val events = mutableListOf<String>()
         val listeners = mutableListOf<Player.Listener>()
+        val offMain: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
+        private fun onMain(call: String) {
+            if (Looper.myLooper() != Looper.getMainLooper()) offMain += "$call on ${Thread.currentThread().name}"
+        }
 
         override fun setMediaItem(mediaItem: MediaItem) {
+            onMain("setMediaItem")
             events += "set:${mediaItem.localConfiguration?.customCacheKey}"
             super.setMediaItem(mediaItem)
         }
 
+        override fun prepare() {
+            onMain("prepare")
+            super.prepare()
+        }
+
+        override fun play() {
+            onMain("play")
+            super.play()
+        }
+
         override fun stop() {
+            onMain("stop")
             events += "stop"
             super.stop()
         }
 
         override fun clearMediaItems() {
+            onMain("clearMediaItems")
             events += "clear"
             super.clearMediaItems()
         }
@@ -122,6 +145,8 @@ class ViewerScreenCarouselTest {
     fun tearDown() {
         exo.release()
         container.db.close()
+        // Task 6 minor 1: every call the screen made on the player came on the main thread.
+        assertEquals(emptyList(), player.offMain.toList(), "player calls off the main thread")
     }
 
     /** [media]'s items as a sync stores them: every third one (positions 2, 5, ...) a video, as in the fake library. */

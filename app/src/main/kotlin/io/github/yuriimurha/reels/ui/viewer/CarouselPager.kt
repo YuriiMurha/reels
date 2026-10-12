@@ -25,6 +25,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.Player
@@ -211,14 +213,15 @@ private fun ItemStill(media: MediaEntity, item: CarouselItemUi?, index: Int) {
     }
 }
 
-/** The carousel's dots, the current item's brighter; nothing for fewer than two items. */
+/** The carousel's dots, the current item's brighter (and selected, for tests and accessibility); nothing for fewer than two items. */
 @Composable
 fun CarouselDots(pagerState: PagerState, count: Int, modifier: Modifier = Modifier) {
     if (count < 2) return
     Row(modifier.testTag(CAROUSEL_DOTS_TAG), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
         repeat(count) { i ->
-            val alpha = if (i == pagerState.currentPage) 1f else 0.45f
-            Box(Modifier.size(6.dp).background(Color.White.copy(alpha = alpha), CircleShape))
+            val current = i == pagerState.currentPage
+            val alpha = if (current) 1f else 0.45f
+            Box(Modifier.size(6.dp).background(Color.White.copy(alpha = alpha), CircleShape).semantics { selected = current })
         }
     }
 }

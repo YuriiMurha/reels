@@ -218,7 +218,7 @@ internal object WebParsers {
         val thumb = imageSource?.let { MediaLinks.chooseThumbnail(MediaLinks.imageCandidates(it)) }
         val videoUrl = firstVideoUrl(o)
         // Null when the response carries no `carousel_media`, or when one of its children can't be read (R4).
-        val carouselItems = if (type == MediaType.CAROUSEL) carousel?.let(::carouselItems) else null
+        val children = if (type == MediaType.CAROUSEL) carousel?.let(::carouselItems) else null
         return RemoteMedia(
             pk = pk,
             code = code,
@@ -233,7 +233,7 @@ internal object WebParsers {
             videoUrl = videoUrl,
             videoUrlExpiresAt = videoUrl?.let(MediaLinks::expiresAt),
             savedCollectionIds = savedCollectionIds(o),
-            carouselItems = carouselItems,
+            carouselItems = children,
         )
     }
 
