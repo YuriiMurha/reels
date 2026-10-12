@@ -21,6 +21,24 @@ import java.io.File
 /** Removed items' cached videos go too (engine reconcile, Delete library). */
 fun interface MediaEviction {
     fun evict(pks: List<String>)
+
+    companion object {
+        /**
+         * Runs every one of [steps] for every pk, each on its own: a step that fails (a disk error, a key it refuses) skips no
+         * other step of that pk and nothing of a later pk. What a failed step leaves only takes space, so it is not reported.
+         */
+        fun eachStep(vararg steps: (pk: String) -> Unit) = MediaEviction { pks ->
+            for (pk in pks) {
+                for (step in steps) {
+                    try {
+                        step(pk)
+                    } catch (e: Exception) {
+                        // Intentionally ignored: housekeeping after the reconcile; a stale cached file only takes space.
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**

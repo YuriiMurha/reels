@@ -117,6 +117,8 @@ class CarouselRepository(
     }
 
     private suspend fun loadImage(media: MediaEntity, position: Int, visit: Visit): ItemImage {
+        // Not a carousel: no items to fill, so no request (a reel's link is the video resolver's).
+        if (media.type != MediaType.CAROUSEL) return ItemImage.Failed(CANT_LOAD)
         val pk = media.pk
         withContext(ioDispatcher) { images.path(pk, position) }?.let { return ItemImage.File(it) }
         val item = storedItem(pk, position) ?: when (val renewal = renewal(media, visit, FILL)) {
@@ -136,6 +138,8 @@ class CarouselRepository(
     }
 
     private suspend fun loadVideo(media: MediaEntity, position: Int, visit: Visit, forceRefresh: Boolean): VideoSource {
+        // Not a carousel: no items to fill, so no request (a reel's link is the video resolver's).
+        if (media.type != MediaType.CAROUSEL) return VideoSource.Unavailable(CANT_LOAD)
         val pk = media.pk
         val key = "${pk}_$position"
         val item = storedItem(pk, position) ?: when (val renewal = renewal(media, visit, FILL)) {
@@ -151,7 +155,12 @@ class CarouselRepository(
             item.cachedPlay(key)?.let { return it }
         }
         val renewed = when (val renewal = renewal(media, visit, RENEW)) {
-            is Renewal.Failed -> return item.cachedPlay(key) ?: VideoSource.Unavailable(renewal.message)
+            // R9, the reel resolver's table: cached bytes still play when Instagram could not be asked or reached (no session, a
+            // refusal, offline), not when it answered against the item (a login or challenge, a rate limit, gone, anything else).
+            is Renewal.Failed -> {
+                val cached = if (renewal.cachedMayPlay) item.cachedPlay(key) else null
+                return cached ?: VideoSource.Unavailable(renewal.message)
+            }
             is Renewal.Items -> renewal.items.at(position)
         }
         val url = renewed?.takeIf { it.type == MediaType.VIDEO }?.videoUrl ?: return VideoSource.Unavailable(CANT_LOAD)
@@ -178,7 +187,7 @@ class CarouselRepository(
         return when (outcome) {
             is PacedMediaInfo.Outcome.Fresh -> store(media.pk, outcome.media.carouselItems)
             PacedMediaInfo.Outcome.Gone -> Renewal.Failed(GONE)
-            is PacedMediaInfo.Outcome.Failed -> Renewal.Failed(outcome.forItem())
+            is PacedMediaInfo.Outcome.Failed -> Renewal.Failed(outcome.forItem(), cachedMayPlay = outcome.reason in NOT_ASKED)
         }
     }
 
@@ -207,6 +216,9 @@ class CarouselRepository(
             return failedImage(Download.Offline, "offline")
         }
         if (bytes == null) return failedImage(Download.Refused, "refused")
+        // A post deleted while its image was on the way (Delete library) keeps no file behind. The check and the write are not
+        // one step, so a delete in between can still leave one; it only takes space until the next Delete library.
+        if (mediaDao.byPks(listOf(pk)).isEmpty()) return failedImage(Download.Failed, "post gone")
         return Download.Stored(withContext(ioDispatcher) { images.write(pk, position, bytes) })
     }
 
@@ -227,7 +239,8 @@ class CarouselRepository(
     internal sealed interface Renewal {
         data class Items(val items: List<CarouselItemEntity>) : Renewal
 
-        data class Failed(val message: String) : Renewal
+        /** [cachedMayPlay]: Instagram could not be asked or reached, so a video item's cached bytes may still play (R9). */
+        data class Failed(val message: String, val cachedMayPlay: Boolean = false) : Renewal
     }
 
     private sealed interface Download {
@@ -257,6 +270,9 @@ class CarouselRepository(
 
         /** What a visit holds while its request is out, and keeps if that call never finishes. */
         val SPENT = Renewal.Failed(CANT_LOAD)
+
+        /** The failures in which Instagram was not asked or not reached (R9: the reel resolver's cache fallback table). */
+        val NOT_ASKED = setOf(PacedMediaInfo.Reason.NO_SESSION, PacedMediaInfo.Reason.REFUSED, PacedMediaInfo.Reason.OFFLINE)
 
         fun List<CarouselItemEntity>.at(position: Int): CarouselItemEntity? = firstOrNull { it.position == position }
 

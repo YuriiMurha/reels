@@ -303,13 +303,12 @@ class AppContainer(context: Context) {
         }
         return SyncEngine(
             backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals,
-            eviction = MediaEviction { pks ->
-                pks.forEach {
-                    videoCache.remove(it)
-                    videoCache.removeCarouselItems(it) // R6: its carousel items' videos, cached under `{pk}_{position}`
-                    carouselImages.deleteFor(it)
-                }
-            },
+            // Each step for each pk on its own: one that fails skips nothing else.
+            eviction = MediaEviction.eachStep(
+                { videoCache.remove(it) },
+                { videoCache.removeCarouselItems(it) }, // R6: its carousel items' videos, cached under `{pk}_{position}`
+                { carouselImages.deleteFor(it) },
+            ),
             sessionUsable = sessionUsable,
             libraryAccount = libraryAccount,
             beforeRun = beforeRun,

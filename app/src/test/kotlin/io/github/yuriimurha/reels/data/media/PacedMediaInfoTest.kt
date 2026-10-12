@@ -108,6 +108,30 @@ class PacedMediaInfoTest {
         assertEquals(emptyList(), signals.events)
     }
 
+    /**
+     * R79's other half: the epoch is still the one the fetch started under, but the stored session stopped being valid (a
+     * challenge, an expiry) while the request waited for the gate. The Pacer's in-gate check asks the readiness again first.
+     */
+    @Test
+    fun aSessionThatStopsBeingReadyWhileTheRequestWaitsForTheGateSendsNothing() = runTest {
+        val pacer = pacer()
+        val info = info(pacer)
+        val release = CompletableDeferred<Unit>()
+        launch { pacer.interactive { release.await() } } // a request of the owner's holds the gate
+        runCurrent()
+        var outcome: Outcome? = null
+        launch { outcome = info.fetch("m1") }
+        runCurrent() // it has read the epoch and passed the readiness check; now it waits for the gate
+
+        sessionReady = false // a challenge or an expiry was stored meanwhile; the epoch is unchanged
+        release.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(Outcome.Failed("Instagram session needs attention (Sync screen)", Reason.NO_SESSION), outcome)
+        assertEquals(emptyList(), client.calls, "mediaInfo must not be called")
+        assertEquals(emptyList(), signals.events)
+    }
+
     @Test
     fun aRefusalSendsNothingAndSaysWhy() = runTest {
         cooldowns.onRateLimited(START)

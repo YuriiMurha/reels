@@ -426,10 +426,14 @@ class BackendWiringGuardTest {
     fun unsavingAndDeleteLibraryRemoveTheCarouselImagesAndVideos() {
         val container = main("di/AppContainer.kt")
         val engine = callArguments(container, "SyncEngine(").single()
-        val eviction = Regex("""eviction\s*=\s*MediaEviction\s*\{\s*pks\s*->\s*pks\.forEach\s*\{([^}]*)}""").find(engine)?.groupValues?.get(1)
-        assertTrue(eviction != null, "the engine's eviction: $engine")
+        // Each step on its own (`MediaEvictionTest` runs eachStep): one that fails skips nothing else.
+        assertTrue(Regex("""eviction\s*=\s*MediaEviction\.eachStep\(""").containsMatchIn(engine), "the engine's eviction: $engine")
+        val steps = callArguments(engine, "MediaEviction.eachStep(").single()
         for (call in listOf("videoCache.remove", "videoCache.removeCarouselItems", "carouselImages.deleteFor")) {
-            assertTrue(Regex("""(?<![\w.])${Regex.escape(call)}\(\s*it\s*\)""").containsMatchIn(eviction), "the eviction must call $call(it): $eviction")
+            assertTrue(
+                Regex("""\{\s*${Regex.escape(call)}\(\s*it\s*\)\s*}""").containsMatchIn(steps),
+                "the eviction must have the step { $call(it) }: $steps",
+            )
         }
         val library = callArguments(container, "LibraryRepository(").single()
         assertTrue(Regex("""\bcarouselImages\s*=\s*carouselImages\b""").containsMatchIn(library), "Delete library: $library")

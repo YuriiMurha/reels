@@ -32,7 +32,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -95,9 +94,9 @@ class CarouselRepositoryTest {
     }
 
     /** The repository, the Pacer and the test scheduler agree on the time: [START] plus whatever the test has waited. */
-    private fun TestScope.repository(sampleClip: Uri? = null): CarouselRepository {
+    private fun TestScope.repository(sampleClip: Uri? = null, cooldowns: InMemoryCooldownStore = InMemoryCooldownStore()): CarouselRepository {
         val clock = { START + testScheduler.currentTime }
-        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = clock)
+        val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
         return CarouselRepository(
             db.carouselItemDao(), db.mediaDao(),
             PacedMediaInfo(client, pacer, SessionSignals.None, isSessionReady = { sessionReady }),
@@ -215,6 +214,20 @@ class CarouselRepositoryTest {
         assertEquals(emptyList(), rows())
     }
 
+    /** The Pacer refused (cooling down after a rate limit): nothing is sent, and the cover says why, in the item's words. */
+    @Test
+    fun aRefusedFillSaysWhyAndKeepsTheCover() = runTest {
+        storePost()
+        val cooldowns = InMemoryCooldownStore().apply { onRateLimited(START) }
+
+        assertEquals(
+            ItemsResult.CoverOnly("Can't load this item right now: Cooling down after a rate limit"),
+            repository(cooldowns = cooldowns).items(media, CarouselRepository.Visit()),
+        )
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(emptyList(), rows())
+    }
+
     /** R4: a reply whose items are unknown (an unreadable child) stores nothing and keeps the cover. */
     @Test
     fun aReplyWithoutItemsKeepsTheCover() = runTest {
@@ -243,13 +256,27 @@ class CarouselRepositoryTest {
         assertEquals(oldImage(0), rows()[0].imageUrl, "and its stored items stay")
     }
 
+    /** A reel (its link is the video resolver's) or an image post has no items: no call of the repository sends anything for it. */
     @Test
     fun aPostThatIsNotACarouselHasNoItemsToAskFor() = runTest {
-        val reel = mediaEntity(pk, MediaType.REEL)
-        db.mediaDao().upsert(listOf(reel))
+        val repository = repository()
+        // The fake library has a carousel under this pk, so a request would bring items back: each call is checked on its own.
+        fun nothingSent(what: String) {
+            assertEquals(emptyList(), fake.calls, "$what sent a request")
+            assertEquals(emptyList(), fetcher.fetched, "$what downloaded")
+        }
+        for (type in listOf(MediaType.REEL, MediaType.VIDEO, MediaType.IMAGE)) {
+            val post = mediaEntity(pk, type)
+            db.mediaDao().upsert(listOf(post))
 
-        assertEquals(ItemsResult.CoverOnly(null), repository().items(reel, CarouselRepository.Visit()))
-        assertEquals(emptyList(), fake.calls)
+            assertEquals(ItemsResult.CoverOnly(null), repository.items(post, CarouselRepository.Visit()), "$type")
+            nothingSent("items of a $type")
+            assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(post, 0, CarouselRepository.Visit()), "$type")
+            nothingSent("image of a $type")
+            assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(post, 2, CarouselRepository.Visit()), "$type")
+            assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(post, 2, CarouselRepository.Visit(), forceRefresh = true), "$type")
+            nothingSent("video of a $type")
+        }
     }
 
     /** A post no longer in the library (Delete library ran while it was open) has nowhere to keep items: nothing is asked. */
@@ -295,17 +322,49 @@ class CarouselRepositoryTest {
         val visit = CarouselRepository.Visit()
         val requested = CompletableDeferred<Unit>()
         onReply = { requested.complete(Unit); awaitCancellation() }
-        val job = launch { repository.items(media, visit) }
-        // The repository reads the post's row first (a real I/O thread), so the request is out a moment later, in real time.
-        withContext(Dispatchers.Default) { withTimeout(5_000) { requested.await() } }
-        job.cancel()
-        runCurrent()
-        assertTrue(job.isCancelled)
+
+        assertEquals(UNSET, cancelOnceStarted(requested) { repository.items(media, visit) }, "the cancelled call delivered nothing")
         onReply = { it }
 
         assertEquals(ItemsResult.CoverOnly(CANT_LOAD), repository.items(media, visit))
         assertEquals(listOf("mediaInfo:$pk"), fake.calls)
         assertIs<ItemsResult.Items>(repository.items(media, CarouselRepository.Visit()), "a new visit asks again")
+    }
+
+    /**
+     * Each call ends a cancelled caller with the cancellation, never with a value: a post-scoped coroutine the viewer cancelled
+     * must not write "Can't load this item" into its state. Cancelled in the request (items, video) and in the download (image).
+     */
+    @Test
+    fun aCancelledCallEndsInCancellationNotAFailure() = runTest {
+        storeOldItems(videoExpiresAt = START - 1)
+        val repository = repository()
+
+        val downloading = CompletableDeferred<Unit>()
+        fetcher.answer = { downloading.complete(Unit); awaitCancellation() }
+        assertEquals(UNSET, cancelOnceStarted(downloading) { repository.image(media, 0, CarouselRepository.Visit()) }, "image")
+
+        val renewing = CompletableDeferred<Unit>()
+        onReply = { renewing.complete(Unit); awaitCancellation() }
+        assertEquals(UNSET, cancelOnceStarted(renewing) { repository.video(media, 2, CarouselRepository.Visit()) }, "video")
+
+        db.carouselItemDao().deleteFor(pk)
+        val filling = CompletableDeferred<Unit>()
+        onReply = { filling.complete(Unit); awaitCancellation() }
+        assertEquals(UNSET, cancelOnceStarted(filling) { repository.items(media, CarouselRepository.Visit()) }, "items")
+    }
+
+    /**
+     * Runs [call] until [started], cancels it there and waits for it to end. Returns what it delivered: [UNSET] when it ended in
+     * the cancellation, the value it returned when it swallowed it. Waits in real time: the call reads Room on a real I/O thread.
+     */
+    private suspend fun TestScope.cancelOnceStarted(started: CompletableDeferred<Unit>, call: suspend () -> Any?): Any? {
+        var delivered: Any? = UNSET
+        val job = launch { delivered = call() }
+        withContext(Dispatchers.Default) { withTimeout(5_000) { started.await() } }
+        job.cancel()
+        withContext(Dispatchers.Default) { withTimeout(5_000) { job.join() } }
+        return delivered
     }
 
     // --- images ---
@@ -322,6 +381,39 @@ class CarouselRepositoryTest {
 
         assertEquals(first, repository.image(media, 0, CarouselRepository.Visit()), "the next visit reads the file")
         assertEquals(listOf(oldImage(0)), fetcher.fetched, "one download")
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * R7: a download goes through the Pacer's CDN lane, like the sync's thumbnails: its jitter (at least 200 ms with the
+     * Conservative policy) passes before the fetcher is called. Nothing else on this path waits on the clock: the items are
+     * stored, so no `mediaInfo` and no gap, and the store and Room run on real threads.
+     */
+    @Test
+    fun anImageDownloadGoesThroughTheCdnLane() = runTest {
+        storeOldItems()
+        var calledAt: Long? = null
+        fetcher.answer = { url -> calledAt = testScheduler.currentTime; url.toByteArray() }
+        val before = testScheduler.currentTime
+
+        assertIs<ItemImage.File>(repository().image(media, 0, CarouselRepository.Visit()))
+
+        val waited = checkNotNull(calledAt) - before
+        assertTrue(waited >= PacingPolicy.Conservative.cdnJitterMs.first, "the fetch waited $waited ms: it did not go through the CDN lane")
+        assertTrue(waited <= PacingPolicy.Conservative.cdnJitterMs.last, "the fetch waited $waited ms: more than the lane's jitter")
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /** A post deleted while its image was on the way (Delete library) keeps no file behind: the bytes are dropped. */
+    @Test
+    fun anImageOfAPostDeletedWhileItDownloadedIsNotKept() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> db.mediaDao().deleteAll(); url.toByteArray() }
+
+        assertEquals(ItemImage.Failed(CANT_LOAD), repository().image(media, 0, CarouselRepository.Visit()))
+
+        assertNull(images.path(pk, 0))
+        assertTrue(File(tmp.root, "carousel").list().isNullOrEmpty(), "no file was written")
         assertEquals(emptyList(), fake.calls)
     }
 
@@ -478,6 +570,53 @@ class CarouselRepositoryTest {
         assertEquals(listOf("${pk}_2"), cacheKeysAsked, "the item's key, never the post's")
     }
 
+    /**
+     * R9, the reel resolver's table: the player was refused the stored link, the bytes are all cached, and the renewal failed
+     * without Instagram being asked or reached (no session, a Pacer refusal, offline). The cached bytes play.
+     */
+    @Test
+    fun aCachedVideoStillPlaysWhenItsRenewalCouldNotAskInstagram() = runTest {
+        storeOldItems()
+        videoCache.cacheWholeFile("${pk}_2", File(tmp.root, "clip.mp4").apply { writeBytes(ByteArray(3_000) { it.toByte() }) })
+        val cached = VideoSource.Play(Uri.parse(OLD_VIDEO), "${pk}_2")
+
+        sessionReady = false
+        assertEquals(cached, repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true), "no session")
+        sessionReady = true
+        val cooling = InMemoryCooldownStore().apply { onRateLimited(START) }
+        assertEquals(cached, repository(cooldowns = cooling).video(media, 2, CarouselRepository.Visit(), forceRefresh = true), "refused")
+        fake.failures = FakeFailures { InstagramException.Transient() }
+        assertEquals(cached, repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true), "offline")
+
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "only the offline one was sent")
+    }
+
+    /**
+     * R9: when Instagram answered against the item (a login or a challenge, a rate limit, gone, a reply it could not read), the
+     * cached bytes do not play, as for reels: the viewer says what happened.
+     */
+    @Test
+    fun aCachedVideoDoesNotPlayWhenInstagramAnsweredAgainstIt() = runTest {
+        storeOldItems()
+        videoCache.cacheWholeFile("${pk}_2", File(tmp.root, "clip.mp4").apply { writeBytes(ByteArray(3_000) { it.toByte() }) })
+        val answers = listOf(
+            InstagramException.LoginRequired() to NEEDS_ATTENTION,
+            InstagramException.ChallengeRequired("https://example.test/challenge/1/") to NEEDS_ATTENTION,
+            InstagramException.RateLimited() to "Instagram is limiting requests",
+            InstagramException.ShapeChanged("items[0]") to CANT_LOAD,
+        )
+        for ((failure, message) in answers) {
+            fake.failures = FakeFailures { failure }
+            // A fresh Pacer each time: the rate limit arms its cooldown, which would make the next one a refusal.
+            assertEquals(VideoSource.Unavailable(message), repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true), "$failure")
+        }
+        fake.failures = FakeFailures { null }
+        fake.library.unsave(pk)
+        assertEquals(VideoSource.Unavailable(GONE), repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true), "gone")
+
+        assertEquals(answers.size + 1, mediaInfoCalls.size)
+    }
+
     @Test
     fun anImageItemIsNotAVideo() = runTest {
         storeOldItems()
@@ -536,7 +675,7 @@ class CarouselRepositoryTest {
 
     private class StubFetcher : MediaFetcher {
         val fetched: MutableList<String> = Collections.synchronizedList(mutableListOf())
-        var answer: (String) -> ByteArray? = { null }
+        var answer: suspend (String) -> ByteArray? = { null }
 
         override suspend fun fetch(url: String): ByteArray? {
             fetched += url
@@ -551,6 +690,11 @@ class CarouselRepositoryTest {
         const val OFFLINE = "Offline: this item isn't cached yet"
         const val GONE = "This item is no longer available on Instagram"
         const val NEEDS_ATTENTION = "Instagram session needs attention (Sync screen)"
+
+        /** What a cancelled call delivered when it delivered nothing. */
+        val UNSET: Any = object {
+            override fun toString() = "nothing (cancelled)"
+        }
 
         fun oldImage(position: Int) = "https://cdn.example.test/old/i$position.jpg?oe=1"
     }
