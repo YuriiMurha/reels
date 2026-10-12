@@ -58,6 +58,9 @@ class ViewerScreenCarouselTest {
     private lateinit var container: AppContainer
     private lateinit var exo: ExoPlayer
     private lateinit var player: RecordingPlayer
+
+    /** The indices the screen reported as settled (`onIndexSettled`), in order. */
+    private val settledIndices = mutableListOf<Int>()
     private val a = mediaEntity("1000001", MediaType.CAROUSEL, author = "creator_1").copy(carouselCount = 3)
     private val b = mediaEntity("1000003", MediaType.CAROUSEL, author = "creator_3").copy(carouselCount = 5)
     private val reel = mediaEntity("1000002", MediaType.REEL, author = "creator_2")
@@ -105,7 +108,7 @@ class ViewerScreenCarouselTest {
         compose.setContent {
             ReelsTheme {
                 CompositionLocalProvider(LocalAppContainer provides container) {
-                    ViewerScreen(MediaSource.Collection(ALL_SAVED_ID), startIndex = 0, onIndexSettled = {}, onBack = {}, player = player)
+                    ViewerScreen(MediaSource.Collection(ALL_SAVED_ID), startIndex = 0, onIndexSettled = { settledIndices += it }, onBack = {}, player = player)
                 }
             }
         }
@@ -239,5 +242,70 @@ class ViewerScreenCarouselTest {
         assertTrue(displayedDescription("Open on Instagram"), "the way out is right there")
         assertTrue(displayedWith(CAROUSEL_COUNTER_TAG, "3/3"), "still on the video item")
         assertEquals(listOf("stop", "clear"), player.events.takeLast(2), "the player was stopped and emptied")
+    }
+
+    /** Like [awaitUntil], but answers whether [condition] came to hold, so the assertion after it can say what happened instead. */
+    private fun cameTrue(condition: () -> Boolean): Boolean {
+        repeat(80) {
+            compose.waitForIdle()
+            if (condition()) return true
+            Thread.sleep(25)
+        }
+        return false
+    }
+
+    /**
+     * C1: a sync saves a new post above the settled carousel, so the carousel moves one place down. The list changes at once,
+     * but the pager moves the carousel's key to its new index only in its next measure: for that instant its settled index
+     * holds the new post. Only a pair the pager's own layout agrees with is a settle, so the carousel keeps its visit and its
+     * item (its video item restarts, as a reel does when the list moves), and the post that slid in never gets the player.
+     */
+    @Test
+    fun aPostSavedAboveTheSettledCarouselKeepsItsItemAndNeverPlaysTheNewPost() {
+        onCarouselA(items = 2)
+        awaitUntil("A's video item to play") { player.events.lastOrNull() == "set:${a.pk}_2" }
+        val mark = player.events.size
+        val settledMark = settledIndices.size
+
+        val saved = mediaEntity("1000009", MediaType.REEL, author = "creator_9")
+        runBlocking {
+            container.db.mediaDao().upsert(listOf(saved))
+            container.db.collectionDao().upsertMemberships(listOf(CollectionMediaEntity(ALL_SAVED_ID, saved.pk, sortKey = 10, lastSeenRunId = 2)))
+        }
+
+        awaitUntil("A to settle at its new index") { 1 in settledIndices.drop(settledMark) }
+        cameTrue { since(mark).lastOrNull() == "set:${a.pk}_2" }
+        assertEquals(listOf(1), settledIndices.drop(settledMark), "one settle: A at its new index, never the new post at A's old one")
+        assertEquals(listOf("stop", "clear", "set:${a.pk}_2"), since(mark), "A's own video item again; the new post's video never set")
+        assertTrue(displayedWith(CAROUSEL_COUNTER_TAG, "3/3"), "A keeps its item")
+    }
+
+    /**
+     * C1, the other way: a sync's reconcile removes the post above the settled carousel (marked removed, its membership
+     * deleted), so the carousel moves one place up. For an instant its old index holds the post below it; that is no settle.
+     */
+    @Test
+    fun aPostRemovedAboveTheSettledCarouselKeepsItsItemAndNeverPlaysThePostBelow() {
+        onCarouselA()
+        pager().performTouchInput { swipeUp() }
+        awaitUntil("B's items") { displayedWith(CAROUSEL_COUNTER_TAG, "1/5") && displayedWith(CAROUSEL_DOTS_TAG) }
+        repeat(2) { i ->
+            pager().performTouchInput { swipeLeft() }
+            awaitUntil("B's item ${i + 2} of 5") { displayedWith(CAROUSEL_COUNTER_TAG, "${i + 2}/5") }
+        }
+        awaitUntil("B's video item to play") { player.events.lastOrNull() == "set:${b.pk}_2" }
+        val mark = player.events.size
+        val settledMark = settledIndices.size
+
+        runBlocking {
+            container.db.mediaDao().markRemoved(listOf(a.pk), at = 1)
+            container.db.collectionDao().deleteAllMembershipsOf(listOf(a.pk))
+        }
+
+        awaitUntil("B to settle at its new index") { 0 in settledIndices.drop(settledMark) }
+        cameTrue { since(mark).lastOrNull() == "set:${b.pk}_2" }
+        assertEquals(listOf(0), settledIndices.drop(settledMark), "one settle: B at its new index, never the reel at B's old one")
+        assertEquals(listOf("stop", "clear", "set:${b.pk}_2"), since(mark), "B's own video item again; the reel's video never set")
+        assertTrue(displayedWith(CAROUSEL_COUNTER_TAG, "3/5"), "B keeps its item")
     }
 }

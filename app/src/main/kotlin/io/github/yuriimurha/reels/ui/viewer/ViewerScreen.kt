@@ -80,6 +80,7 @@ import io.github.yuriimurha.reels.ui.common.Thumbnail
 import io.github.yuriimurha.reels.ui.common.sharedMedia
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.withContext
 
 /** Test tag of the page that has the player (only the settled, playing page has one); the on-device smoke suite looks for it. */
@@ -120,13 +121,20 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
     var unavailable by remember { mutableStateOf<Pair<Playable, String>?>(null) }
     var failure by remember { mutableStateOf<PlayerFailure?>(null) }
 
-    /** The settled unit now: the vertical pager's post and, for a carousel, the item its own pager settled on. */
+    /**
+     * The settled unit now: the vertical pager's post and, for a carousel, the item its own pager settled on. Null while the
+     * list and the pager disagree (C1): a sync that adds or removes a post above the settled one changes the list at once, but
+     * the pager moves the post's key to its new index only in its next measure, so for that instant the settled index holds
+     * another post. Only a loaded row is checked: a placeholder's key is Paging's own, never a pk.
+     */
     val settledNow = {
         val index = pagerState.settledPage
         val media = items.itemSnapshotList.getOrNull(index)
-        SettledPage(index, media, media?.let { carouselPosition(it, carousel) })
+        val laidOut = pagerState.layoutInfo.visiblePagesInfo.firstOrNull { it.index == index }?.key
+        if (media != null && laidOut != null && laidOut != media.pk) null
+        else SettledPage(index, media, media?.let { carouselPosition(it, carousel) })
     }
-    val isStillSettled = { unit: Playable -> settledNow().playable == unit }
+    val isStillSettled = { unit: Playable -> settledNow()?.playable == unit }
     val present = { page: SettledPage, source: VideoSource ->
         when (source) {
             is VideoSource.Play -> {
@@ -162,7 +170,9 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
         withContext(Dispatchers.Main.immediate) {
             viewModel.followSettledPages(
                 // A new post, or a new item of the settled carousel (its pager reports it to the ViewModel, whose state this reads).
+                // The list moving under the post then arrives as that post at its new index only: a re-settle in place.
                 settled = snapshotFlow(settledNow)
+                    .filterNotNull()
                     .distinctUntilChanged { a, b -> a.index == b.index && a.media?.pk == b.media?.pk && a.position == b.position },
                 nextOf = { page -> items.itemSnapshotList.getOrNull(page.index + 1) },
                 isStillSettled = isStillSettled,

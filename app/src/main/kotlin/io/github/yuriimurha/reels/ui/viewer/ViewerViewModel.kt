@@ -101,6 +101,8 @@ class ViewerViewModel(
      * cancelled, unless it is for [media] itself: the settle then waits for that request ([resolveVideo]) instead.
      * A carousel post shown again gets a new visit at item 0 (R8); the same post settling again in place (the list moved under
      * it) keeps the visit it has, and so its fill and its item, and takes the newer row (a sync may have stored its cover since).
+     * A list move reaches here as exactly that, the same post at its new index: the screen reports no settle while its list
+     * and its pager's layout disagree (C1), so the post that slides into the old index for an instant never settles.
      */
     fun onSettled(media: MediaEntity?) {
         media?.let { refreshed -= it.pk }

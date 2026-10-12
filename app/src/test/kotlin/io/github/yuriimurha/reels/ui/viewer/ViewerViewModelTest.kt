@@ -409,7 +409,9 @@ class ViewerViewModelTest {
 
     /**
      * R8: one Visit per settled post, and its fill in a coroutine of the post's own: a re-settle of the same post (the list moved
-     * under it) cancels the settle's wait, not the fill, and sends no second request.
+     * under it) cancels the settle's wait, not the fill, and sends no second request. `(4, P)` then `(5, P)` is what the screen
+     * reports for a list move: it never reports the post that slides into index 4 for an instant (C1, pinned by
+     * `ViewerScreenCarouselTest.aPostSavedAboveTheSettledCarouselKeepsItsItemAndNeverPlaysTheNewPost`).
      */
     @Test
     fun theFillBelongsToThePostNotToTheSettleThatWaitsForIt() = runTest {
@@ -793,8 +795,8 @@ class ViewerViewModelTest {
     }
 
     /**
-     * The same post settling again in place (the list moved under it) keeps its visit (no second request) but takes the newer
-     * row, which the visit's later calls use. Here the newer row has no cover, so item 0's own image is fetched once the fill is in;
+     * The same post settling again in place (the list moved under it; the screen reports that as the same post at its new index
+     * only, C1) keeps its visit (no second request) but takes the newer row, which the visit's later calls use. Here the newer row has no cover, so item 0's own image is fetched once the fill is in;
      * with the first row kept, the cover rule would skip it.
      */
     @Test
