@@ -303,7 +303,13 @@ class AppContainer(context: Context) {
         }
         return SyncEngine(
             backend.client, backend.pacer, db, backend.fetcher, thumbnails, signals,
-            eviction = MediaEviction { pks -> pks.forEach { videoCache.remove(it); carouselImages.deleteFor(it) } },
+            eviction = MediaEviction { pks ->
+                pks.forEach {
+                    videoCache.remove(it)
+                    videoCache.removeCarouselItems(it) // R6: its carousel items' videos, cached under `{pk}_{position}`
+                    carouselImages.deleteFor(it)
+                }
+            },
             sessionUsable = sessionUsable,
             libraryAccount = libraryAccount,
             beforeRun = beforeRun,

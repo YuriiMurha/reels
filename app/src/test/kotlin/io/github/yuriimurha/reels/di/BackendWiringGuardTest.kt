@@ -418,16 +418,19 @@ class BackendWiringGuardTest {
         assertEquals("client, pacer, signals, isSessionReady", resolver.trim(), "the resolver's request is built from what the container gave it")
     }
 
-    /** A post the sync finds unsaved loses its downloaded carousel images with its cached video; Delete library removes them all. */
+    /**
+     * A post the sync finds unsaved loses its cached video, its carousel items' cached videos (R6, keyed `{pk}_{position}`:
+     * `VideoCacheTest` runs `removeCarouselItems`) and its downloaded carousel images; Delete library removes them all.
+     */
     @Test
-    fun unsavingAndDeleteLibraryRemoveTheCarouselImages() {
+    fun unsavingAndDeleteLibraryRemoveTheCarouselImagesAndVideos() {
         val container = main("di/AppContainer.kt")
         val engine = callArguments(container, "SyncEngine(").single()
-        assertTrue(
-            Regex("""eviction\s*=\s*MediaEviction\s*\{\s*pks\s*->\s*pks\.forEach\s*\{[^}]*videoCache\.remove\(\s*it\s*\)[^}]*carouselImages\.deleteFor\(\s*it\s*\)""")
-                .containsMatchIn(engine),
-            "the engine's eviction: $engine",
-        )
+        val eviction = Regex("""eviction\s*=\s*MediaEviction\s*\{\s*pks\s*->\s*pks\.forEach\s*\{([^}]*)}""").find(engine)?.groupValues?.get(1)
+        assertTrue(eviction != null, "the engine's eviction: $engine")
+        for (call in listOf("videoCache.remove", "videoCache.removeCarouselItems", "carouselImages.deleteFor")) {
+            assertTrue(Regex("""(?<![\w.])${Regex.escape(call)}\(\s*it\s*\)""").containsMatchIn(eviction), "the eviction must call $call(it): $eviction")
+        }
         val library = callArguments(container, "LibraryRepository(").single()
         assertTrue(Regex("""\bcarouselImages\s*=\s*carouselImages\b""").containsMatchIn(library), "Delete library: $library")
     }
