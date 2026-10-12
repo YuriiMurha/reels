@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.data.db.CollectionEntity
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.data.media.CdnRateLimited
 import io.github.yuriimurha.reels.data.media.MediaEviction
 import io.github.yuriimurha.reels.data.media.MediaFetcher
@@ -15,7 +16,9 @@ import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.Account
 import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Page
+import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import io.github.yuriimurha.reels.instagram.fake.FakeFailures
@@ -2245,6 +2248,104 @@ class SyncEngineTest {
         assertEquals(SyncStatus.DONE, runSync(engine(client), SyncMode.QUICK).status)
 
         assertEquals(mapOf("c1" to "Workouts", "c2" to "Collection 1", "c3" to "Collection 2"), names())
+    }
+
+    // ---- Carousel items (viewer UX) ----
+
+    /** [delegate]'s saved pages, with the post [pk] carrying [items] as its carousel items instead of its own. */
+    private class CarouselItemsOf(
+        private val delegate: InstagramClient,
+        private val pk: String,
+        private val items: List<RemoteCarouselItem>?,
+    ) : InstagramClient by delegate {
+        override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+            val page = delegate.savedMedia(collectionId, cursor)
+            return page.copy(items = page.items.map { if (it.pk == pk) it.copy(carouselItems = items) else it })
+        }
+    }
+
+    private suspend fun storedItems(pk: String) = db.carouselItemDao().items(pk)
+
+    private fun storedItemCount(): Int =
+        db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM carousel_item").use { it.moveToFirst(); it.getInt(0) }
+
+    /**
+     * Syncs [client]'s library once and returns a carousel of its first saved page (the fake client's pages hold 20) that has
+     * a video child (3 items or more), stored with its items.
+     */
+    private suspend fun TestScope.syncedCarousel(client: FakeInstagramClient): RemoteMedia {
+        assertEquals(SyncStatus.DONE, runSync(engine(client), SyncMode.QUICK).status)
+        val carousel = client.library.allSaved().take(20).first { (it.carouselItems?.size ?: 0) >= 3 }
+        assertEquals(carousel.carouselItems!!.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: stored")
+        return carousel
+    }
+
+    @Test
+    fun aSyncedCarouselStoresItsItems() = runTest {
+        val client = smallClient()
+        assertEquals(SyncStatus.DONE, runSync(engine(client), SyncMode.QUICK).status)
+
+        val carousels = client.library.allSaved().filter { it.type == MediaType.CAROUSEL }
+        assertTrue(carousels.any { (it.carouselItems?.size ?: 0) >= 3 }, "precondition: a carousel with a video child")
+        for (carousel in carousels) {
+            val items = assertNotNull(carousel.carouselItems)
+            assertEquals(items.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), carousel.pk)
+        }
+        val video = storedItems(carousels.first { (it.carouselItems?.size ?: 0) >= 3 }.pk)[2]
+        assertEquals(MediaType.VIDEO to "fake://video/${video.parentPk}-2", video.type to video.videoUrl)
+        assertEquals(carousels.sumOf { it.carouselItems!!.size }, storedItemCount(), "no rows for posts that aren't carousels")
+    }
+
+    @Test
+    fun aResyncReplacesTheItems() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val fewer = carousel.carouselItems!!.take(2).map { it.copy(imageUrl = "${it.imageUrl}-renewed") }
+
+        assertEquals(SyncStatus.DONE, runSync(engine(CarouselItemsOf(fake, carousel.pk, fewer)), SyncMode.FULL).status)
+
+        assertEquals(fewer.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "exactly the new set")
+    }
+
+    @Test
+    fun aCarouselWithoutItemsInTheReplyKeepsTheStoredOnes() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val stored = storedItems(carousel.pk)
+
+        assertEquals(SyncStatus.DONE, runSync(engine(CarouselItemsOf(fake, carousel.pk, null)), SyncMode.FULL).status)
+
+        assertEquals(stored, storedItems(carousel.pk))
+    }
+
+    /** R2: an empty list says no more than null does, so the stored items stay. */
+    @Test
+    fun anEmptyItemListKeepsTheStoredOnes() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val stored = storedItems(carousel.pk)
+
+        assertEquals(SyncStatus.DONE, runSync(engine(CarouselItemsOf(fake, carousel.pk, emptyList())), SyncMode.FULL).status)
+
+        assertEquals(stored, storedItems(carousel.pk))
+    }
+
+    @Test
+    fun itemsAreWrittenInThePagesTransaction() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val stored = storedItems(carousel.pk)
+        // The engine takes the database whole, so its collectionDao can't be swapped for a throwing one. This trigger makes its
+        // membership upsert throw instead: on the carousel's own page, after the media upsert and the items' replace.
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_memberships BEFORE INSERT ON collection_media BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+        )
+
+        val run = runSync(engine(CarouselItemsOf(fake, carousel.pk, carousel.carouselItems!!.take(1))), SyncMode.FULL)
+
+        assertEquals(SyncStatus.PAUSED, run.status)
+        assertTrue(run.lastError.orEmpty().startsWith("Unexpected error"), "the injected failure stopped the run: ${run.lastError}")
+        assertEquals(stored, storedItems(carousel.pk), "the page rolled back, and its items with it")
     }
 
     private class ThrowingSignals : SessionSignals {

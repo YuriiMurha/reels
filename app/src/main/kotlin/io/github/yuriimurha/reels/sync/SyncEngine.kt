@@ -11,6 +11,7 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.db.ThumbnailTarget
+import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.data.media.CdnRateLimited
 import io.github.yuriimurha.reels.data.media.MediaEviction
 import io.github.yuriimurha.reels.data.media.MediaFetcher
@@ -97,6 +98,7 @@ class SyncEngine(
     private val mediaDao = db.mediaDao()
     private val collectionDao = db.collectionDao()
     private val syncDao = db.syncDao()
+    private val carouselDao = db.carouselItemDao()
 
     /**
      * Executes or resumes run [runId]. Its final status is always written to `sync_run` before this returns:
@@ -433,8 +435,9 @@ class SyncEngine(
     )
 
     /**
-     * One page in one transaction: media, memberships, cursor and (at the end of a FULL walk) reconcile. With [placeholders]
-     * (the names are the last good ones), a collection an item lists that none of them names is added ([addPlaceholder]).
+     * One page in one transaction: media, carousel items, memberships, cursor and (at the end of a FULL walk) reconcile.
+     * With [placeholders] (the names are the last good ones), a collection an item lists that none of them names is added
+     * ([addPlaceholder]).
      */
     private suspend fun applyPage(
         progress: Progress,
@@ -452,6 +455,10 @@ class SyncEngine(
         val members = collectionDao.memberships(scope, pks).associateBy { it.mediaPk }
 
         mediaDao.upsert(page.items.map { it.toEntity(existing[it.pk], at) })
+        // A carousel's items, with their post. null or an empty list says nothing about them (R2): the stored ones stay.
+        page.items.forEach { item ->
+            item.carouselItems?.takeIf { it.isNotEmpty() }?.let { carouselDao.replace(item.pk, it.map { c -> c.toEntity(item.pk) }) }
+        }
         val memberships = page.items.mapIndexed { offset, item ->
             val known = members[item.pk]
             val key = if (mode == SyncMode.FULL || known == null) {

@@ -68,6 +68,11 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    // The exported Room schemas, for MigrationTestHelper in the JVM (Robolectric) tests, which builds the old versions from them.
+    // AGP merges no assets of the `test` source set: Robolectric reads the debug variant's, so they are debug assets (never
+    // in a release build).
+    sourceSets["debug"].assets.srcDir("$projectDir/schemas")
 }
 
 room {
@@ -122,6 +127,7 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.work.testing)
     testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.room.testing)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(platform(libs.compose.bom))
