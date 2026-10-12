@@ -77,10 +77,16 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Permalinks
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.Thumbnail
+import io.github.yuriimurha.reels.ui.common.sharedMedia
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.withContext
 
 /** Test tag of the page that has the player (only the settled, playing page has one); the on-device smoke suite looks for it. */
 const val VIDEO_SURFACE_TAG = "video-surface"
+
+/** Test tag of a page's media (the box the shared element goes on, see `PostMedia`). */
+const val POST_MEDIA_TAG = "post-media"
 
 /** The player stopped on the unit of [page] with [error]; a new instance per failure, so the effect that handles it restarts. */
 private class PlayerFailure(val page: SettledPage, val error: Throwable)
@@ -149,34 +155,41 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
         player.addListener(listener)
         onDispose { player.removeListener(listener) }
     }
+    // Both effects below call the player, which must only ever be called on the main thread. They run there in the app; pinned
+    // to it, they also stay there where a test's unconfined dispatcher would resume them on whatever thread woke them (a Room
+    // thread that applied a snapshot, say: the player then threw).
     LaunchedEffect(pagerState, items) {
-        viewModel.followSettledPages(
-            // A new post, or a new item of the settled carousel (its pager reports it to the ViewModel, whose state this reads).
-            settled = snapshotFlow(settledNow)
-                .distinctUntilChanged { a, b -> a.index == b.index && a.media?.pk == b.media?.pk && a.position == b.position },
-            nextOf = { page -> items.itemSnapshotList.getOrNull(page.index + 1) },
-            isStillSettled = isStillSettled,
-            onSettled = { page ->
-                onIndexSettled(page.index)
-                player.stop()
-                player.clearMediaItems()
-                playing = null
-                unavailable = null
-                failure = null
-            },
-            onSource = present,
-        )
+        withContext(Dispatchers.Main.immediate) {
+            viewModel.followSettledPages(
+                // A new post, or a new item of the settled carousel (its pager reports it to the ViewModel, whose state this reads).
+                settled = snapshotFlow(settledNow)
+                    .distinctUntilChanged { a, b -> a.index == b.index && a.media?.pk == b.media?.pk && a.position == b.position },
+                nextOf = { page -> items.itemSnapshotList.getOrNull(page.index + 1) },
+                isStillSettled = isStillSettled,
+                onSettled = { page ->
+                    onIndexSettled(page.index)
+                    player.stop()
+                    player.clearMediaItems()
+                    playing = null
+                    unavailable = null
+                    failure = null
+                },
+                onSource = present,
+            )
+        }
     }
     // A refused link is renewed once; the effect restarts for every new failure and is cancelled by the next settle (failure = null).
     LaunchedEffect(failure) {
         val failed = failure ?: return@LaunchedEffect
         val media = failed.page.media ?: return@LaunchedEffect
-        playIfStillSettled(
-            Playable(media.pk, failed.page.position),
-            resolve = { viewModel.recover(media, failed.error, it.position) },
-            isStillSettled = isStillSettled,
-            onSource = { present(failed.page, it) },
-        )
+        withContext(Dispatchers.Main.immediate) {
+            playIfStillSettled(
+                Playable(media.pk, failed.page.position),
+                resolve = { viewModel.recover(media, failed.error, it.position) },
+                isStillSettled = isStillSettled,
+                onSource = { present(failed.page, it) },
+            )
+        }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -206,6 +219,8 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
                 unavailable = cannotPlay?.takeIf { unit?.position == null },
                 carousel = carouselState?.let { state -> cannotPlay?.let { state.withItemFailure(state.settled, it) } ?: state },
                 onItemSettled = { position -> media?.let { viewModel.onItemSettled(it.pk, position) } },
+                // The settled page only: its neighbours are composed too, and their tiles may be on the grid as well.
+                sharedWithTile = page == pagerState.settledPage,
             )
         }
         IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp)) {
@@ -255,12 +270,17 @@ fun ViewerPage(
     carousel: CarouselUiState? = null,
     /** A carousel post's pager settled on the item at this page. */
     onItemSettled: (Int) -> Unit = {},
+    /** This page's media grows from and shrinks back into the post's grid tile (the shared element, `sharedMedia`). */
+    sharedWithTile: Boolean = false,
 ) {
     Box(modifier.fillMaxSize().background(Color.Black)) {
         if (media == null) return@Box
         val carouselState = if (media.type == MediaType.CAROUSEL) carousel ?: CarouselUiState() else null
         val carouselPager = carouselState?.let { rememberCarouselPagerState(it) }
-        PostMedia(media, player, onTogglePlay, carouselState, carouselPager, onItemSettled, Modifier.fillMaxSize())
+        PostMedia(
+            media, player, onTogglePlay, carouselState, carouselPager, onItemSettled,
+            Modifier.fillMaxSize().then(if (sharedWithTile) Modifier.sharedMedia(media.pk) else Modifier),
+        )
         val isVideo = when (media.type) {
             MediaType.REEL, MediaType.VIDEO -> true
             // On a carousel the settled item decides: its video items play under the same mute setting.
@@ -279,6 +299,10 @@ fun ViewerPage(
 /**
  * The current post's media, filling [modifier]: the playing video, the thumbnail, or for a carousel its [CarouselPager] (over
  * [carouselPager], hoisted so the page can put the dots with the overlay).
+ *
+ * One box, tagged [POST_MEDIA_TAG], wraps whatever shows, and [modifier] (with the shared element, when this is the settled page)
+ * goes on it: the thumbnail giving way to the video as it starts, or a carousel moving to another item, never replaces the shared
+ * element's node mid-transition. For a carousel it is the whole pager: the post shrinks into its tile whatever item shows.
  */
 @Composable
 private fun PostMedia(
@@ -290,17 +314,20 @@ private fun PostMedia(
     onItemSettled: (Int) -> Unit,
     modifier: Modifier,
 ) {
-    when {
-        carousel != null && carouselPager != null ->
-            CarouselPager(media, carousel, player, onItemSettled, modifier, pagerState = carouselPager, onTogglePlay = onTogglePlay)
-        player != null -> VideoFrame(player, onTogglePlay, modifier) { Thumbnail(media.thumbPath, Modifier.fillMaxSize(), ContentScale.Fit) }
-        media.thumbPath != null -> Thumbnail(media.thumbPath, modifier, ContentScale.Fit)
-        else -> Box(modifier) {
-            Text(
-                "Not available on Instagram",
-                color = Color.White.copy(alpha = 0.7f),
-                modifier = Modifier.align(Alignment.Center),
-            )
+    Box(modifier.testTag(POST_MEDIA_TAG)) {
+        val fill = Modifier.fillMaxSize()
+        when {
+            carousel != null && carouselPager != null ->
+                CarouselPager(media, carousel, player, onItemSettled, fill, pagerState = carouselPager, onTogglePlay = onTogglePlay)
+            player != null -> VideoFrame(player, onTogglePlay, fill) { Thumbnail(media.thumbPath, Modifier.fillMaxSize(), ContentScale.Fit) }
+            media.thumbPath != null -> Thumbnail(media.thumbPath, fill, ContentScale.Fit)
+            else -> Box(fill) {
+                Text(
+                    "Not available on Instagram",
+                    color = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
         }
     }
 }

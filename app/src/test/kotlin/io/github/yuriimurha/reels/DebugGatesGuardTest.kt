@@ -23,7 +23,8 @@ class DebugGatesGuardTest {
 
     @Test
     fun theLabRouteIsOnlyEverRegisteredInsideADebugGate() {
-        assertEveryOccurrenceIsGated("ui/ReelsNavHost.kt", "composable<AdapterLabRoute>")
+        // `screen` is the nav host's own `composable` (it gives each destination its animated scope, for shared elements).
+        assertEveryOccurrenceIsGated("ui/ReelsNavHost.kt", "screen<AdapterLabRoute>")
     }
 
     @Test

@@ -227,6 +227,35 @@ class SmokeTest {
         shots.take("carousel-second-item")
     }
 
+    // --- 7. Motion ------------------------------------------------------------------------------------------------------
+
+    /**
+     * Back from a post shrinks it into its tile (spec 2026-10-12 §3.6), so after swiping far from the post that was opened, the
+     * grid brings the tile of the post the viewer is on into view. Runs under the emulator's own animation settings.
+     */
+    @Test
+    fun t7Motion_backFromAFarPostShowsThatPostsTile() {
+        val shots = Screenshots(composeRule, "t7")
+        ensureLibrary()
+        openCard("All Saved")
+        composeRule.onAllNodes(tile)[0].performClick()
+        await("the viewer's Open on Instagram") { displayed(openOnInstagram).isNotEmpty() }
+        repeat(FAR_SWIPES) {
+            composeRule.onRoot().performTouchInput { swipeUp(startY = height * 0.8f, endY = height * 0.2f, durationMillis = 250) }
+            composeRule.waitForIdle()
+        }
+        // What the viewer shows of the post it is on: its author and caption, among the other texts on screen.
+        val onScreen = displayed(hasAnyText).flatMap(::textsOf).toSet()
+        assertTrue("the viewer shows no author: $onScreen", onScreen.any { it.startsWith("@") })
+        shots.take("viewer-far-post")
+
+        pressBackUntil("the grid again") { exists(gridTitle("All Saved")) && exists(tile) && !exists(openOnInstagram) }
+        await("the tile of the post the viewer was on, in view") {
+            displayed(tile).any { node -> identityOf(textsOf(node)).let { it.isNotEmpty() && onScreen.containsAll(it) } }
+        }
+        shots.take("grid-at-that-tile")
+    }
+
     // --- Steps -----------------------------------------------------------------------------------------------------------
 
     /** Home shows cards, or, when the fake library is empty, a sync fills it first. */
@@ -303,6 +332,13 @@ class SmokeTest {
     private fun textOf(node: SemanticsNodeInteraction): String =
         node.fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
 
+    /** Every text of [node] (a tile's are merged: its badge, its author, its caption). */
+    private fun textsOf(node: SemanticsNodeInteraction): List<String> =
+        node.fetchSemanticsNode().config.getOrElse(SemanticsProperties.Text) { emptyList() }.map { it.text }
+
+    /** A tile's author and caption (its badge comes first and is left out): what the viewer shows of the same post. */
+    private fun identityOf(tileTexts: List<String>): List<String> = tileTexts.dropWhile { !it.startsWith("@") }.take(2)
+
     private fun pressBack() {
         InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
         composeRule.waitForIdle()
@@ -332,6 +368,7 @@ class SmokeTest {
     private val openOnInstagram = hasContentDescription("Open on Instagram") // an icon button: its words are its content description
     private val muteControl = hasContentDescription("Mute") or hasContentDescription("Unmute")
     private val carouselCounter = hasTestTag(CAROUSEL_COUNTER_TAG)
+    private val hasAnyText = SemanticsMatcher.keyIsDefined(SemanticsProperties.Text)
 
     private fun exists(matcher: SemanticsMatcher): Boolean = composeRule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()
 
@@ -393,6 +430,8 @@ class SmokeTest {
         const val SYNC_TIMEOUT_MS = 180_000L
         const val MAX_SWIPES = 12
         const val MAX_CAROUSEL_SWIPES = 40
+        /** Far enough that the post's tile is off the grid's first screen. */
+        const val FAR_SWIPES = 8
         const val SEARCH_WORD = "coffee"
         const val FRAME_WIDTH = 54
         const val FRAME_HEIGHT = 96
