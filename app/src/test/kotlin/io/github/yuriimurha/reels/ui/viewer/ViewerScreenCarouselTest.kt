@@ -32,6 +32,7 @@ import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.di.AppContainer
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.testutil.closingAfterComposition
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
@@ -57,8 +58,14 @@ private const val OFFLINE = "Offline: this item isn't cached yet"
  */
 @RunWith(AndroidJUnit4::class)
 class ViewerScreenCarouselTest {
-    @get:Rule
     val compose = createComposeRule()
+
+    /** The player and the database go only once the compose rule has disposed the screen, which uses both until then. */
+    @get:Rule
+    val rules = closingAfterComposition(compose) {
+        if (::exo.isInitialized) exo.release()
+        if (::container.isInitialized) container.db.close()
+    }
 
     private val context: Context = ApplicationProvider.getApplicationContext()
     private lateinit var container: AppContainer
@@ -143,8 +150,6 @@ class ViewerScreenCarouselTest {
 
     @After
     fun tearDown() {
-        exo.release()
-        container.db.close()
         // Task 6 minor 1: every call the screen made on the player came on the main thread.
         assertEquals(emptyList(), player.offMain.toList(), "player calls off the main thread")
     }

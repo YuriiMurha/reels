@@ -40,6 +40,7 @@ import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.endViewModels
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.CancellationException
@@ -93,16 +94,19 @@ class ViewerViewModelTest {
     private var now = START
     private val viewModels = mutableListOf<ViewerViewModel>()
 
+    private val main = StandardTestDispatcher()
+
     @Before
-    fun setMain() = Dispatchers.setMain(StandardTestDispatcher())
+    fun setMain() = Dispatchers.setMain(main)
 
     @After
     fun tearDown() {
-        // A carousel visit's work (its fill, its images) lives in the ViewModel's scope: end it before the database goes.
-        viewModels.forEach { it.viewModelScope.cancel() }
-        Dispatchers.resetMain()
+        // A carousel visit's work (its fill, its images) lives in the ViewModel's scope: end it, and wait until it has finished,
+        // before the database goes and before Main is reset (endViewModels says why cancelling alone is not enough).
+        endViewModels(viewModels, main)
         db.close()
         storeScope.cancel()
+        Dispatchers.resetMain()
     }
 
     private fun viewModel(

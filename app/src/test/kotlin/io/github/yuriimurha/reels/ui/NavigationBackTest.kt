@@ -34,11 +34,11 @@ import io.github.yuriimurha.reels.data.db.CollectionMediaEntity
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.di.AppContainer
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.testutil.closingAfterComposition
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import io.github.yuriimurha.reels.ui.viewer.POST_MEDIA_TAG
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -57,8 +57,11 @@ import kotlin.test.assertTrue
  */
 @RunWith(AndroidJUnit4::class)
 class NavigationBackTest {
-    @get:Rule
     val compose = createComposeRule()
+
+    /** The database closes only once the compose rule has disposed the screen (Task 6 minor 5): its flows query it until then. */
+    @get:Rule
+    val rules = closingAfterComposition(compose) { if (::container.isInitialized) container.db.close() }
 
     private val context: Context = ApplicationProvider.getApplicationContext()
     private lateinit var container: AppContainer
@@ -69,11 +72,6 @@ class NavigationBackTest {
     @Before
     fun setUp() {
         container = AppContainer(context)
-    }
-
-    @After
-    fun tearDown() {
-        container.db.close()
     }
 
     /** [count] images in All Saved, newest (highest sortKey) first, so item `i` is `m{count-1-i}`. */
