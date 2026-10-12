@@ -25,11 +25,16 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_COUNTER_TAG
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_DOTS_TAG
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_PAGER_TAG
 import io.github.yuriimurha.reels.ui.viewer.VIDEO_SURFACE_TAG
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -196,6 +201,31 @@ class SmokeTest {
         shots.take("home-after-search")
     }
 
+    // --- 6. Carousel ----------------------------------------------------------------------------------------------------
+
+    /** A carousel post swipes left to its second item, and its counter says so (spec 2026-10-12 §3.2). */
+    @Test
+    fun t6Carousel_aCarouselSwipesToItsSecondItem() {
+        val shots = Screenshots(composeRule, "t6")
+        ensureLibrary()
+        openCard("All Saved")
+        composeRule.onAllNodes(tile)[0].performClick()
+        await("the viewer's Open on Instagram") { displayed(openOnInstagram).isNotEmpty() }
+        swipeToCarouselPage()
+
+        // The pager has one page (the cover) until the items are read or filled; the dots come with them.
+        await("the carousel's items (its dots)") { displayed(hasTestTag(CAROUSEL_DOTS_TAG)).isNotEmpty() }
+        val first = textOf(displayed(carouselCounter).single())
+        assertTrue("the counter starts at the first item: $first", first.matches(Regex("1/\\d+")))
+        val total = first.substringAfter('/')
+        shots.take("carousel-first-item")
+
+        displayed(hasTestTag(CAROUSEL_PAGER_TAG)).single().performTouchInput { swipeLeft() }
+
+        await("the counter to read 2/$total") { displayed(carouselCounter and hasText("2/$total")).isNotEmpty() }
+        shots.take("carousel-second-item")
+    }
+
     // --- Steps -----------------------------------------------------------------------------------------------------------
 
     /** Home shows cards, or, when the fake library is empty, a sync fills it first. */
@@ -259,6 +289,19 @@ class SmokeTest {
         await("a video page within $MAX_SWIPES swipes") { displayed(muteControl).isNotEmpty() }
     }
 
+    /** Swipes the viewer up until the settled page is a carousel (it has the "N/M" counter). About one post in ten is one. */
+    private fun swipeToCarouselPage() {
+        repeat(MAX_CAROUSEL_SWIPES) {
+            if (displayed(carouselCounter).isNotEmpty()) return
+            composeRule.onRoot().performTouchInput { swipeUp(startY = height * 0.8f, endY = height * 0.2f, durationMillis = 250) }
+            composeRule.waitForIdle()
+        }
+        await("a carousel page within $MAX_CAROUSEL_SWIPES swipes") { displayed(carouselCounter).isNotEmpty() }
+    }
+
+    private fun textOf(node: SemanticsNodeInteraction): String =
+        node.fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
+
     private fun pressBack() {
         InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
         composeRule.waitForIdle()
@@ -287,6 +330,7 @@ class SmokeTest {
         (hasText("Not synced") or hasText("Syncing…") or hasText("Synced ", substring = true) or hasText("⚠", substring = true))
     private val openOnInstagram = hasText("Open on Instagram")
     private val muteControl = hasText("Mute") or hasText("Unmute")
+    private val carouselCounter = hasTestTag(CAROUSEL_COUNTER_TAG)
 
     private fun exists(matcher: SemanticsMatcher): Boolean = composeRule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()
 
@@ -347,6 +391,7 @@ class SmokeTest {
         const val VIDEO_TIMEOUT_MS = 30_000L
         const val SYNC_TIMEOUT_MS = 180_000L
         const val MAX_SWIPES = 12
+        const val MAX_CAROUSEL_SWIPES = 40
         const val SEARCH_WORD = "coffee"
         const val FRAME_WIDTH = 54
         const val FRAME_HEIGHT = 96

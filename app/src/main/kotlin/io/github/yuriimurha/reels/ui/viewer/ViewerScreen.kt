@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -66,14 +67,17 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Permalinks
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.Thumbnail
-import io.github.yuriimurha.reels.ui.common.carouselLabel
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /** Test tag of the page that has the player (only the settled, playing page has one); the on-device smoke suite looks for it. */
 const val VIDEO_SURFACE_TAG = "video-surface"
 
-/** The player stopped on [media] with [error]; a new instance per failure, so the effect that handles it restarts. */
-private class PlayerFailure(val media: MediaEntity, val error: Throwable)
+/** The player stopped on the unit of [page] with [error]; a new instance per failure, so the effect that handles it restarts. */
+private class PlayerFailure(val page: SettledPage, val error: Throwable)
+
+/** For a carousel post, the item its pager settled on in the [carousel] visit (0 until the visit says otherwise); null for any other post. */
+private fun carouselPosition(media: MediaEntity, carousel: SettledCarousel?): Int? =
+    if (media.type != MediaType.CAROUSEL) null else carousel?.takeIf { it.pk == media.pk }?.state?.settled ?: 0
 
 /** Full-screen vertical pager over the same list the grid showed (spec 9.3). One player is reused across pages. */
 @Composable
@@ -81,34 +85,41 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
     val container = LocalAppContainer.current
     val context = LocalContext.current
     val viewModel = viewModel(key = "viewer:${source.encode()}:$startIndex") {
-        ViewerViewModel(source, startIndex, container.library, container.videoResolver, container.settings)
+        ViewerViewModel(source, startIndex, container.library, container.videoResolver, container.settings, container.carouselRepository)
     }
     val items = viewModel.items.collectAsLazyPagingItems()
     val muted by viewModel.muted.collectAsStateWithLifecycle(initialValue = false)
+    /** The settled post's carousel visit (its items and settled item), or null when that post is not a carousel. */
+    val carousel by viewModel.carousel.collectAsStateWithLifecycle()
     val pagerState = rememberPagerState(initialPage = startIndex) { items.itemCount }
     val player = rememberViewerPlayer(container)
-    /** The item the player has loaded, or null. */
-    var playing by remember { mutableStateOf<MediaEntity?>(null) }
-    /** The pk of the item that cannot play, with the reason shown under its thumbnail. */
-    var unavailable by remember { mutableStateOf<Pair<String, String>?>(null) }
+    /** The unit the player has loaded (its page, and for a carousel its item), or null. */
+    var playing by remember { mutableStateOf<SettledPage?>(null) }
+    /** The unit that cannot play, with the reason shown over it. */
+    var unavailable by remember { mutableStateOf<Pair<Playable, String>?>(null) }
     var failure by remember { mutableStateOf<PlayerFailure?>(null) }
 
-    val settledPk = { items.itemSnapshotList.getOrNull(pagerState.settledPage)?.pk }
-    val isStillSettled = { media: MediaEntity -> settledPk() == media.pk }
-    val present = { media: MediaEntity, source: VideoSource ->
+    /** The settled unit now: the vertical pager's post and, for a carousel, the item its own pager settled on. */
+    val settledNow = {
+        val index = pagerState.settledPage
+        val media = items.itemSnapshotList.getOrNull(index)
+        SettledPage(index, media, media?.let { carouselPosition(it, carousel) })
+    }
+    val isStillSettled = { unit: Playable -> settledNow().playable == unit }
+    val present = { page: SettledPage, source: VideoSource ->
         when (source) {
             is VideoSource.Play -> {
                 player.setMediaItem(source.toMediaItem())
                 player.prepare()
                 player.play()
                 unavailable = null
-                playing = media
+                playing = page
             }
             is VideoSource.Unavailable -> {
                 player.stop()
                 player.clearMediaItems()
                 playing = null
-                unavailable = media.pk to source.message
+                unavailable = page.playable?.let { it to source.message }
             }
         }
     }
@@ -125,8 +136,9 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
     }
     LaunchedEffect(pagerState, items) {
         viewModel.followSettledPages(
-            settled = snapshotFlow { SettledPage(pagerState.settledPage, items.itemSnapshotList.getOrNull(pagerState.settledPage)) }
-                .distinctUntilChanged { a, b -> a.index == b.index && a.media?.pk == b.media?.pk },
+            // A new post, or a new item of the settled carousel (its pager reports it to the ViewModel, whose state this reads).
+            settled = snapshotFlow(settledNow)
+                .distinctUntilChanged { a, b -> a.index == b.index && a.media?.pk == b.media?.pk && a.position == b.position },
             nextOf = { page -> items.itemSnapshotList.getOrNull(page.index + 1) },
             isStillSettled = isStillSettled,
             onSettled = { page ->
@@ -143,11 +155,12 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
     // A refused link is renewed once; the effect restarts for every new failure and is cancelled by the next settle (failure = null).
     LaunchedEffect(failure) {
         val failed = failure ?: return@LaunchedEffect
+        val media = failed.page.media ?: return@LaunchedEffect
         playIfStillSettled(
-            failed.media,
-            resolve = { viewModel.recover(it, failed.error) },
+            Playable(media.pk, failed.page.position),
+            resolve = { viewModel.recover(media, failed.error, it.position) },
             isStillSettled = isStillSettled,
-            onSource = { present(failed.media, it) },
+            onSource = { present(failed.page, it) },
         )
     }
 
@@ -162,15 +175,22 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
             val collections by produceState(emptyList<String>(), media?.pk) {
                 value = media?.let { viewModel.collectionNames(it.pk) }.orEmpty()
             }
+            /** This page's unit: its post, and for the settled carousel its settled item. */
+            val unit = media?.let { Playable(it.pk, carouselPosition(it, carousel)) }
+            val cannotPlay = unavailable?.takeIf { unit != null && it.first == unit }?.second
+            val carouselState = media?.let { m -> carousel?.takeIf { it.pk == m.pk }?.state }
             ViewerPage(
                 media = media,
-                player = player.takeIf { media != null && media.pk == playing?.pk },
+                player = player.takeIf { unit != null && playing?.playable == unit },
                 collections = collections,
                 muted = muted,
                 onToggleMute = viewModel::toggleMute,
                 onTogglePlay = { if (player.isPlaying) player.pause() else player.play() },
                 onOpenInstagram = { url -> context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) },
-                unavailable = unavailable?.takeIf { media != null && it.first == media.pk }?.second,
+                // A carousel item's reason shows on that item; any other post's above Open on Instagram (spec 8.5).
+                unavailable = cannotPlay?.takeIf { unit?.position == null },
+                carousel = carouselState?.let { state -> cannotPlay?.let { state.withItemFailure(state.settled, it) } ?: state },
+                onItemSettled = { position -> media?.let { viewModel.onItemSettled(it.pk, position) } },
             )
         }
         IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp)) {
@@ -200,8 +220,7 @@ private fun rememberViewerPlayer(container: AppContainer): ExoPlayer {
     return player
 }
 
-/** One page. [player] is non-null only for the page that is currently playing. */
-@OptIn(UnstableApi::class)
+/** One page. [player] is non-null only for the page that is currently playing (for a carousel: while its settled item plays). */
 @Composable
 fun ViewerPage(
     media: MediaEntity?,
@@ -214,43 +233,79 @@ fun ViewerPage(
     modifier: Modifier = Modifier,
     /** Why the video cannot play, shown over the thumbnail above Open on Instagram (spec 8.5); null while it can. */
     unavailable: String? = null,
+    /**
+     * A carousel post's visit: its items, settled item and messages ([CarouselPager]). Null (a carousel that is not the settled
+     * post) shows its cover as item 0, with "1/N". Ignored for any other post.
+     */
+    carousel: CarouselUiState? = null,
+    /** A carousel post's pager settled on the item at this page. */
+    onItemSettled: (Int) -> Unit = {},
 ) {
     Box(modifier.fillMaxSize().background(Color.Black)) {
         if (media == null) return@Box
-        val isVideo = media.type == MediaType.REEL || media.type == MediaType.VIDEO
-        when {
-            // A TextureView, not the default SurfaceView: on the emulator a SurfaceView created for a page the owner swiped
-            // back to often never got its surface, so the audio played under the thumbnail (6 of 8 tries; 0 of 8 with this).
-            player != null -> ContentFrame(
-                player = player,
-                surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
-                modifier = Modifier.fillMaxSize().testTag(VIDEO_SURFACE_TAG).clickable(onClick = onTogglePlay),
-                contentScale = ContentScale.Fit,
-                shutter = { Thumbnail(media.thumbPath, Modifier.fillMaxSize(), ContentScale.Fit) },
-            )
-            media.thumbPath != null -> Thumbnail(media.thumbPath, Modifier.fillMaxSize(), ContentScale.Fit)
-            else -> Text(
+        val carouselState = if (media.type == MediaType.CAROUSEL) carousel ?: CarouselUiState() else null
+        val carouselPager = carouselState?.let { rememberCarouselPagerState(it) }
+        PostMedia(media, player, onTogglePlay, carouselState, carouselPager, onItemSettled, Modifier.fillMaxSize())
+        val isVideo = when (media.type) {
+            MediaType.REEL, MediaType.VIDEO -> true
+            // On a carousel the settled item decides: its video items play under the same mute setting.
+            MediaType.CAROUSEL -> carouselState?.settledItem?.type == MediaType.VIDEO
+            MediaType.IMAGE -> false
+        }
+        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth()) {
+            if (carouselState != null && carouselPager != null) {
+                CarouselDots(carouselPager, carouselState.items.size, Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp))
+            }
+            Overlay(media, collections, isVideo, muted, unavailable, onToggleMute, onOpenInstagram)
+        }
+    }
+}
+
+/**
+ * The current post's media, filling [modifier]: the playing video, the thumbnail, or for a carousel its [CarouselPager] (over
+ * [carouselPager], hoisted so the page can put the dots with the overlay).
+ */
+@Composable
+private fun PostMedia(
+    media: MediaEntity,
+    player: Player?,
+    onTogglePlay: () -> Unit,
+    carousel: CarouselUiState?,
+    carouselPager: PagerState?,
+    onItemSettled: (Int) -> Unit,
+    modifier: Modifier,
+) {
+    when {
+        carousel != null && carouselPager != null ->
+            CarouselPager(media, carousel, player, onItemSettled, modifier, pagerState = carouselPager, onTogglePlay = onTogglePlay)
+        player != null -> VideoFrame(player, onTogglePlay, modifier) { Thumbnail(media.thumbPath, Modifier.fillMaxSize(), ContentScale.Fit) }
+        media.thumbPath != null -> Thumbnail(media.thumbPath, modifier, ContentScale.Fit)
+        else -> Box(modifier) {
+            Text(
                 "Not available on Instagram",
                 color = Color.White.copy(alpha = 0.7f),
                 modifier = Modifier.align(Alignment.Center),
             )
         }
-        if (media.type == MediaType.CAROUSEL) {
-            // Only the cover is shown (spec 9.3), so say how many slides the real post has.
-            Text(
-                carouselLabel(media),
-                color = Color.White,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .statusBarsPadding()
-                    .padding(16.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            )
-        }
-        Overlay(media, collections, isVideo, muted, unavailable, onToggleMute, onOpenInstagram, Modifier.align(Alignment.BottomStart))
     }
+}
+
+/**
+ * The viewer's one video surface, for a post and for a carousel's video item alike, tagged [VIDEO_SURFACE_TAG]; a tap pauses
+ * or plays it. [shutter] shows until the first frame.
+ */
+@OptIn(UnstableApi::class)
+@Composable
+internal fun VideoFrame(player: Player, onTogglePlay: () -> Unit, modifier: Modifier = Modifier, shutter: @Composable () -> Unit) {
+    // A TextureView, not the default SurfaceView: on the emulator a SurfaceView created for a page the owner swiped
+    // back to often never got its surface, so the audio played under the thumbnail (6 of 8 tries; 0 of 8 with this).
+    ContentFrame(
+        player = player,
+        surfaceType = SURFACE_TYPE_TEXTURE_VIEW,
+        modifier = modifier.fillMaxSize().testTag(VIDEO_SURFACE_TAG).clickable(onClick = onTogglePlay),
+        contentScale = ContentScale.Fit,
+        shutter = shutter,
+    )
 }
 
 @Composable

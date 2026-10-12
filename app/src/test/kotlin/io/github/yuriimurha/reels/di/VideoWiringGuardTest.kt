@@ -67,7 +67,7 @@ class VideoWiringGuardTest {
         val forbidden = Regex("""CookieHandler|CookieManager|CookieStore|cookieStore|CookieJar|instagramHttp|instagramTransport|InstagramTransport|WebViewTransport|setDefaultRequestProperties|"Cookie"""")
         for (path in listOf(
             "data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt",
-            "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt",
+            "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt", "ui/viewer/CarouselPager.kt",
             "data/media/PacedMediaInfo.kt", "data/media/CarouselRepository.kt", "data/media/CarouselImageStore.kt",
         )) {
             val hit = forbidden.find(main(path))
@@ -103,5 +103,8 @@ class VideoWiringGuardTest {
         val frames = callArguments(main("ui/viewer/ViewerScreen.kt"), "ContentFrame(")
         assertEquals(1, frames.size, "expected exactly one ContentFrame in the viewer: $frames")
         assertTrue("SURFACE_TYPE_TEXTURE_VIEW" in frames.single(), "the viewer's ContentFrame must use a TextureView: ${frames.single()}")
+        // A carousel's video item draws through that same frame (VideoFrame), never a ContentFrame of its own.
+        assertTrue("ContentFrame(" !in main("ui/viewer/CarouselPager.kt"), "the carousel must draw video through VideoFrame")
+        assertTrue("VideoFrame(" in main("ui/viewer/CarouselPager.kt"), "the carousel's video item uses VideoFrame")
     }
 }

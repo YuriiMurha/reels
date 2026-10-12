@@ -83,7 +83,7 @@ fun MediaTile(media: MediaEntity?, onClick: () -> Unit, modifier: Modifier = Mod
     }
 }
 
-/** The "1/N" badge text for a carousel's cover; shared by the grid tile and the viewer. */
+/** The "1/N" badge text on a carousel's grid tile (the viewer has its own "N/M" counter, `CarouselPager`). */
 internal fun carouselLabel(media: MediaEntity): String = "1/${media.carouselCount ?: 1}"
 
 @Composable
