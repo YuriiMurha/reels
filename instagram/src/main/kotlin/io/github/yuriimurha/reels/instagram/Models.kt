@@ -41,6 +41,9 @@ data class RemoteMedia(
     val videoUrlExpiresAt: Instant?,
     /** Real collections this item is saved in, or null when the response doesn't say (spec 7.2). */
     val savedCollectionIds: List<String>?,
-    /** A carousel's children, or null when this is not a carousel or the response carries no `carousel_media`. */
+    /**
+     * A carousel's children, or null when they are unknown: this is not a carousel, the response carries no `carousel_media`,
+     * or one of its children can't be read.
+     */
     val carouselItems: List<RemoteCarouselItem>? = null,
 )

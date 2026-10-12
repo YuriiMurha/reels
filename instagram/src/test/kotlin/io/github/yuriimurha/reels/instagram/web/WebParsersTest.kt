@@ -313,17 +313,76 @@ class WebParsersTest {
         assertNull(page.items[1].carouselItems)
     }
 
-    @Test
-    fun aChildWithAnUnknownMediaTypeIsAShapeChange() {
-        val unknown = child("""{"media_type":9,"original_width":1080,"original_height":1350}""")
-        assertSavedShapeChange("items[0].media.carousel_media[1].media_type", carouselPage(listOf(imageChild, unknown)))
-        val missing = child("""{"original_width":1080,"original_height":1350}""")
-        assertSavedShapeChange("items[0].media.carousel_media[0].media_type", carouselPage(listOf(missing)))
+    /**
+     * R4: [unreadable] as a carousel's child leaves the post's items unknown (null), never a [ShapeChanged]. The post itself
+     * parses exactly as it does with a readable child in that place, and the child is unreadable first or last.
+     */
+    private fun assertItemsUnknownWith(unreadable: JsonElement) {
+        val readable = carouselOf(listOf(imageChild, squareChild))
+        assertNotNull(readable.carouselItems)
+        assertEquals(readable.copy(carouselItems = null), carouselOf(listOf(imageChild, unreadable)), "$unreadable last")
+        val first = carouselOf(listOf(unreadable, imageChild))
+        assertEquals(MediaType.CAROUSEL, first.type)
+        assertNull(first.carouselItems, "$unreadable first")
     }
 
     @Test
-    fun aChildThatIsNoObjectIsAShapeChange() {
-        assertSavedShapeChange("items[0].media.carousel_media[1]", carouselPage(listOf(imageChild, JsonPrimitive("x"))))
+    fun aChildWithAnUnknownOrMissingMediaTypeLeavesThePostsItemsUnknown() {
+        assertItemsUnknownWith(child("""{"media_type":9,"original_width":1080,"original_height":1350}"""))
+        assertItemsUnknownWith(child("""{"original_width":1080,"original_height":1350}"""))
+        // A carousel's child is an image or a video, never another carousel.
+        assertItemsUnknownWith(child("""{"media_type":8,"original_width":1080,"original_height":1350}"""))
+        assertItemsUnknownWith(child("""{"media_type":"1","original_width":1080,"original_height":1350}"""))
+    }
+
+    @Test
+    fun aChildThatIsNoObjectLeavesThePostsItemsUnknown() {
+        assertItemsUnknownWith(JsonPrimitive("x"))
+        assertItemsUnknownWith(JsonPrimitive(1))
+        assertItemsUnknownWith(JsonArray(listOf(imageChild)))
+    }
+
+    @Test
+    fun aNullChildLeavesThePostsItemsUnknown() {
+        assertItemsUnknownWith(JsonNull)
+    }
+
+    @Test
+    fun aVideoChildWithoutVideoVersionsIsAVideoWithNoVideoUrl() {
+        val noVersions = child(
+            """{"media_type":2,"original_width":1080,"original_height":1920,"image_versions2":{"candidates":[
+                {"url":"https://cdn.example.invalid/v/t51/441.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn","width":720,"height":1280}]}}""",
+        )
+        val item = assertNotNull(carouselOf(listOf(noVersions)).carouselItems).single()
+        assertEquals(MediaType.VIDEO, item.type)
+        assertNull(item.videoUrl)
+        assertNull(item.videoUrlExpiresAt)
+        assertEquals("https://cdn.example.invalid/v/t51/441.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", item.imageUrl)
+    }
+
+    @Test
+    fun anImageChildThatCarriesVideoVersionsHasNoVideoUrl() {
+        val imageWithVideo = (imageChild as JsonObject).with("video_versions", (videoChild as JsonObject).getValue("video_versions"))
+        val item = assertNotNull(carouselOf(listOf(imageWithVideo)).carouselItems).single()
+        assertEquals(MediaType.IMAGE, item.type)
+        assertNull(item.videoUrl)
+        assertNull(item.videoUrlExpiresAt)
+    }
+
+    @Test
+    fun anEmptyCarouselMediaGivesNoItemsRatherThanUnknownOnes() {
+        assertEquals(emptyList(), carouselOf(emptyList()).carouselItems)
+    }
+
+    @Test
+    fun twentyChildrenComeOutInOrder() {
+        val urls = List(20) { "https://cdn.example.invalid/v/t51/${500 + it}.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn" }
+        val children = urls.map { url ->
+            child("""{"media_type":1,"original_width":1080,"original_height":1350,"image_versions2":{"candidates":[{"url":"$url","width":720,"height":900}]}}""")
+        }
+        val items = assertNotNull(carouselOf(children).carouselItems)
+        assertEquals((0 until 20).toList(), items.map { it.position })
+        assertEquals(urls, items.map { it.imageUrl })
     }
 
     @Test

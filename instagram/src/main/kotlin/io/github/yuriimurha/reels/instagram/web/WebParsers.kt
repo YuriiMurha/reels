@@ -216,13 +216,9 @@ internal object WebParsers {
         val carousel = o["carousel_media"] as? JsonArray
         val imageSource = if (o["image_versions2"] is JsonObject) o else carousel?.firstOrNull() as? JsonObject
         val thumb = imageSource?.let { MediaLinks.chooseThumbnail(MediaLinks.imageCandidates(it)) }
-        val videoUrl = ((o["video_versions"] as? JsonArray)?.firstOrNull() as? JsonObject)?.string("url")
-        // Null when the response carries no `carousel_media`; a child of an unknown shape is a shape change.
-        val carouselItems = if (type == MediaType.CAROUSEL) {
-            carousel?.mapIndexed { i, child -> carouselItem(child, i, "$path.carousel_media[$i]") }
-        } else {
-            null
-        }
+        val videoUrl = firstVideoUrl(o)
+        // Null when the response carries no `carousel_media`, or when one of its children can't be read (R4).
+        val carouselItems = if (type == MediaType.CAROUSEL) carousel?.let(::carouselItems) else null
         return RemoteMedia(
             pk = pk,
             code = code,
@@ -241,16 +237,24 @@ internal object WebParsers {
         )
     }
 
-    /** One child of a carousel's `carousel_media`: an image or a video, never another carousel. [path] is the child's own path. */
-    private fun carouselItem(element: JsonElement, i: Int, path: String): RemoteCarouselItem {
-        val c = element as? JsonObject ?: throw ShapeChanged(path)
+    /**
+     * A carousel's children in order, or null when any of them can't be read (R4): the post's items are then unknown, as when
+     * the reply has no `carousel_media`. Never a [ShapeChanged]: one odd child must not stop a sync, and the post is still
+     * stored with its cover.
+     */
+    private fun carouselItems(children: JsonArray): List<RemoteCarouselItem>? =
+        children.mapIndexed { i, child -> carouselItem(child, i) ?: return null }
+
+    /** One child of a carousel's `carousel_media`: an image or a video, never another carousel. Null when it is neither. */
+    private fun carouselItem(element: JsonElement, i: Int): RemoteCarouselItem? {
+        val c = element as? JsonObject ?: return null
         val type = when (c.int("media_type")) {
             1 -> MediaType.IMAGE
             2 -> MediaType.VIDEO
-            else -> throw ShapeChanged("$path.media_type")
+            else -> return null
         }
         val image = MediaLinks.chooseThumbnail(MediaLinks.imageCandidates(c))
-        val videoUrl = if (type == MediaType.VIDEO) ((c["video_versions"] as? JsonArray)?.firstOrNull() as? JsonObject)?.string("url") else null
+        val videoUrl = if (type == MediaType.VIDEO) firstVideoUrl(c) else null
         return RemoteCarouselItem(
             position = i,
             type = type,
@@ -261,6 +265,9 @@ internal object WebParsers {
             videoUrlExpiresAt = videoUrl?.let(MediaLinks::expiresAt),
         )
     }
+
+    /** The url of the first of [o]'s `video_versions`, or null when it has none. */
+    private fun firstVideoUrl(o: JsonObject): String? = ((o["video_versions"] as? JsonArray)?.firstOrNull() as? JsonObject)?.string("url")
 
     /** Media pks are plain digits (spec 6): a float literal such as 3.1E18, or text, means the shape changed. */
     private val PK = Regex("[0-9]{1,30}")
