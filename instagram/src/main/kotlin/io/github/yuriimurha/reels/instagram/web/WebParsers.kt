@@ -4,9 +4,11 @@ import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.InstagramException.ShapeChanged
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Page
+import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -215,6 +217,12 @@ internal object WebParsers {
         val imageSource = if (o["image_versions2"] is JsonObject) o else carousel?.firstOrNull() as? JsonObject
         val thumb = imageSource?.let { MediaLinks.chooseThumbnail(MediaLinks.imageCandidates(it)) }
         val videoUrl = ((o["video_versions"] as? JsonArray)?.firstOrNull() as? JsonObject)?.string("url")
+        // Null when the response carries no `carousel_media`; a child of an unknown shape is a shape change.
+        val carouselItems = if (type == MediaType.CAROUSEL) {
+            carousel?.mapIndexed { i, child -> carouselItem(child, i, "$path.carousel_media[$i]") }
+        } else {
+            null
+        }
         return RemoteMedia(
             pk = pk,
             code = code,
@@ -229,6 +237,28 @@ internal object WebParsers {
             videoUrl = videoUrl,
             videoUrlExpiresAt = videoUrl?.let(MediaLinks::expiresAt),
             savedCollectionIds = savedCollectionIds(o),
+            carouselItems = carouselItems,
+        )
+    }
+
+    /** One child of a carousel's `carousel_media`: an image or a video, never another carousel. [path] is the child's own path. */
+    private fun carouselItem(element: JsonElement, i: Int, path: String): RemoteCarouselItem {
+        val c = element as? JsonObject ?: throw ShapeChanged(path)
+        val type = when (c.int("media_type")) {
+            1 -> MediaType.IMAGE
+            2 -> MediaType.VIDEO
+            else -> throw ShapeChanged("$path.media_type")
+        }
+        val image = MediaLinks.chooseThumbnail(MediaLinks.imageCandidates(c))
+        val videoUrl = if (type == MediaType.VIDEO) ((c["video_versions"] as? JsonArray)?.firstOrNull() as? JsonObject)?.string("url") else null
+        return RemoteCarouselItem(
+            position = i,
+            type = type,
+            width = c.int("original_width") ?: image?.width ?: 0,
+            height = c.int("original_height") ?: image?.height ?: 0,
+            imageUrl = image?.url.orEmpty(),
+            videoUrl = videoUrl,
+            videoUrlExpiresAt = videoUrl?.let(MediaLinks::expiresAt),
         )
     }
 

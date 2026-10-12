@@ -7,6 +7,7 @@ import io.github.yuriimurha.reels.instagram.InstagramException.RateLimited
 import io.github.yuriimurha.reels.instagram.InstagramException.ShapeChanged
 import io.github.yuriimurha.reels.instagram.InstagramException.Transient
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import kotlinx.serialization.json.Json
@@ -226,6 +227,113 @@ class WebParsersTest {
         val carousel = WebParsers.savedPage(more).items[2]
         assertNull(carousel.carouselCount)
         assertEquals("", carousel.thumbnailUrl)
+    }
+
+    /** `saved_page_more.json` with its carousel moved to the front and [children] as that carousel's `carousel_media`. */
+    private fun carouselPage(children: List<JsonElement>): JsonObject {
+        val more = fixture("saved_page_more.json")
+        val carousel = more.getValue("items").jsonArray[2].jsonObject
+        return more.withWrapper(0) { carousel }.withMedia(0) { it.with("carousel_media", JsonArray(children)) }
+    }
+
+    private fun carouselOf(children: List<JsonElement>): RemoteMedia = WebParsers.savedPage(carouselPage(children)).items[0]
+
+    private fun child(json: String): JsonElement = Json.parseToJsonElement(json)
+
+    private val imageChild = child(
+        """{"media_type":1,"original_width":1080,"original_height":1350,"image_versions2":{"candidates":[
+            {"url":"https://cdn.example.invalid/v/t51/401.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn","width":1080,"height":1350},
+            {"url":"https://cdn.example.invalid/v/t51/402.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn","width":720,"height":900}]}}""",
+    )
+
+    private val videoChild = child(
+        """{"media_type":2,"original_width":1080,"original_height":1920,"image_versions2":{"candidates":[
+            {"url":"https://cdn.example.invalid/v/t51/412.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn","width":720,"height":1280}]},
+            "video_versions":[
+            {"url":"https://cdn.example.invalid/v/t50/413.mp4?stp=x&oe=6720A3F1&_nc_ht=cdn","width":720,"height":1280},
+            {"url":"https://cdn.example.invalid/v/t50/414.mp4?stp=x&oe=6720A3F2&_nc_ht=cdn","width":480,"height":853}]}""",
+    )
+
+    private val squareChild = child(
+        """{"media_type":1,"original_width":1080,"original_height":1080,"image_versions2":{"candidates":[
+            {"url":"https://cdn.example.invalid/v/t51/422.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn","width":720,"height":720}]}}""",
+    )
+
+    @Test
+    fun aCarouselsChildrenAreParsedInOrder() {
+        val items = assertNotNull(carouselOf(listOf(imageChild, videoChild, squareChild)).carouselItems)
+        assertEquals(
+            listOf(
+                RemoteCarouselItem(
+                    position = 0, type = MediaType.IMAGE, width = 1080, height = 1350,
+                    imageUrl = "https://cdn.example.invalid/v/t51/402.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn",
+                    videoUrl = null, videoUrlExpiresAt = null,
+                ),
+                RemoteCarouselItem(
+                    position = 1, type = MediaType.VIDEO, width = 1080, height = 1920,
+                    imageUrl = "https://cdn.example.invalid/v/t51/412.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn",
+                    videoUrl = "https://cdn.example.invalid/v/t50/413.mp4?stp=x&oe=6720A3F1&_nc_ht=cdn",
+                    videoUrlExpiresAt = Instant.ofEpochSecond(0x6720A3F1),
+                ),
+                RemoteCarouselItem(
+                    position = 2, type = MediaType.IMAGE, width = 1080, height = 1080,
+                    imageUrl = "https://cdn.example.invalid/v/t51/422.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn",
+                    videoUrl = null, videoUrlExpiresAt = null,
+                ),
+            ),
+            items,
+        )
+    }
+
+    @Test
+    fun aChildWithoutItsOwnSizeTakesTheSizeOfItsImage() {
+        val noSize = child(
+            """{"media_type":1,"image_versions2":{"candidates":[
+                {"url":"https://cdn.example.invalid/v/t51/431.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn","width":720,"height":900}]}}""",
+        )
+        val item = assertNotNull(carouselOf(listOf(noSize)).carouselItems).single()
+        assertEquals(720, item.width)
+        assertEquals(900, item.height)
+    }
+
+    @Test
+    fun aCarouselWithoutCarouselMediaHasNoItems() {
+        val json = carouselPage(emptyList()).withMedia(0) { it.without("carousel_media") }
+        val carousel = WebParsers.savedPage(json).items[0]
+        assertEquals(MediaType.CAROUSEL, carousel.type)
+        assertNull(carousel.carouselItems)
+    }
+
+    @Test
+    fun aNonCarouselHasNoItems() {
+        val page = WebParsers.savedPage(fixture("saved_page_more.json"))
+        assertEquals(MediaType.REEL, page.items[0].type)
+        assertNull(page.items[0].carouselItems)
+        assertEquals(MediaType.IMAGE, page.items[1].type)
+        assertNull(page.items[1].carouselItems)
+    }
+
+    @Test
+    fun aChildWithAnUnknownMediaTypeIsAShapeChange() {
+        val unknown = child("""{"media_type":9,"original_width":1080,"original_height":1350}""")
+        assertSavedShapeChange("items[0].media.carousel_media[1].media_type", carouselPage(listOf(imageChild, unknown)))
+        val missing = child("""{"original_width":1080,"original_height":1350}""")
+        assertSavedShapeChange("items[0].media.carousel_media[0].media_type", carouselPage(listOf(missing)))
+    }
+
+    @Test
+    fun aChildThatIsNoObjectIsAShapeChange() {
+        assertSavedShapeChange("items[0].media.carousel_media[1]", carouselPage(listOf(imageChild, JsonPrimitive("x"))))
+    }
+
+    @Test
+    fun aChildWithoutAnyImageCandidateKeepsAnEmptyImageUrl() {
+        val bare = child("""{"media_type":1,"original_width":1080,"original_height":1350}""")
+        val items = assertNotNull(carouselOf(listOf(bare, imageChild)).carouselItems)
+        assertEquals("", items[0].imageUrl)
+        assertEquals(1080, items[0].width)
+        assertEquals(1350, items[0].height)
+        assertEquals("https://cdn.example.invalid/v/t51/402.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", items[1].imageUrl)
     }
 
     @Test

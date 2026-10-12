@@ -1,6 +1,7 @@
 package io.github.yuriimurha.reels.instagram.fake
 
 import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -74,6 +75,14 @@ class FakeInstagramClientTest {
         val clientReporting = FakeInstagramClient(library, reportsSavedCollectionIds = true)
         val mediaReporting = assertNotNull(clientReporting.mediaInfo(itemWithCollections.pk))
         assertEquals(itemWithCollections.savedCollectionIds, mediaReporting.savedCollectionIds)
+    }
+
+    @Test
+    fun mediaInfoAndTheSavedPagesCarryACarouselsItems() = runTest {
+        val client = FakeInstagramClient(FakeLibrary(itemCount = 60))
+        val carousel = client.savedMedia(null, null).items.first { it.type == MediaType.CAROUSEL }
+        assertNotNull(carousel.carouselItems)
+        assertEquals(carousel, assertNotNull(client.mediaInfo(carousel.pk)))
     }
 
     @Test
