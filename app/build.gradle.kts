@@ -24,7 +24,9 @@ android {
         applicationId = "io.github.yuriimurha.reels"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
+        // R21: at least the Room schema version (VersionCodeGuardTest), so a build from before a schema change is refused
+        // (INSTALL_FAILED_VERSION_DOWNGRADE) instead of installing over the upgraded library and failing at every start.
+        versionCode = 2
         versionName = "0.1.0"
         // The on-device smoke suite (src/androidTest); it runs on the emulator only, in Mock mode (README, "Automated smoke tests").
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -78,6 +80,10 @@ android {
 room {
     schemaDirectory("$projectDir/schemas")
 }
+
+// The schemas above are debug assets, so their merge must wait for Room to write them: otherwise the first build after a
+// schema change merges the old files and the migration test reads a stale (or missing) schema (D4).
+tasks.matching { it.name == "mergeDebugAssets" }.configureEach { dependsOn("copyRoomSchemas") }
 
 // Robolectric 4.17 reaches into JDK internals that Java 25 no longer exposes to the unnamed module.
 tasks.withType<Test>().configureEach {
