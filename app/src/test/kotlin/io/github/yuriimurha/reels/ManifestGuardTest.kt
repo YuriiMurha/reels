@@ -13,6 +13,7 @@ import kotlin.test.assertTrue
  */
 class ManifestGuardTest {
     private val android = "http://schemas.android.com/apk/res/android"
+    private val tools = "http://schemas.android.com/tools"
 
     private fun manifest(): Element {
         val file = File("src/main/AndroidManifest.xml").also { assertTrue(it.isFile, "${it.path} is missing") }
@@ -30,6 +31,8 @@ class ManifestGuardTest {
         val root = manifest()
         val application = root.elements("application").single()
         assertEquals("true", application.getAttributeNS(android, "enableOnBackInvokedCallback"))
+        // The flag is an API 33 attribute and minSdk is 29: this says so, so lint does not warn that older versions ignore it.
+        assertEquals("33", application.getAttributeNS(tools, "targetApi"), "tools:targetApi on <application>")
         for (activity in root.elements("activity")) {
             val own = activity.getAttributeNS(android, "enableOnBackInvokedCallback")
             assertTrue(own.isEmpty() || own == "true", "${activity.getAttributeNS(android, "name")} turns predictive back off")

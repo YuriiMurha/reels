@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The viewer's Material Symbols glyphs carry their Apache notice (R12). No code reads it, but it must ship: resource
+     shrinking keeps it, and lint does not call it unused. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@raw/license_material_symbols" />

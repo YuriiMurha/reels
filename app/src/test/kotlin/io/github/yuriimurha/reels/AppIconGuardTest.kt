@@ -273,6 +273,15 @@ class AppIconGuardTest {
         for (glyph in listOf("volume_up", "volume_off", "open_in_new")) assertTrue(glyph in notice, "the notice names $glyph")
     }
 
+    /** No code reads the notice, so a resource-shrinking build would drop it: `res/raw/keep.xml` keeps it (and lint then calls it used). */
+    @Test
+    fun theNoticeIsKeptByResourceShrinking() {
+        val keep = xml("res/raw/keep.xml")
+        assertEquals("resources", keep.tagName)
+        val kept = keep.getAttributeNS("http://schemas.android.com/tools", "keep").split(",").map { it.trim() }
+        assertTrue("@raw/license_material_symbols" in kept, "tools:keep: $kept")
+    }
+
     /** The glyphs are three small vector files of ours, not the `material-icons-extended` library (global constraints, icons). */
     @Test
     fun theExtendedIconLibraryIsNotADependency() {
