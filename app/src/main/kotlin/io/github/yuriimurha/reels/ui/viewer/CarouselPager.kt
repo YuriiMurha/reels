@@ -95,13 +95,14 @@ fun carouselTotal(media: MediaEntity, state: CarouselUiState): Int =
     state.items.size.takeIf { it > 0 } ?: media.carouselCount?.coerceAtLeast(1) ?: 1
 
 /**
- * The carousel's pager state. Not saved: a post that comes back into view starts at item 0, and [CarouselPager] moves it to
- * [CarouselUiState.settled] when that says otherwise (a rotation keeps the ViewModel's settled item).
+ * The carousel's pager state, made on the visit's item ([CarouselUiState.settled]: 0 for a post shown again, the ViewModel's item
+ * after a rotation), so a pager made again never reports item 0 first. Not saved: the lazy layout would bring a post back on its
+ * old item; [CarouselPager] then follows the visit.
  */
 @Composable
 fun rememberCarouselPagerState(state: CarouselUiState): PagerState {
     val pageCount = rememberUpdatedState(state.pageCount)
-    return remember { PagerState { pageCount.value } }
+    return remember { PagerState(currentPage = state.settled.coerceIn(0, state.pageCount - 1)) { pageCount.value } }
 }
 
 /**

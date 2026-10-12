@@ -158,7 +158,7 @@ class ViewerViewModelTest {
     private val sampleClip = Uri.parse("android.resource://io.github.yuriimurha.reels/raw/sample_clip")
 
     /** The repository the container would build, here over the fake client and the real Conservative Pacer, in virtual time when [scope] is given. */
-    private fun carouselRepository(scope: TestScope? = null, sampleClip: Uri? = null): CarouselRepository {
+    private fun carouselRepository(scope: TestScope? = null, sampleClip: Uri? = null, fetcher: MediaFetcher = this.fetcher): CarouselRepository {
         val clock = { START + (scope?.testScheduler?.currentTime ?: 0L) }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = clock)
         return CarouselRepository(
@@ -182,6 +182,16 @@ class ViewerViewModelTest {
                 if (it.videoUrl == null) stored else stored.copy(videoUrl = "https://cdn.example.test/old/v${it.position}.mp4?oe=1", videoUrlExpiresAt = fresh)
             },
         )
+    }
+
+    /** Another fake carousel (a video at position 2 too), with its items stored: the post after [carousel] in some tests. */
+    private val otherPost: RemoteMedia =
+        fake.library.allSaved().first { it.type == MediaType.CAROUSEL && (it.carouselCount ?: 0) >= 3 && it.pk != post.pk }
+    private val other: MediaEntity = mediaEntity(otherPost.pk, MediaType.CAROUSEL).copy(carouselCount = otherPost.carouselCount)
+
+    private suspend fun storeOther() {
+        db.mediaDao().upsert(listOf(other))
+        db.carouselItemDao().replace(other.pk, otherPost.carouselItems!!.map { it.toEntity(other.pk) })
     }
 
     private fun item(position: Int, index: Int = 4) = SettledPage(index, carousel, position)
@@ -234,10 +244,22 @@ class ViewerViewModelTest {
         )
     }
 
-    /** The screen settles [page] and waits until its own resolve has returned. */
+    /** The screen settles on a new post, [page], and waits until its first unit's resolve has returned (the prefetch hook ran). */
     private suspend fun settle(player: PlayerHooks, resolved: MutableStateFlow<List<SettledPage>>, page: SettledPage) {
         player.settled.value = page
         eventually { resolved.first { page in it } }
+    }
+
+    /**
+     * The carousel's pager settles on [page]'s item, in the same post. Its settle runs at once (the player is stopped); an image
+     * item resolves to nothing there and then (the fill is in), a video item is waited for until [played] (its key) is set.
+     */
+    private suspend fun TestScope.settleItem(player: PlayerHooks, page: SettledPage, played: String? = null) {
+        val stops = player.events.count { it == "stop" }
+        player.settled.value = page
+        runCurrent()
+        assertEquals(stops + 1, player.events.count { it == "stop" }, "the item settle stopped the player")
+        if (played != null) eventually { while (player.events.lastOrNull() != "set:$played") delay(10) }
     }
 
     /** Review Focus 1, through the real repository in Mock mode: one setMediaItem per settled video item, an image stops the player. */
@@ -253,7 +275,7 @@ class ViewerViewModelTest {
             settle(player, resolved, item(0))
             for (position in listOf(1, 2, 3, 5)) {
                 viewModel.onItemSettled(pk, position) // what the carousel's pager reports
-                settle(player, resolved, item(position))
+                settleItem(player, item(position), played = "${pk}_$position".takeIf { position % 3 == 2 })
             }
 
             assertEquals(
@@ -279,7 +301,7 @@ class ViewerViewModelTest {
         try {
             settle(player, resolved, item(0))
             viewModel.onItemSettled(pk, 2)
-            settle(player, resolved, item(2))
+            settleItem(player, item(2), played = "${pk}_2")
             assertEquals("set:${pk}_2", player.events.last())
 
             settle(player, resolved, SettledPage(5, mediaEntity("i9", MediaType.IMAGE)))
@@ -438,12 +460,12 @@ class ViewerViewModelTest {
             player.settled.value = item(2)
             eventually { while (mediaInfoCalls.isEmpty()) delay(10) } // item 2's stale link is being renewed
             viewModel.onItemSettled(pk, 3)
-            settle(player, resolved, item(3)) // swiped on before the answer
+            settleItem(player, item(3)) // swiped on before the answer
             reply.complete(Unit)
             eventually { while (db.carouselItemDao().items(pk)[2].videoUrl != "fake://video/$pk-2") delay(10) }
 
             viewModel.onItemSettled(pk, 2)
-            settle(player, resolved, item(2))
+            settleItem(player, item(2), played = "${pk}_2")
 
             assertEquals("set:${pk}_2", player.events.last(), "the renewed link plays")
             assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "one request in the visit")
@@ -625,9 +647,9 @@ class ViewerViewModelTest {
             assertEquals(listOf("m2"), resolver.calls, "the next post's prefetch is out")
 
             viewModel.onItemSettled(pk, 1)
-            settle(player, resolved, item(1))
+            settleItem(player, item(1))
             viewModel.onItemSettled(pk, 2)
-            settle(player, resolved, item(2))
+            settleItem(player, item(2), played = "${pk}_2")
 
             assertEquals(emptyList(), resolver.cancelled, "the item swipes left it alone")
             assertEquals(listOf("m2"), resolver.calls, "and asked for nothing more")
@@ -636,6 +658,163 @@ class ViewerViewModelTest {
         } finally {
             resolver.releaseAll()
             job.cancel()
+        }
+    }
+
+    /**
+     * R11: the next post's prefetch is decided once, on the post's first resolved unit. An item swipe is no new trigger: an owner
+     * who dwells on a carousel until the next reel's link nears its end, then swipes an item, sends nothing for that reel.
+     */
+    @Test
+    fun anItemSettleNeverPrefetchesTheNextPost() = runTest {
+        storeCarousel()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val next = reel("m2", expiresAt = now + RealVideoSourceResolver.FRESH_MARGIN_MS + 60_000)
+        val job = following(viewModel, player, resolved, next)
+        try {
+            settle(player, resolved, item(0))
+            runCurrent()
+            assertEquals(emptyList(), resolver.calls, "at the post's settle the next link was still fresh: nothing to renew")
+
+            now += 2 * 60_000 // the owner dwells: the next reel's link is now within the margin
+            for (position in listOf(1, 2, 3)) {
+                viewModel.onItemSettled(pk, position)
+                settleItem(player, item(position), played = "${pk}_$position".takeIf { position == 2 })
+                runCurrent()
+            }
+
+            assertEquals(emptyList(), resolver.calls, "item swipes sent no prefetch")
+        } finally {
+            job.cancel()
+        }
+    }
+
+    // --- R8: one Visit a visit, whatever spends it ---
+
+    /** The fill spent the visit's request: a 403 on a video item of the same visit sends no second one. */
+    @Test
+    fun aRefusedVideoItemAfterTheFillSendsNoSecondRequest() = runTest {
+        storeCarousel(withItems = false)
+        val viewModel = viewModel(carousels = carouselRepository(this))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "the fill")
+
+        val answer = viewModel.recover(carousel, playbackFailure(403), position = 2)
+
+        assertEquals(VideoSource.Unavailable("Can't load this item"), answer, "the fill's link is the one just refused")
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "no second request in the visit")
+    }
+
+    /** The fill spent the visit's request: a video item whose stored link has since gone stale plays the fill's link, no request. */
+    @Test
+    fun aStaleVideoItemAfterTheFillSendsNoSecondRequest() = runTest {
+        storeCarousel(withItems = false)
+        val viewModel = viewModel(carousels = carouselRepository(this))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+        db.carouselItemDao().replace(pk, db.carouselItemDao().items(pk).map { if (it.position == 2) it.copy(videoUrlExpiresAt = expired) else it })
+
+        val source = viewModel.resolveVideo(carousel, position = 2)
+
+        assertEquals(VideoSource.Play(Uri.parse("fake://video/$pk-2"), "${pk}_2"), source)
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "no second request in the visit")
+    }
+
+    /** The fill spent the visit's request: an image the CDN refuses is not renewed with a second one. */
+    @Test
+    fun aRefusedImageAfterTheFillSendsNoSecondRequest() = runTest {
+        storeCarousel(withItems = false)
+        val refusing = MediaFetcher { url ->
+            fetched += url
+            null
+        }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = refusing))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+
+        viewModel.onItemSettled(pk, 1)
+
+        assertEquals("Can't load this item", viewModel.awaitCarousel { it.items[1].failure != null }.items[1].failure)
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "no second request in the visit")
+        assertEquals(listOf("fake://thumb/$pk-1"), fetched.toList(), "and the refused link is not asked for again")
+    }
+
+    // --- nothing of one post reaches another ---
+
+    /** A neighbouring carousel's pager (composed off screen) reports its page: the settled post's item and images are untouched. */
+    @Test
+    fun anItemSettleOfAnotherPostIsIgnored() = runTest {
+        storeCarousel()
+        storeOther()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+        viewModel.onItemSettled(pk, 2)
+
+        viewModel.onItemSettled(other.pk, 0)
+        viewModel.onItemSettled(other.pk, 1)
+        runCurrent()
+
+        assertEquals(pk, viewModel.carousel.value!!.pk)
+        assertEquals(2, viewModel.carousel.value!!.state.settled)
+        assertEquals(emptyList(), fetched.toList(), "no image fetched for a post nobody settled on")
+    }
+
+    /** A unit of a carousel that is not the settled post resolves to nothing and recovers nothing: never through this visit. */
+    @Test
+    fun aCarouselThatIsNotTheSettledPostGetsNothingFromTheVisit() = runTest {
+        storeCarousel()
+        storeOther()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+
+        assertNull(viewModel.resolveVideo(other, position = 2))
+        assertEquals(VideoSource.Unavailable("Can't load this item"), viewModel.recover(other, playbackFailure(403), position = 2))
+        assertEquals(emptyList(), mediaInfoCalls)
+    }
+
+    /** Review Focus 1: from carousel A on its item 2 straight to carousel B, B's visit starts at item 0, not at A's item. */
+    @Test
+    fun aNewVisitStartsAtItemZeroWhateverThePreviousCarouselWasOn() = runTest {
+        storeCarousel()
+        storeOther()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.items.isNotEmpty() }
+        viewModel.onItemSettled(pk, 2)
+
+        viewModel.onSettled(other)
+
+        assertEquals(SettledCarousel(other.pk, CarouselUiState(loading = true)), viewModel.carousel.value)
+    }
+
+    /**
+     * The same post settling again in place (the list moved under it) keeps its visit (no second request) but takes the newer
+     * row, which the visit's later calls use. Here the newer row has no cover, so item 0's own image is fetched once the fill is in;
+     * with the first row kept, the cover rule would skip it.
+     */
+    @Test
+    fun aReSettleInPlaceKeepsTheVisitAndTakesTheNewerRow() = runTest {
+        db.mediaDao().upsert(listOf(carousel))
+        val reply = CompletableDeferred<Unit>()
+        onReply = { reply.await(); it }
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (mediaInfoCalls.isEmpty()) delay(10) }
+
+            viewModel.onSettled(carousel.copy(thumbPath = null)) // the same post, its row read again
+            reply.complete(Unit)
+
+            viewModel.awaitCarousel { it.items.firstOrNull()?.imagePath != null }
+            assertEquals(listOf("fake://thumb/$pk-0"), fetched.toList())
+            assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "the same visit")
+        } finally {
+            reply.complete(Unit)
         }
     }
 

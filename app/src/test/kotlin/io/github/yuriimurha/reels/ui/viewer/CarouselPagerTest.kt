@@ -3,9 +3,8 @@ package io.github.yuriimurha.reels.ui.viewer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -19,11 +18,16 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeUp
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -46,14 +50,28 @@ class CarouselPagerTest {
         CarouselItemUi(2, MediaType.VIDEO),
     )
 
-    /** What the screen would hold for the settled carousel; [onItemSettled] moves its settled item, as the ViewModel does. */
-    private var state by mutableStateOf(CarouselUiState(items = threeItems))
+    /**
+     * What the ViewModel holds for the settled carousel, as the screen gets it: a StateFlow, collected into Compose state, so an
+     * item report comes back a hop later, as in the app. [onItemSettled] moves its settled item, as the ViewModel does.
+     */
+    private val states = MutableStateFlow(CarouselUiState(items = threeItems))
+    private var state: CarouselUiState
+        get() = states.value
+        set(value) {
+            states.value = value
+        }
     private val settledReports = mutableListOf<Int>()
     private var opened: String? = null
+
+    private fun onItemSettled(position: Int) {
+        settledReports += position
+        states.update { it.copy(settled = position) }
+    }
 
     /** The viewer's two-level paging: posts up and down ([posts]), and the carousel's own pager inside its page. */
     private fun showPosts(posts: List<MediaEntity> = listOf(carousel, reel)) = compose.setContent {
         ReelsTheme {
+            val current by states.collectAsState()
             val pager = rememberPagerState { posts.size }
             VerticalPager(pager, Modifier.fillMaxSize()) { page ->
                 val media = posts[page]
@@ -65,19 +83,17 @@ class CarouselPagerTest {
                     onToggleMute = {},
                     onTogglePlay = {},
                     onOpenInstagram = { opened = it },
-                    carousel = state.takeIf { media.type == MediaType.CAROUSEL },
-                    onItemSettled = { position ->
-                        settledReports += position
-                        state = state.copy(settled = position)
-                    },
+                    carousel = current.takeIf { media.type == MediaType.CAROUSEL },
+                    onItemSettled = ::onItemSettled,
                 )
             }
         }
     }
 
-    private fun showPager(media: MediaEntity = carousel) = compose.setContent {
+    private fun showPager(media: MediaEntity = carousel, player: Player? = null) = compose.setContent {
         ReelsTheme {
-            CarouselPager(media, state, player = null, onItemSettled = { state = state.copy(settled = it) }, Modifier.fillMaxSize())
+            val current by states.collectAsState()
+            CarouselPager(media, current, player, onItemSettled = ::onItemSettled, Modifier.fillMaxSize())
         }
     }
 
@@ -227,6 +243,39 @@ class CarouselPagerTest {
         compose.onNodeWithTag(CAROUSEL_COUNTER_TAG).assertTextEquals("1/6")
         compose.onNodeWithTag(CAROUSEL_COVER_TAG).assertIsDisplayed()
         compose.onAllNodesWithTag(CAROUSEL_LOADING_TAG).assertCountEquals(0)
+    }
+
+    /**
+     * A pager made again (a rotation, or the page composed anew) starts on the visit's item. It must not report item 0 first:
+     * the ViewModel would flip to 0 and back, and the screen stop and re-resolve that item.
+     */
+    @Test
+    fun aPagerMadeAgainStartsOnTheVisitsItemWithoutReportingItemZero() {
+        state = CarouselUiState(items = threeItems, settled = 2)
+        showPager()
+
+        compose.onNodeWithTag(CAROUSEL_COUNTER_TAG).assertTextEquals("3/3")
+        assertEquals(listOf(2), settledReports)
+        assertEquals(2, state.settled)
+    }
+
+    /** The per-page gate: even with a player, only the settled VIDEO item draws it; an image item never does. */
+    @Test
+    fun onlyTheSettledVideoItemDrawsThePlayer() {
+        val player = ExoPlayer.Builder(ApplicationProvider.getApplicationContext()).build()
+        try {
+            state = CarouselUiState(items = threeItems, settled = 1)
+            showPager(player = player)
+            compose.onNodeWithTag(CAROUSEL_COUNTER_TAG).assertTextEquals("2/3")
+            compose.onAllNodesWithTag(VIDEO_SURFACE_TAG).assertCountEquals(0)
+
+            state = state.copy(settled = 2) // the visit moves to the video item; the pager follows
+
+            compose.onNodeWithTag(CAROUSEL_COUNTER_TAG).assertTextEquals("3/3")
+            compose.onNodeWithTag(VIDEO_SURFACE_TAG).assertIsDisplayed()
+        } finally {
+            player.release()
+        }
     }
 
     @Test

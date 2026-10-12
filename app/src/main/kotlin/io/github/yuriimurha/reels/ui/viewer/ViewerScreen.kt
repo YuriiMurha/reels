@@ -82,6 +82,12 @@ private fun carouselPosition(media: MediaEntity, carousel: SettledCarousel?): In
 /** Full-screen vertical pager over the same list the grid showed (spec 9.3). One player is reused across pages. */
 @Composable
 fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> Unit, onBack: () -> Unit) {
+    ViewerScreen(source, startIndex, onIndexSettled, onBack, rememberViewerPlayer(LocalAppContainer.current))
+}
+
+/** The viewer over [player], the one player every page shares; a test passes one it can watch. */
+@Composable
+internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> Unit, onBack: () -> Unit, player: Player) {
     val container = LocalAppContainer.current
     val context = LocalContext.current
     val viewModel = viewModel(key = "viewer:${source.encode()}:$startIndex") {
@@ -92,7 +98,6 @@ fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: (Int) -> 
     /** The settled post's carousel visit (its items and settled item), or null when that post is not a carousel. */
     val carousel by viewModel.carousel.collectAsStateWithLifecycle()
     val pagerState = rememberPagerState(initialPage = startIndex) { items.itemCount }
-    val player = rememberViewerPlayer(container)
     /** The unit the player has loaded (its page, and for a carousel its item), or null. */
     var playing by remember { mutableStateOf<SettledPage?>(null) }
     /** The unit that cannot play, with the reason shown over it. */

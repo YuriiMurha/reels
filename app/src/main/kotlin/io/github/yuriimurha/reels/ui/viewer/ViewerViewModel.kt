@@ -100,13 +100,17 @@ class ViewerViewModel(
      * A page settled on [media]. A coming back to an item is a new visit, with a new refresh. The prefetch still out is
      * cancelled, unless it is for [media] itself: the settle then waits for that request ([resolveVideo]) instead.
      * A carousel post shown again gets a new visit at item 0 (R8); the same post settling again in place (the list moved under
-     * it) keeps the visit it has, and so its fill and its item.
+     * it) keeps the visit it has, and so its fill and its item, and takes the newer row (a sync may have stored its cover since).
      */
     fun onSettled(media: MediaEntity?) {
         media?.let { refreshed -= it.pk }
         prefetch?.takeIf { it.pk != media?.pk }?.answer?.cancel()
-        if (media?.pk == carouselVisit?.media?.pk) return
-        carouselVisit?.end()
+        val current = carouselVisit
+        if (media?.pk == current?.media?.pk) {
+            if (media != null && current != null) current.media = media
+            return
+        }
+        current?.end()
         val next = media?.takeIf { it.type == MediaType.CAROUSEL }?.let { CarouselVisit(it) }
         carouselVisit = next
         _carousel.value = next?.let { SettledCarousel(it.media.pk, CarouselUiState(loading = true)) }
@@ -147,7 +151,8 @@ class ViewerViewModel(
     /**
      * Follows the settled units ([playSettledPages]): settle, resolve the visible unit, and only then prefetch the post after
      * it ([nextOf]). A new post (or the same post at another index) is a post settle ([onSettled]); a new item of the settled
-     * carousel is not: it keeps the post's visit, its fill and the prefetch the post started.
+     * carousel is not: it keeps the post's visit, its fill and the prefetch the post started. The prefetch is decided once a
+     * post, on its first unit whose resolve returns (R11): an item swipe never sends one.
      */
     suspend fun followSettledPages(
         settled: Flow<SettledPage>,
@@ -157,16 +162,25 @@ class ViewerViewModel(
         onSource: (SettledPage, VideoSource) -> Unit,
     ) {
         var post: SettledPage? = null
+        var prefetchDue = false
         playSettledPages(
             settled = settled,
             resolve = ::resolveVideo,
             isStillSettled = isStillSettled,
             onSettled = { page ->
-                if (post?.index != page.index || post?.media?.pk != page.media?.pk) this.onSettled(page.media)
+                if (post?.index != page.index || post?.media?.pk != page.media?.pk) {
+                    this.onSettled(page.media)
+                    prefetchDue = true
+                }
                 post = page
                 onSettled(page)
             },
-            afterResolved = { page -> prefetch(nextOf(page)) },
+            afterResolved = { page ->
+                if (prefetchDue) {
+                    prefetchDue = false
+                    prefetch(nextOf(page))
+                }
+            },
             onSource = onSource,
         )
     }
@@ -212,7 +226,9 @@ class ViewerViewModel(
      * together), and a scope that only leaving the post cancels. The fill, the images and the items' video resolves all run
      * there, so an item swipe (which cancels the settle that waits for them) never cancels a call that may have spent the visit.
      */
-    private inner class CarouselVisit(val media: MediaEntity) {
+    private inner class CarouselVisit(media: MediaEntity) {
+        /** The post's row as last settled: a re-settle in place brings the newer one, which the visit's later calls use. */
+        var media: MediaEntity = media
         val visit = CarouselRepository.Visit()
         private val job = SupervisorJob(viewModelScope.coroutineContext[Job])
         private val scope = CoroutineScope(viewModelScope.coroutineContext + job)
