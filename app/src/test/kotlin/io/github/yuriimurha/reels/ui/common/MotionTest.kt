@@ -29,9 +29,11 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.yuriimurha.reels.testutil.KotlinSource
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -108,10 +110,37 @@ class MotionTest {
         assertTrue(motionEnabled(context))
     }
 
-    /** A device that never wrote the setting animates (the system's default scale is 1). */
+    /**
+     * A device that never wrote the setting animates (the system's default scale is 1). Robolectric presets the setting to 1, so
+     * it is cleared first: the default is what is read.
+     */
     @Test
     fun anUnsetScaleAnimates() {
+        Settings.Global.putString(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, null)
+        assertEquals(null, Settings.Global.getString(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE), "the setting is unset")
         assertTrue(motionEnabled(context))
+    }
+
+    /**
+     * Task 6 minor 4: the nav host uses the transitions above, which [noTransitionWhenAnimationsAreOff] shows are not None while
+     * motion is on. `NavigationBackTest` runs the page slides frame by frame (their direction too); the viewer's fades, which
+     * no semantics can see, and the gesture's slots are pinned here in the source.
+     */
+    @Test
+    fun theNavHostUsesTheseTransitions() {
+        val source = KotlinSource.code(File("src/main/kotlin/io/github/yuriimurha/reels/ui/ReelsNavHost.kt").readText())
+            .replace(Regex("""\s+"""), " ")
+        for (wiring in listOf(
+            "enterTransition = { sharedAxisEnter(context) }",
+            "exitTransition = { if (targetState.isViewer) underViewerExit(context) else sharedAxisExit(context) }",
+            "popEnterTransition = { if (initialState.isViewer) EnterTransition.None else sharedAxisPopEnter(context) }",
+            "popExitTransition = { sharedAxisPopExit(context) }",
+            "predictivePopEnterTransition = { if (initialState.isViewer) EnterTransition.None else sharedAxisPopEnter(context) }",
+            "predictivePopExitTransition = { if (initialState.isViewer) viewerExit(context) else sharedAxisPopExit(context) }",
+            "screen<ViewerRoute>(enterTransition = { viewerEnter(context) }, exitTransition = { viewerExit(context) })",
+        )) {
+            assertTrue(wiring in source, "ReelsNavHost.kt must have: $wiring")
+        }
     }
 
     @Test

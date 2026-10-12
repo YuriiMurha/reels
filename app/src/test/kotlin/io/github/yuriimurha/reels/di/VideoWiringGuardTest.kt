@@ -34,7 +34,7 @@ class VideoWiringGuardTest {
     fun theRealResolverIsGivenTheSessionReadinessCheck() {
         val arguments = callArguments(main("di/AppContainer.kt"), "RealVideoSourceResolver(").single()
         assertTrue(
-            Regex("""isSessionReady\s*=\s*\{[^}]*session\.state\.first\(\)\s+is\s+SessionState\.Valid""").containsMatchIn(arguments),
+            Regex("""isSessionReady\s*=\s*\{\s*session\.state\.first\(\)\s+is\s+SessionState\.Valid\s*}""").containsMatchIn(arguments),
             "the resolver needs isSessionReady = { session.state.first() is SessionState.Valid }: $arguments",
         )
     }

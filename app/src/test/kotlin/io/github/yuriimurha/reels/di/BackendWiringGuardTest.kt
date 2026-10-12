@@ -378,7 +378,7 @@ class BackendWiringGuardTest {
         val realArguments = callArguments(container.substring(real.range.first), "PacedMediaInfo(").first()
         assertTrue(Regex("""^\s*backend\.client\s*,\s*instagramPacer\s*,\s*session\s*,""").containsMatchIn(realArguments), "the real one: $realArguments")
         assertTrue(
-            Regex("""isSessionReady\s*=\s*\{[^}]*session\.state\.first\(\)\s+is\s+SessionState\.Valid""").containsMatchIn(realArguments),
+            Regex("""isSessionReady\s*=\s*\{\s*session\.state\.first\(\)\s+is\s+SessionState\.Valid\s*}""").containsMatchIn(realArguments),
             "the real one needs isSessionReady = { session.state.first() is SessionState.Valid }: $realArguments",
         )
         for (arguments in infos) {

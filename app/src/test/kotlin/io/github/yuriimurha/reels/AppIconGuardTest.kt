@@ -136,9 +136,19 @@ class AppIconGuardTest {
 
     @Test
     fun theManifestNamesTheLauncherIcons() {
-        val application = xml("AndroidManifest.xml").child("application")
+        val manifest = xml("AndroidManifest.xml")
+        val application = manifest.child("application")
         assertEquals("@mipmap/ic_launcher", application.attr("icon"))
         assertEquals("@mipmap/ic_launcher_round", application.attr("roundIcon"))
+        // T9: the launcher shows an activity's own icon over the app's, so none may name one.
+        for (tag in listOf("activity", "activity-alias")) {
+            val elements = manifest.getElementsByTagName(tag)
+            for (element in (0 until elements.length).map { elements.item(it) as Element }) {
+                for (name in listOf("icon", "roundIcon")) {
+                    assertEquals("", element.attr(name), "<$tag ${element.attr("name")}> sets its own android:$name")
+                }
+            }
+        }
     }
 
     @Test
@@ -215,6 +225,18 @@ class AppIconGuardTest {
         }
     }
 
+    /** Task 5 minor 1: a stroke is drawn half outside a path's edge, beyond the measured bounds, so no tile may have one. */
+    @Test
+    fun noPathOfEitherLayerHasAStroke() {
+        val strokes = listOf("strokeColor", "strokeWidth", "strokeAlpha", "strokeLineCap", "strokeLineJoin", "strokeMiterLimit")
+        for (layer in listOf("ic_launcher_foreground", "ic_launcher_monochrome")) {
+            val paths = xml("res/drawable/$layer.xml").getElementsByTagName("path")
+            for (path in (0 until paths.length).map { paths.item(it) as Element }) {
+                for (stroke in strokes) assertEquals("", path.attr(stroke), "$layer: a path with android:$stroke")
+            }
+        }
+    }
+
     /** A themed icon is tinted by the alpha of this layer alone: one colour, and the triangle a hole in its tile so it still shows. */
     @Test
     fun theMonochromeLayerIsTheSameShapesInOneColourWithTheTriangleCutOut() {
@@ -250,6 +272,24 @@ class AppIconGuardTest {
         }
     }
 
+    /**
+     * T10: each glyph is its own Material Symbols shape, not just its own file name. Each is pinned by where its outline starts
+     * (`volume_off` begins with the slash across the speaker), and no two draw the same: with `volume_up` drawn as `volume_off`,
+     * Mute and Unmute would look alike and the button would no longer show the state.
+     */
+    @Test
+    fun eachViewerGlyphDrawsItsOwnShape() {
+        val starts = mapOf("ic_volume_off" to "M792,904 ", "ic_volume_up" to "M560,829v", "ic_open_in_new" to "M200,840q")
+        val paths = starts.keys.associateWith { glyph ->
+            val path = xml("res/drawable/$glyph.xml").getElementsByTagName("path")
+            (0 until path.length).joinToString("|") { (path.item(it) as Element).attr("pathData") }
+        }
+        for ((glyph, start) in starts) assertTrue(paths.getValue(glyph).startsWith(start), "$glyph starts '$start': ${paths.getValue(glyph).take(20)}")
+        assertEquals(starts.size, paths.values.toSet().size, "no two glyphs draw the same path")
+        assertFalse(paths.getValue("ic_volume_off") in paths.getValue("ic_volume_up"), "volume_up must not contain volume_off's path")
+        assertFalse(paths.getValue("ic_volume_up") in paths.getValue("ic_volume_off"), "volume_off must not contain volume_up's path")
+    }
+
     /** Compose semantics do not say which drawable an icon shows, so the pairing is pinned in the source: each label with its own glyph. */
     @Test
     fun theOverlayPairsEachLabelWithItsGlyph() {
@@ -263,6 +303,14 @@ class AppIconGuardTest {
             "the overlay's icon buttons, by label",
         )
         assertEquals(3, pairs.size, "one call each: $pairs")
+
+        // Task 5 minor 2: and the helper draws the glyph it is given, not one of its own.
+        val start = source.indexOf("private fun OverlayIconButton(")
+        assertTrue(start >= 0, "OverlayIconButton is missing")
+        val body = source.substring(start, source.indexOf("\n}\n", start))
+        val icons = KotlinSource.callArguments(body, "Icon(")
+        assertEquals(1, icons.size, "one Icon in OverlayIconButton: $icons")
+        assertTrue(icons.single().trimStart().startsWith("painterResource(icon)"), "the Icon draws the given glyph: Icon(${icons.single()})")
     }
 
     @Test
@@ -271,6 +319,10 @@ class AppIconGuardTest {
         assertTrue("Material Symbols" in notice)
         assertTrue("Apache License" in notice && "Version 2.0" in notice)
         for (glyph in listOf("volume_up", "volume_off", "open_in_new")) assertTrue(glyph in notice, "the notice names $glyph")
+        // Task 5 minor 3: the licence itself, not only its header: its terms from their title to their end.
+        for (line in listOf("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION", "Grant of Copyright License", "END OF TERMS AND CONDITIONS")) {
+            assertTrue(line in notice, "the notice carries the licence's '$line'")
+        }
     }
 
     /** No code reads the notice, so a resource-shrinking build would drop it: `res/raw/keep.xml` keeps it (and lint then calls it used). */

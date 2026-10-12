@@ -8,6 +8,7 @@ import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasTestTag
@@ -18,6 +19,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
 import androidx.navigation.NavBackStackEntry
@@ -41,6 +43,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
 import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -330,6 +333,136 @@ class NavigationBackTest {
 
         assertTrue(halfway.left > before.left && halfway.left - before.left <= root().width / 10f + 1f, "not sliding to the end: $halfway, was $before")
         assertNear(before.width, halfway.width, "width (the page is not scaled)")
+    }
+
+    /** The search page over the seeded library, searching "m" (every seed's author), with its results' tiles shown. */
+    private fun showSearchResults() {
+        compose.setContent {
+            navController = rememberNavController()
+            back = LocalOnBackPressedDispatcherOwner.current!!.onBackPressedDispatcher
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) {
+                    ReelsNavHost(navController, startDestination = SearchRoute)
+                }
+            }
+        }
+        compose.waitForIdle()
+        compose.mainClock.autoAdvance = false
+        compose.onNode(hasTestTag("searchField")).performTextInput("m")
+        compose.mainClock.advanceTimeBy(200) // the search's typing debounce
+        compose.mainClock.autoAdvance = true
+        awaitUntil("the results' tiles") { compose.onAllNodesWithTag("tile").fetchSemanticsNodes().size >= 2 }
+    }
+
+    /**
+     * Task 6 minor 2, Search as the grid (R15): back on the result that was opened, wholly in view, the results stay where they
+     * were; and while the post opens, the results under it stay too (they do not slide away under the growing post).
+     */
+    @Test
+    @Config(qualifiers = "w320dp-h900dp")
+    fun backToASearchResultInViewLeavesTheResultsWhereTheyWere() {
+        seed(30)
+        showSearchResults()
+        val searchEntry = navController.currentBackStackEntry!!
+        val before = boundsOfTile("m27") // item 2: the second row, whole on this tall screen
+        val neighbour = boundsOfTile("m26")
+        val top = compose.onNode(hasTestTag("searchField")).fetchSemanticsNode().boundsInRoot.bottom
+        assertTrue(before.top > top + 20f && before.bottom <= root().bottom, "the setup: m27's tile is whole and below the top, $before")
+
+        compose.mainClock.autoAdvance = false
+        compose.onNode(tileOf("m27")).performClick()
+        val under = List(10) {
+            compose.mainClock.advanceTimeByFrame()
+            compose.waitForIdle()
+            compose.onAllNodes(tileOf("m26")).fetchSemanticsNodes().singleOrNull()?.boundsInRoot
+        }
+        compose.mainClock.autoAdvance = true
+        assertTrue(under.all { it == neighbour }, "the results moved or left under the opening viewer: $under")
+        awaitUntil("the viewer on index 2") { onTheViewer() && searchEntry.savedStateHandle.get<Int>(VIEWER_INDEX_KEY) == 2 }
+
+        compose.runOnUiThread { back.onBackPressed() }
+        compose.waitForIdle()
+
+        assertFalse(onTheViewer())
+        assertEquals(before, boundsOfTile("m27"))
+    }
+
+    /** Task 6 minor 2: back from a result far down the list, the results bring its tile into view, as the grid does. */
+    @Test
+    fun backFromAFarSearchResultShowsItsTile() {
+        seed(30)
+        showSearchResults()
+        val searchEntry = navController.currentBackStackEntry!!
+        openTile(0, searchEntry)
+        swipeTo(20, searchEntry) // item 20 is m9
+        compose.onNode(tileOf("m9")).assertDoesNotExist()
+
+        compose.runOnUiThread { back.onBackPressed() }
+        compose.waitForIdle()
+
+        assertFalse(onTheViewer())
+        assertEquals(searchEntry, navController.currentBackStackEntry)
+        compose.onNode(tileOf("m9")).assertIsDisplayed()
+    }
+
+    /** The left edge of the node matching [matcher], or null when it is not composed. */
+    private fun leftOf(matcher: SemanticsMatcher): Float? = compose.onAllNodes(matcher).fetchSemanticsNodes().singleOrNull()?.boundsInRoot?.left
+
+    /** On a paused clock, [frames] frames, recording the left edges of [a] and [b] after each. */
+    private fun recordLefts(frames: Int, a: SemanticsMatcher, b: SemanticsMatcher): List<Pair<Float?, Float?>> = List(frames) {
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        leftOf(a) to leftOf(b)
+    }
+
+    private fun List<Float>.falls() = zipWithNext().all { (x, y) -> y <= x + 0.5f } && first() > last() + 2f
+
+    private fun List<Float>.rises() = zipWithNext().all { (x, y) -> y >= x - 0.5f } && first() < last() - 2f
+
+    /**
+     * T8 (spec 2026-10-12 §3.6, shared-axis X): going forward, the new page slides in from the end (its content starts right of
+     * where it settles, at most a tenth of the width, and moves left) while the page left slides out to the start. A plain Back
+     * is the reverse: the previous page slides back in from the start while the closed one slides out to the end. This also pins
+     * that the nav host's four page transitions are not None while motion is on.
+     */
+    @Test
+    fun pagesSlideInFromTheEndGoingForwardAndBackFromTheStart() {
+        compose.setContent {
+            navController = rememberNavController()
+            back = LocalOnBackPressedDispatcherOwner.current!!.onBackPressedDispatcher
+            ReelsTheme {
+                CompositionLocalProvider(LocalAppContainer provides container) {
+                    ReelsNavHost(navController, startDestination = HomeRoute)
+                }
+            }
+        }
+        val home = hasText("Saved") // Home's title
+        val search = hasTestTag("searchField")
+        awaitUntil("Home") { leftOf(home) != null }
+        val homeAt = leftOf(home)!!
+        val tenth = root().width / 10f + 1f
+
+        compose.mainClock.autoAdvance = false
+        compose.runOnUiThread { navController.navigate(SearchRoute) }
+        val forward = recordLefts(30, search, home)
+        compose.mainClock.autoAdvance = true
+        compose.waitForIdle()
+        val searchAt = leftOf(search)!!
+        val entering = forward.mapNotNull { it.first }
+        assertTrue(entering.size >= 3 && entering.first() - searchAt in 2f..tenth && entering.falls(), "Search did not slide in from the end: $entering, settles at $searchAt")
+        val leaving = forward.mapNotNull { it.second }
+        assertTrue(leaving.isNotEmpty() && leaving.all { it <= homeAt + 0.5f } && leaving.any { it < homeAt - 2f }, "Home did not slide out to the start: $leaving, was at $homeAt")
+
+        compose.mainClock.autoAdvance = false
+        compose.runOnUiThread { back.onBackPressed() }
+        val backward = recordLefts(30, search, home)
+        compose.mainClock.autoAdvance = true
+        compose.waitForIdle()
+        val returning = backward.mapNotNull { it.second }
+        assertTrue(returning.size >= 3 && homeAt - returning.first() in 2f..tenth && returning.rises(), "Home did not slide back in from the start: $returning, settles at $homeAt")
+        val closing = backward.mapNotNull { it.first }
+        assertTrue(closing.isNotEmpty() && closing.all { it >= searchAt - 0.5f } && closing.any { it > searchAt + 2f }, "Search did not slide out to the end: $closing, was at $searchAt")
+        assertEquals(homeAt, leftOf(home))
     }
 
     /** With the system's animations off (scale 0): no growing, no shrinking, no fade; each page is there on the next frames. */
