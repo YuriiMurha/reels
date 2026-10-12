@@ -258,7 +258,8 @@ Two follow-ups the final review of the collection-names change parked (PR #8), a
 
 ## 2026-10-12: viewer UX: carousels, icon buttons, the app icon and motion (Tasks 1 to 7)
 
-Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` (its section 6 lists the rulings R1 to R15), plan
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` (its section 6 lists the rulings R1 to R22; R16 to R22 come
+from the final review, in the 2026-10-13 entry below), plan
 `docs/superpowers/plans/2026-10-12-viewer-ux.md`. Seven tasks; Tasks 1 to 6 were each reviewed, with a fix round where a review
 asked for one:
 
@@ -290,15 +291,15 @@ asked for one:
   emulator the grow, the shrink, the page slides and the back gesture were seen frame by frame; the first viewer open after
   an app start showed no grow there (a debug first composition stalls the main thread longer than the fade), and fell back to
   a plain fade, by design. The viewer's two player effects now run on `Dispatchers.Main.immediate` (a test once woke one on a
-  Room thread); no deterministic test pins that.
+  Room thread); pinned since the final review.
 - **Task 7, docs.** `ARCHITECTURE.md` has sections Carousels, Viewer, Motion and App icon, and the tests; the spec has its
   amendments; the README has a phone checklist and its text-button lines now describe the icon buttons.
 - **Tests.** `./gradlew check`: 1097 app tests and 382 `:instagram` tests, lint with no errors. `connectedDebugAndroidTest` on
   the emulator in Mock mode: 54 of 54 at the last code change (the smoke suite gained a carousel swipe and a back from a far
   post). The new tests were mutation-checked: a mutant of each rule named above (the visit sharing, the CDN lane, the
   cross-post guards, the shared bounds, `revealTile`, a REPLACE upsert) fails a test, and the few survivors are equivalent in
-  this version or covered by another guard. A few flaky tests, seen once or twice and never reproduced on demand, are in
-  `TODO.md`.
+  this version or covered by another guard. The teardown flakes seen then were fixed in the final review (below); a rare
+  60 s hang in one `SyncViewModelTest` body stays open in `TODO.md`.
 - **Pacing.** The sync is unchanged: it sends no new request, and its replies already carry the items. A carousel visit sends
   at most one `mediaInfo`, on the interactive lane (the fill and any renewal together), under the same session gates as a
   reel's link renewal. Carousel images download on the existing CDN lane, which can only lower a rate. No rate, budget or
@@ -308,3 +309,47 @@ asked for one:
 - **Next, the owner's phone.** README section 8, "The viewer update": install over the app, swipe a carousel, play a video item,
   reopen it offline, the icon buttons, the launcher icon and its themed layer, and the back swipe from a post and between pages.
   On the release build the first open after a cold start should grow from its tile; a debug build on a slow phone may only fade.
+
+## 2026-10-13: viewer UX: the final review's fixes (R16 to R22)
+
+A five-lens final review of the whole update (correctness, pacing with the adapter boundary and secrets, data and the
+migration, tests by mutation, docs), then refuters for its findings, then one fix round. Spec section 6 records R16 to R22.
+
+- **Fixes.**
+  - **C1, a list moving under the viewer.** A sync that saved or removed a post above the viewed carousel reset it to item 1,
+    stopped its video item and, for one frame, handed the player the post that slid in (the pager re-keys a moved post only in
+    its next measure). The viewer now reports a settle only where the list and the pager's layout agree; a placeholder row
+    always settles.
+  - **R16.** A carousel video item the player cannot reach says "Offline: this item isn't cached yet" unless all its bytes are
+    cached, as an unviewed image does.
+  - **R20.** A carousel whose items change shape (a slide deleted, an image swapped for a video) drops its downloaded item
+    images and cached item videos, which are keyed by position: the sync after its page commits, a renewal after its store.
+    The same items with renewed links keep everything. A reorder that keeps every position's type is a known gap (TODO).
+  - **D3.** No image file is written, and no request sent, for a post a sync has marked removed.
+  - **R21.** `versionCode` 2 follows the Room schema, with a guard test, so a build from before the update is refused
+    (`INSTALL_FAILED_VERSION_DOWNGRADE`) instead of failing at every start; the README says never to uninstall to get past it.
+  - **Smaller.** The schema assets merge after Room writes them (D4); a tile taller than the grid aligns by its top on return;
+    the manifest's back flag says API 33 and the glyphs' notice is kept (lint warnings 18 to 16).
+- **Test gaps closed.** A held drag reports no settle; the bright dot, the black placeholder and Fit for item pictures; R2 on
+  the repository's renewal and fill; the log lines carry no link, host or pk; every v1 table keeps its rows; the shared-axis
+  direction forward and back and the nav host's use of every transition; Search's return; an activity naming its own icon;
+  each glyph's own outline; anchored session-gate pins; no stroke on the launcher tiles; the licence's terms; the player
+  called on the main thread only; an unset animator scale; any registration of the lab's route; the prefetch when a post's
+  first item was swiped past before it resolved.
+- **Flakes.** "Dispatchers.Main is used concurrently with setting it" (`SyncViewModelTest`, `ViewerViewModelTest`): a
+  ViewModel's cancelled (or never ended) coroutine still resumed on Main from the IO, Room or DataStore thread it waited on
+  while Main was reset. The tests now end their ViewModels and wait for them, then close the database, then reset Main.
+  "Pool closed" (`SyncScreenRealPacerNoteTest`, and the same order in `NavigationBackTest` and `ViewerScreenCarouselTest`): the
+  database closed while the screen was still composed; it now closes after the composition is disposed. A rarer 60 s hang in
+  one `SyncViewModelTest` body, seen once before and once in this round's first full `check`, is another mechanism; it stays
+  open in `TODO.md`.
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1137 app tests in 92 classes and 382 `:instagram` tests,
+  0 failures, lint with no errors and 16 warnings (one from this update, `ObsoleteSdkInt`). `connectedDebugAndroidTest` on the
+  emulator in Mock mode: 54 of 54. Every fix and pin was mutation-checked in a scratch export: 49 mutants, all killed.
+- **Pacing.** Nothing raised. R20's drop deletes local files and cache keys only (a dropped image downloads again only when
+  viewed), the removed-post guard can only send fewer requests, and the settle gate keeps a transient post from ever starting
+  a fill or a resolve.
+- **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, local data and the emulator in Mock
+  mode only.
+- **Next, the owner's phone.** Unchanged: README section 8, "The viewer update", now including the offline video item (step 4)
+  and the install rule of step 1.
