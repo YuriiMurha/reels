@@ -41,6 +41,16 @@ data class SettledPage(val index: Int, val media: MediaEntity?, val position: In
 }
 
 /**
+ * The settled page as the screen reports it, or null while its list and its pager disagree (C1). [media] is the list's row at
+ * [index] (null while it is a placeholder) and [laidOutKey] the key the pager laid out at [index] (null before its first
+ * layout). A sync that adds or removes a post above the settled one changes the list at once, but the pager moves the post's
+ * key to its new index only in its next measure: a loaded row whose pk is not the laid-out key is that instant, and no settle.
+ * A placeholder is never held back: its key is Paging's own, never a pk, and its settle must still stop the previous video.
+ */
+fun settledPageOrNull(index: Int, media: MediaEntity?, laidOutKey: Any?, position: Int?): SettledPage? =
+    if (media != null && laidOutKey != null && laidOutKey != media.pk) null else SettledPage(index, media, position)
+
+/**
  * Resolves [unit]'s video and hands the answer to [onSource], but only if [isStillSettled] says that unit is still the one
  * on screen once the answer is in. A resolve can take seconds (a paced request); the owner may have swiped on by then, and a
  * video that starts under the wrong page (or item) is worse than a late one. Null (not a video) is not handed over.

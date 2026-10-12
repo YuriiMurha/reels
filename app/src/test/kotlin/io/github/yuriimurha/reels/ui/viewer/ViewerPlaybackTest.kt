@@ -207,4 +207,21 @@ class ViewerPlaybackTest {
         assertEquals(listOf(null, null, "Can't load this item"), failed.items.map { it.failure })
         assertEquals(state, state.withItemFailure(7, "Can't load this item"), "no such item: nothing changes")
     }
+
+    /**
+     * C1: a settle is reported only when the list's row and the pager's laid-out key agree (`ViewerScreenCarouselTest` runs the
+     * list moves themselves). A placeholder row is never held back, though its key is not a pk: its settle stops the previous
+     * post's video while the row loads.
+     */
+    @Test
+    fun aSettleIsReportedOnlyWhereTheListAndThePagerAgree() {
+        assertEquals(SettledPage(3, carousel, 2), settledPageOrNull(3, carousel, carousel.pk, 2), "the same post")
+        assertEquals(null, settledPageOrNull(3, carousel, reel.pk, 2), "the list moved: the pager still has another post there")
+        assertEquals(SettledPage(3, reel), settledPageOrNull(3, reel, null, null), "before the pager's first layout")
+
+        val placeholderKey = PlaceholderKey(3) // stands in for Paging's own key of a row not loaded yet
+        assertEquals(SettledPage(3, null), settledPageOrNull(3, null, placeholderKey, null), "a placeholder still settles")
+    }
+
+    private data class PlaceholderKey(val index: Int)
 }

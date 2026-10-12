@@ -123,16 +123,13 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
 
     /**
      * The settled unit now: the vertical pager's post and, for a carousel, the item its own pager settled on. Null while the
-     * list and the pager disagree (C1): a sync that adds or removes a post above the settled one changes the list at once, but
-     * the pager moves the post's key to its new index only in its next measure, so for that instant the settled index holds
-     * another post. Only a loaded row is checked: a placeholder's key is Paging's own, never a pk.
+     * list and the pager's layout disagree (C1, [settledPageOrNull]): the instant a list moves under the settled post.
      */
     val settledNow = {
         val index = pagerState.settledPage
         val media = items.itemSnapshotList.getOrNull(index)
         val laidOut = pagerState.layoutInfo.visiblePagesInfo.firstOrNull { it.index == index }?.key
-        if (media != null && laidOut != null && laidOut != media.pk) null
-        else SettledPage(index, media, media?.let { carouselPosition(it, carousel) })
+        settledPageOrNull(index, media, laidOut, media?.let { carouselPosition(it, carousel) })
     }
     val isStillSettled = { unit: Playable -> settledNow()?.playable == unit }
     val present = { page: SettledPage, source: VideoSource ->
