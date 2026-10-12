@@ -21,6 +21,7 @@ First time through, do sections 1 to 5 in order. Sections 6 to 10 are reference 
 | M0 Skeleton, M1 Mock app | Done. Home, grid, viewer, search and sync work on a built-in fake library of 2,000 items in 8 collections. |
 | M2 Session | Code done. Logging in through Instagram's own page (or pasting a `sessionid`) needs your on-phone check ([section 8](#8-on-phone-checklist)). |
 | Collection names | Code done and tested against fakes and local test servers only. The collections and their names come from the website's own query, and the app learns the query's new id from the site when Instagram changes it. It has never met Instagram: do the box [After the collection names update](#after-the-collection-names-update) on your phone. |
+| Viewer update | Code done and tested on fakes and on the emulator in Mock mode: a carousel post swipes through its images and videos, mute and Open on Instagram are icon buttons, the app has its own icon, and a post grows from and shrinks back into its tile. It has never met a real carousel: do [The viewer update](#the-viewer-update-carousels-icon-buttons-the-app-icon-motion) on your phone. |
 | M3 Adapter lab | Code done. A debug-only lab sends one request per endpoint and saves scrubbed copies of the answers. The parsers follow the open-source clients' known response shapes and have never met Instagram, so running the lab and handing the answers back is yours ([section 7](#7-adapter-lab-and-the-spike-handback)). |
 | M4 Real sync | Code done and tested against fakes and a local test server only. Sync, Full sync, resume, budgets, cooldowns, the challenge stop and thumbnails need your first real sync ([section 5](#5-first-real-sync)). |
 | M5 Video | Code done: reels play on demand and are cached. Needs your on-phone check ([section 6](#6-watching-videos)). |
@@ -110,7 +111,12 @@ Then open **Reels** on the phone. A fresh debug install is in Mock mode.
 
 - **Saved** (home) lists All Saved, Uncategorized and your collections, each with its item count. Tap a card for its
   grid. When the library is empty it says "Nothing synced yet": tap **Open Sync**.
-- **Grid**: tap a tile for the full-screen viewer; swipe up and down; **Back** returns to the same tile.
+- **Grid**: tap a tile and its picture grows into the full-screen viewer; swipe up and down for the next post. A carousel
+  (its tile reads "1/N") also swipes left and right through its images and videos, with a counter ("2/5") and dots.
+  **Back** (the button, or the back swipe from the screen edge) shrinks the post into its tile, and the grid shows the tile of
+  the post you were on.
+- **Viewer buttons**: two icon buttons over the picture, **Open on Instagram** at the bottom left and **Mute** / **Unmute**
+  (a speaker) at the bottom right. A long press on either shows its name.
 - **Search** (magnifier, top right) searches captions, authors and collection names, and can narrow to reels or
   posts.
 - **Sync** (the status chip, top right: "Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and a problem):
@@ -148,7 +154,7 @@ and never contacts Instagram. A release build has no such switch and always uses
 An on-device UI suite (`app/src/androidTest/`) drives the real app through its screens, like a browser test for the phone
 app. It covers: launch (Home's "Saved" bar, Search, the sync chip), the Sync screen (the session shown logged out, the
 Developer section with Mock mode on), a fake **Sync** to the end, a collection grid, opening the viewer, a reel that
-starts playing, and Search. It never contacts Instagram: it never logs in and never taps Log in, Check now, Open on
+starts playing, a carousel swiped to its second item, back from a post far down the list to that post's tile, and Search. It never contacts Instagram: it never logs in and never taps Log in, Check now, Open on
 Instagram, the Adapter lab or the Mock mode switch (it only checks that they are there).
 
 - **It skips on a real phone.** Every test begins by checking that the device is an emulator, before anything is
@@ -479,13 +485,36 @@ Videos are never downloaded during a sync. A reel is fetched when you open it:
 - **Offline or limited.** A reel you watched all the way through still plays with no network, or while the app is
   cooling down after a rate limit. One you haven't shows a message over its thumbnail: "Offline: this video isn't
   cached yet", "Can't play this video", or why it can't load ([Troubleshooting](#10-troubleshooting)).
-- **Open on Instagram** is always under the thumbnail, also when a video can't play. It opens the link in whatever
-  handles it on the phone (the Instagram app or a browser), so it uses whatever account is logged in there. If
-  Instagram no longer has the reel, the app says so and keeps your copy of the item.
+- **Open on Instagram** is the icon button at the bottom left of the viewer (a box with an arrow; a long press shows its
+  name), there also when a video can't play. It opens the link in whatever handles it on the phone (the Instagram app or a
+  browser), so it uses whatever account is logged in there. If Instagram no longer has the reel, the app says so and keeps
+  your copy of the item.
 - A link Instagram refuses (HTTP 403 or 410) is renewed once and retried; if that fails too you see "Can't play this
   video". The player itself never retries a refused link (nor a 429 or 404): one refusal is one request. Video requests
   carry no cookies; if Instagram's video server redirects, the redirect is followed (the player can't refuse it).
 - In Mock mode the bundled clip plays for every reel and nothing is requested.
+
+### Carousels
+
+A carousel post keeps all its items, and the viewer shows them on demand, as it does videos:
+
+- **What a sync stores.** The addresses of every item, taken from the saved-feed replies the sync already downloads: a sync
+  sends no extra request for them and downloads no carousel image or video. A Sync stops at the first post it already has, so a
+  carousel saved before this update gets its items from a Full sync, or on its first open (below).
+- **On open.** The first item shows at once (it is the picture already in the grid). The other images download when you swipe
+  to them, from Instagram's image servers, with no cookies and at the thumbnails' pace, and are kept on the phone, so an item
+  you have seen shows with no network. A video item streams like a reel and is cached under the post's id and its position.
+- **At most one request a visit.** If the post has no stored items, or a link has run out (an image the server refuses, a
+  video link with 10 minutes or less left, a video the player is refused), the app asks Instagram once for the post: the same
+  `GET api/v1/media/<n>/info/` as a reel's link renewal, on the interactive lane, counted in the 600 per 24 hours. The answer
+  serves the rest of the visit. It never asks twice in a visit, even when the answer was a failure: leave the post and come
+  back for another try. Without a valid session it asks nothing, and the first picture shows with "Instagram session needs
+  attention (Sync screen)".
+- **Unsaving and deleting.** A Full sync that finds a post unsaved drops its items, its images and its cached videos, and
+  **Delete library** removes them all.
+- **Messages** over an item are in [Troubleshooting](#the-viewer-messages-over-a-video-or-a-carousel-item).
+- In Mock mode the fake carousels show placeholder pictures and the bundled clip for their video items, and nothing is
+  requested.
 
 ## 7. Adapter lab and the spike handback
 
@@ -687,7 +716,7 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 ### M5: video
 
 - [ ] **Plays.** Open a reel. **Look for:** picture and sound start within a few seconds, it loops, a tap pauses, and
-  **Mute** / **Unmute** sticks across reels and a restart. **Report:** a pass, or the reel and what happened.
+  The speaker button (**Mute** / **Unmute**, bottom right) sticks across reels and a restart. **Report:** a pass, or the reel and what happened.
 - [ ] **Link renewal.** With logcat running, open a reel shortly after a sync (its link is fresh), then open one a day
   or more later. **Look for:** no `GET api/v1/media/<n>/info/` line for the fresh one; exactly **one** for the old
   one, then it plays. The next reel's link may be renewed in advance, once, after the current one plays. **Report:**
@@ -746,6 +775,74 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 
   **Look for:** `status=speed-profile` (the emulator smoke saw it). Compilation can lag after an install: if it still
   says `run-from-apk`, report that.
+
+### The viewer update (carousels, icon buttons, the app icon, motion)
+
+The update that added carousel swiping, icon buttons, the app's own icon and the grow-and-shrink motion. It was built and tested
+on fakes and on the emulator in Mock mode. No agent has seen a real carousel, a real expired link or your launcher, so these
+checks are yours. Do them after the first real sync ([section 5](#5-first-real-sync)): steps 2 to 4 need a carousel in the
+real library (a grid tile reading "1/N"). Steps 5 to 8 also work in Mock mode, whose fake library has carousels.
+
+**What it sends.** A sync is unchanged and sends nothing new. A visit to a carousel sends at most one
+`GET api/v1/media/<n>/info/` (the interactive lane) in all, and only when its items are not stored yet or a link it needs has
+run out; swiping through the items adds nothing beyond that one. If a cooldown is running, wait it out first.
+
+For the log checks, clear the log, then watch the requests in a second terminal (the start of this section says how):
+
+```bash
+adb -d logcat -c
+```
+
+```bash
+adb -d logcat -s InstagramHttp
+```
+
+1. **Install over the app you have.** Your data is kept: the database adds one table on its first open and changes nothing
+   else.
+
+   ```bash
+   SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
+   ```
+
+   Open **Reels**. **Look for:** Saved lists the same collections and counts as before. **Report:** a pass, or what changed.
+2. **Swipe a carousel.** Open a post whose tile reads "1/N" and swipe left and right. **Look for:** its first picture at once; a
+   counter at the top end ("1/5") and small dots at the bottom centre; each swipe left shows the next item, and the counter and
+   the dots follow ("2/5"); a swipe up or down moves to the next post, never to the next item; leaving the post and coming back
+   starts it at the first item again. In the log: at most one `GET api/v1/media/<n>/info/` for the whole visit (none if its items
+   were already stored and no link had run out). **Report:** a pass, the counter you saw, and the request lines.
+3. **Play a video item.** Swipe to an item that is a video. **Look for:** it plays and loops, a tap pauses it, the speaker
+   button mutes it (the button shows only while a video item is on screen), and it stops when you swipe to an image item or to
+   another post. **Report:** a pass, or what happened.
+4. **Reopen it offline.** After you have viewed some of a carousel's items, turn on airplane mode, leave the viewer and open the
+   same carousel again. **Look for:** the items you viewed show; an image you never viewed says "Offline: this item isn't
+   cached yet". (A video you never watched says that too when its link had to be renewed. When its stored link was still good
+   the player fails on its own and the item says "Can't load this item" instead, as a reel says "Can't play this video".)
+   **Report:** the message text, and whether the item was an image or a video.
+5. **Check the icon buttons.** **Look for:** at the bottom left an icon (a box with an arrow), at the bottom right a speaker
+   icon (on a video, or on a carousel's video item, only), and no text buttons. Long-press each: a tooltip says "Open on
+   Instagram", "Mute" or "Unmute". Tap the speaker: it flips between speaker and speaker-off, the sound follows, and the setting
+   holds across posts and a restart. Tap the first one if you like: it opens the post in the Instagram app or a browser, as it did
+   before. **Report:** a pass, or which button looked or behaved wrong.
+6. **Check the launcher icon.** Go to the home screen and find **Reels**. **Look for:** the app's own icon, a teal square with
+   four rounded tiles in a masonry and a play triangle on one of them, in place of the system default. Then switch on themed
+   icons (Settings, Wallpaper & style, Themed icons; Android 13 or later, and your launcher must support them). **Look for:** the
+   icon turns one colour, with the triangle as a cut-out. **Report:** a pass, a screenshot of the icon, or what it looked like.
+7. **Open a post and go back with the back swipe.** Tap a grid tile, then drag in from the screen edge slowly, without letting
+   go. **Look for:** the post shrinks towards its tile with the grid showing behind it; let go before the end and it springs back
+   and the viewer stays; go all the way and it lands in its tile. Also: tapping a tile grows its picture into the viewer, and
+   after swiping up through several posts, going Back shrinks the post into its own tile and the grid shows that tile (it scrolls
+   only when the tile was out of view). **Report:** a pass, or what looked wrong.
+   - **The first open after a cold start.** Force-stop the app (Settings, Apps, Reels, Force stop), open it and tap a tile as the
+     first thing. On the **release** build ([section 9](#9-release-build)) that first open should grow from its tile. A **debug**
+     build on a slow phone may only fade in this one case (the viewer's first screen is slow to compose on a debug build, and the
+     fade is over before the picture is ready); every later open grows. **Report:** which build, and whether that first open grew
+     or only faded.
+8. **Move between pages with the back swipe.** From Saved open Search (or Sync) and drag back from the edge. **Look for:** the
+   page slides a little to the side with a fade and follows your finger, letting go early cancels it, and going forward slides
+   the same way. **Report:** a pass, or what looked wrong.
+
+With animations switched off (Settings, Developer options, Animator duration scale: off), nothing animates: pages and posts
+change at once. Switch it back on afterwards.
 
 ## 9. Release build
 
@@ -966,7 +1063,7 @@ tapping), "query not sent: no tokens" (**Collections** only: the hidden page had
 was sent), "The call failed", or "Couldn't save the scrubbed copy". **Collections** showing the classification `StaleQuery`
 means Instagram no longer runs the stored names query id: the lab doesn't repair it, a Sync does.
 
-### The viewer: messages over a video
+### The viewer: messages over a video or a carousel item
 
 - **"Instagram session needs attention (Sync screen)"**: no valid login, so nothing was sent. Fix it on Sync.
 - **"This item is no longer available on Instagram"**: Instagram doesn't have the reel any more. Your copy stays.
@@ -978,4 +1075,15 @@ means Instagram no longer runs the stored names query id: the lab doesn't repair
 - **"Can't play this video"**: the player failed and one renewal (if it was a 403 or 410) didn't help.
 - **"Not available on Instagram"** (a tile with no picture): the item has no thumbnail.
 
-In every case **Open on Instagram** stays under the thumbnail.
+Over a carousel item (centred on that item, with the counter and the dots still there):
+
+- **"Can't load this item"**: its image or video could not be had. The server refused its link and the visit's one renewal did
+  not help (or was already used), the image server was limiting requests, the player failed, or Instagram's answer was not
+  understood.
+- **"Offline: this item isn't cached yet"**: no connection, and you have not viewed that item before.
+- **"Can't load this item right now: ..."**: followed by "Cooling down after a rate limit" or "The 24-hour request budget is
+  used up": the app won't ask Instagram for new links yet.
+- **"Instagram session needs attention (Sync screen)"**, **"Instagram is limiting requests"** and **"This item is no longer
+  available on Instagram"** mean the same as above.
+
+In every case the **Open on Instagram** icon (bottom left) stays.

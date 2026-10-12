@@ -255,3 +255,56 @@ Two follow-ups the final review of the collection-names change parked (PR #8), a
 - Pacing: unchanged (no new request, no retry; a throttle written as a plain string no longer starts a repair).
 - Tests: `./gradlew check` 1285 (new: an envelope's own text keeping its meaning, the stale detail for envelopes and non-JSON pages, plain-string error entries, the
   reply-failure callback's contract both ways, the log line on a stopping repaired reply, an envelope that repairs).
+
+## 2026-10-12: viewer UX: carousels, icon buttons, the app icon and motion (Tasks 1 to 7)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` (its section 6 lists the rulings R1 to R15), plan
+`docs/superpowers/plans/2026-10-12-viewer-ux.md`. Seven tasks; Tasks 1 to 6 were each reviewed, with a fix round where a review
+asked for one:
+
+- **Why.** The owner's first real use on the phone (2026-10-11) found four rough edges: a carousel post could not be swiped
+  (the app kept only its first picture and a "1/N" badge), Mute and Open on Instagram were text buttons, navigation had no
+  motion that related a post to its tile, and the app had no icon of its own.
+- **Tasks 1 and 2, the data.** `WebParsers` reads each child of `carousel_media` into `RemoteCarouselItem`s from the saved feed
+  the sync already downloads; an unreadable child leaves a post's items unknown, never a `ShapeChanged` (R4). Room goes to
+  version 2 (`carousel_item`, `MIGRATION_1_2`, no destructive fallback); foreign keys are now enforced, so `MediaDao.upsert`
+  must stay an in-place `@Upsert`. The sync replaces a page's items in that page's transaction, and an empty list keeps the
+  stored ones (R2). The schema files ship as debug assets (R5). `FakeLibrary` gives Mock mode's carousels items.
+- **Task 3, loading on demand.** `PacedMediaInfo` is the reel resolver's `mediaInfo` request and session gates, cut out and
+  shared. `CarouselRepository` fills a post's items, downloads an image and resolves a video item, with at most one
+  `mediaInfo` per `Visit`, spent by any outcome (R8). Images go through the cookieless CDN fetcher on the Pacer's CDN lane
+  into `CarouselImageStore` (R1, R7); video items are cached under `{pk}_{position}` and play the bundled clip in Mock mode
+  (R3), with the reels' cached-bytes table (R9). Eviction drops a post's `{pk}_*` videos (R6), each step on its own
+  (`MediaEviction.eachStep`). The review found the CDN lane unpinned: fixed and pinned.
+- **Task 4, the viewer.** A horizontal pager inside a carousel post, "N/M" and dots, the playable unit (post, item), one visit
+  per settled post with its calls in a post-scoped coroutine, item 0 showing the stored cover, images downloading when they
+  settle, no posters for video items (R10), and the next post's prefetch decided only on a post's first unit (R11). The review
+  found the visit's sharing and the cross-post guards unpinned: fixed and pinned, with a seeded pager and a same-post re-settle
+  that keeps its visit.
+- **Task 5, icons.** Mute and Open on Instagram are icon buttons with tooltips, from Material Symbols (Apache 2.0, notice in
+  `res/raw/license_material_symbols.txt`, R12); no `material-icons-extended`. The adaptive icon (`#0F6E56`, four masonry tiles
+  with a play triangle) has a monochrome layer with the triangle cut out of its tile (R13).
+- **Task 6, motion.** `Motion.kt`, a `SharedTransitionLayout` around the nav host, the key `media-<pk>` on the tile's picture
+  and the viewer's settled page, as shared bounds with scale-to-bounds (R14); shared-axis X pages; predictive back, which
+  needed the NavHost's own predictive transitions and `revealTile` (R15); nothing animates with animations off. On the
+  emulator the grow, the shrink, the page slides and the back gesture were seen frame by frame; the first viewer open after
+  an app start showed no grow there (a debug first composition stalls the main thread longer than the fade), and fell back to
+  a plain fade, by design. The viewer's two player effects now run on `Dispatchers.Main.immediate` (a test once woke one on a
+  Room thread); no deterministic test pins that.
+- **Task 7, docs.** `ARCHITECTURE.md` has sections Carousels, Viewer, Motion and App icon, and the tests; the spec has its
+  amendments; the README has a phone checklist and its text-button lines now describe the icon buttons.
+- **Tests.** `./gradlew check`: 1097 app tests and 382 `:instagram` tests, lint with no errors. `connectedDebugAndroidTest` on
+  the emulator in Mock mode: 54 of 54 at the last code change (the smoke suite gained a carousel swipe and a back from a far
+  post). The new tests were mutation-checked: a mutant of each rule named above (the visit sharing, the CDN lane, the
+  cross-post guards, the shared bounds, `revealTile`, a REPLACE upsert) fails a test, and the few survivors are equivalent in
+  this version or covered by another guard. A few flaky tests, seen once or twice and never reproduced on demand, are in
+  `TODO.md`.
+- **Pacing.** The sync is unchanged: it sends no new request, and its replies already carry the items. A carousel visit sends
+  at most one `mediaInfo`, on the interactive lane (the fill and any renewal together), under the same session gates as a
+  reel's link renewal. Carousel images download on the existing CDN lane, which can only lower a rate. No rate, budget or
+  concurrency was raised, and item swipes never start a prefetch.
+- **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, local data and the emulator in
+  Mock mode only. Fixtures use synthetic ids and `cdn.example.invalid`-style hosts.
+- **Next, the owner's phone.** README section 8, "The viewer update": install over the app, swipe a carousel, play a video item,
+  reopen it offline, the icon buttons, the launcher icon and its themed layer, and the back swipe from a post and between pages.
+  On the release build the first open after a cold start should grow from its tile; a debug build on a slow phone may only fade.
