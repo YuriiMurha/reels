@@ -9,6 +9,7 @@ import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.media.CarouselRepository
+import io.github.yuriimurha.reels.data.media.ImageAhead
 import io.github.yuriimurha.reels.data.media.ItemImage
 import io.github.yuriimurha.reels.data.media.ItemsResult
 import io.github.yuriimurha.reels.data.media.VideoSource
@@ -272,16 +273,21 @@ class ViewerViewModel(
          * second stays free for the item on screen ([loadImage]). Each turn takes the next page by the settled item as it is
          * then, so an item settle reorders what is left without restarting it or cancelling the download that is out. Only
          * image items past the cover, and none shown or asked for on demand already; through [CarouselRepository.prefetchImage]
-         * alone, so nothing here asks Instagram anything, and a picture that does not come is skipped without a word (its item
-         * says why once it settles). It ends when nothing is left, or with the visit.
+         * alone, whose only request to Instagram is the visit's one renewal for a refused link (R25), and a picture that does
+         * not come never shows a failure (its item says why once it settles). It ends when nothing is left, when the
+         * repository says to stop (the CDN's 429, offline, a post gone, a refusal the renewal cannot help: P1, R25), or with the
+         * visit.
          */
         private suspend fun fetchAhead() {
             while (true) {
                 val page = nextAhead() ?: return
                 fetchedAhead += page
                 val position = current()?.items?.getOrNull(page)?.position ?: return
-                val path = carousels.prefetchImage(media, position, visit) ?: continue
-                update { state -> state.withItem(page) { it.copy(imagePath = path) } }
+                when (val ahead = carousels.prefetchImage(media, position, visit)) {
+                    is ImageAhead.Shown -> update { state -> state.withItem(page) { it.copy(imagePath = ahead.path) } }
+                    ImageAhead.Skipped -> Unit
+                    ImageAhead.Stop -> return
+                }
             }
         }
 

@@ -41,8 +41,8 @@ tests, which load only local servers. What is still unconfirmed needs the owner'
   JVM and Compose tests, and on the emulator in Mock mode (the swipe, the icon buttons, the grow and shrink and the
   back gesture were seen there); no agent has met a real carousel. Its final review (2026-10-13) added R16 to R22 (spec
   §6), each fix with a test, and R23 (2026-10-13) fetches an open carousel's other pictures ahead, one at a time, on the CDN
-  lane. Its database is version 2, and `versionCode` follows it (R21): a build from before it is refused instead of
-  installed. Still unconfirmed, on the owner's phone (README section 8, "The viewer update"):
+  lane; R25, from its review, lets a refused link ahead spend the visit's one renewal. Its database is version 2, and
+  `versionCode` follows it (R21): a build from before it is refused instead of installed. Still unconfirmed, on the owner's phone (README section 8, "The viewer update"):
   - that a real carousel's `carousel_media` reads as parsed (one more of the M3 shape candidates, pinned by a synthetic
     fixture only), that its images load and its video items play, and that an expired link is renewed by the one
     `mediaInfo` a visit may send ([Carousels](#carousels));
@@ -878,8 +878,8 @@ current one from the site itself, on the phone, with no rebuild.
   before the request is recorded and sent (R79).
 - **CDN lane:** 2 concurrent downloads with 0.2–0.8 s jitter, not budgeted. The sync's thumbnails use it, and so do the
   viewer's carousel images (R7): they wait their turn behind a running sync's thumbnails, which can only lower a rate. An open
-  carousel's pictures fetched ahead (R23) use it one at a time, so the other slot stays free for the item on screen; the
-  lane's concurrency and jitter are unchanged.
+  carousel's pictures fetched ahead (R23) use it one at a time, so the other slot stays free for the item on screen, and stop
+  for the rest of the visit on the CDN's first 429 or when offline (P1); the lane's concurrency and jitter are unchanged.
 - **Cooldowns:** after a `RateLimited` the cooldown is 1 h, or 24 h if the previous rate limit was less than 24 h ago. It
   is persisted in DataStore, so killing the app does not reset it. While it is active every API lane refuses
   (`PacerRefusal.CoolingDown`). Refusals are `CoolingDown`, `RunBudgetReached` and `DailyBudgetReached`.
@@ -1187,15 +1187,24 @@ are shown in the viewer on demand.
     fill first, when there are no items). A link the CDN refuses (`MediaFetcher` returns null for 403, 404 and 410), or an item
     with no link, renews the post's links, and only a link that differs from the refused one is downloaded. An `IOException` is
     "Offline: this item isn't cached yet". The CDN's own 429 (`CdnRateLimited`) is "Can't load this item" and renews nothing.
-  - `prefetchImage(media, position, visit)` (R23): the same download of the item's STORED link, through the same fetcher, CDN
-    lane and store, ahead of the swipe. Only an IMAGE item past item 0 (the cover, R10) with stored items, of a post still
-    live; the stored file when there is one; else null. It never fills, never renews, never sends a `mediaInfo` and never
-    spends or reads the visit's request, and every failure (refused, offline, the CDN's 429, no link, a post gone, an unsafe
-    key) is a quiet null: the item's own `image` call deals with it as before once the owner gets there, with its own renewal.
-    A failure logs "carousel prefetch failed (<reason>)".
+  - `prefetchImage(media, position, visit)` (R23, R25): the same download of the item's STORED link, through the same fetcher,
+    CDN lane and store, ahead of the swipe. Only an IMAGE item past item 0 (the cover, R10) with stored items, of a post still
+    live; it never fills. It answers an `ImageAhead`: `Shown(path)` (the file, already there or just downloaded), `Skipped`
+    (nothing to fetch for this item) or `Stop` (fetch nothing more ahead in this visit). A refused link, or none, takes the
+    visit's one renewal by the same rule as `image` (R25: the first call that needs it sends it, every later one shares what
+    it brought) and loads the item's renewed link; a renewal that brings no other link (spent already on the links stored now)
+    or that failed answers `Stop`, and so do the CDN's 429, offline, a post gone and anything unforeseen (P1). A failure never
+    shows; it logs "carousel prefetch failed (<reason>)".
   - **One download of an item at a time (R23).** `Visit` keeps a lock per item position (`downloadOf`), apart from its request:
     `image` and `prefetchImage` both hold it, so an item asked for while its picture is being fetched ahead waits for that
-    download and then serves its file. Another item's call never waits for it.
+    download and then serves its file, or, if it stored none, loads as before. Another item's call never waits for it.
+  - **A refused link is asked for once a visit (R25).** `Visit.refused` keeps every link the CDN refused in the visit; the
+    download of one of them (by `image` or `prefetchImage`) is refused at once without a request, so an item whose link was
+    refused ahead goes straight to the visit's renewal, or to "Can't load this item" when that cannot help.
+  - **No picture of a link no longer stored (P2).** Before writing, a download reads the item's stored link again and writes
+    nothing if it changed while the bytes were on the way (a renewal or a sync replaced the items, and R20 may already have
+    dropped the post's pictures): those bytes may be another slide's. The load then reads the item again, once, and loads it
+    as it is stored now. The check and the write are not one step, the same gap as the removed-post check's.
   - `video(media, position, visit, forceRefresh)`: a `VideoSource.Play(uri, "{pk}_{position}")`. In Mock mode (R3) it is the
     bundled clip. Otherwise it is the stored link while it has more than 10 minutes left (the reels' rule,
     `videoLinkNeedsRefresh`), else the stored link while all of the item's bytes are cached (R78), else the link a renewal
@@ -1263,12 +1272,20 @@ are shown in the viewer on demand.
     cookieless CDN fetcher, never with the session; a sync never downloads one. They share that lane with the sync's own
     thumbnails (a viewer can be open while a sync runs), so they can only lower a rate (an image can wait behind a running
     sync's thumbnails). A carousel's video items stream through the same cookieless, unpaced video stack as reels.
-  - **Opening a carousel downloads up to its other image items ahead (R23)**, one at a time on the CDN lane, with no Instagram
-    API request: no fill, no renewal, no `mediaInfo`, the visit's request untouched, even when every one of them fails. The
-    lane's concurrency and jitter are unchanged, and one download ahead at a time leaves its second slot for the item on
-    screen. Video items are not fetched ahead (they stream and are cached as they play, as before). The cost: a few CDN
-    downloads, at most one a visit per image item not on the phone yet, for items the owner may never swipe to.
-  - **No rate, budget or concurrency is raised.** The pinned wiring is in [Wiring](#wiring).
+  - **Opening a carousel downloads up to its other image items ahead (R23)**, one at a time on the CDN lane. Video items are
+    not fetched ahead (they stream and are cached as they play, as before). The lane's concurrency and jitter are unchanged,
+    and one download ahead at a time leaves its second slot for the item on screen. The queue stops for the rest of the visit
+    on the CDN's first 429, when offline and when a post is gone (P1), so a limited or dead CDN gets one request a visit, not
+    one per item. The cost: CDN downloads for items the owner may never swipe to, at most one request a visit per link (a
+    refused link is never asked again in the visit, R25).
+  - **With old links, a carousel may spend its one `mediaInfo` as it opens (R25).** Stored links age (a Sync never refreshes
+    an old post's), so the first picture ahead may be refused. That refusal may spend the visit's one renewal, by the same
+    rule, lane and session gates as an item's own load, and the queue goes on with the fresh links; a renewal already spent,
+    or one that failed, stops the queue instead. The bound is unchanged: at most one `mediaInfo` a visit, the fill, the
+    queue's and the items' own renewals together, also when they are refused at the same moment. The cost: a visit to a
+    carousel with old links may send that request even if the owner never swipes.
+  - **No lane concurrency, jitter, budget or API rate is raised.** R23 adds CDN downloads within the lane and R25 may move the
+    visit's one `mediaInfo` to the post's opening, as stated above. The pinned wiring is in [Wiring](#wiring).
 
 ## Viewer
 
@@ -1311,10 +1328,10 @@ renewal and the cache are in [Video](#video).
   - **the pictures fetched ahead (R23, `fetchAhead`).** Once the fill is in (stored items: at once), the visit runs one queue
     in its scope: each turn picks the next page by the settled item as it is then (`nextAhead`: the items after it in order,
     then those before it, the nearest first), skipping item 0, video items, pictures shown already, items whose own load was
-    asked for and pages taken before, and calls `CarouselRepository.prefetchImage` for it; a picture that comes is shown
-    (`imagePath`), one that does not is skipped without a word. One download at a time: the lane has two slots, and the other
-    is the settled item's own. An item settle reorders what is left without restarting the queue or cancelling the download
-    that is out; leaving the post cancels it with the visit.
+    asked for and pages taken before, and calls `CarouselRepository.prefetchImage` for it: `Shown` shows the picture
+    (`imagePath`), `Skipped` goes on with the next, `Stop` ends the queue for the visit (P1, R25). A failure never shows. One
+    download at a time: the lane has two slots, and the other is the settled item's own. An item settle reorders what is
+    left without restarting the queue or cancelling the download that is out; leaving the post cancels it with the visit.
 
   The same post settling again in place (the list moved under it) keeps its visit and takes the newer row: a sync may have
   stored its cover since. `CarouselUiState(items, settled, coverOnlyMessage, loading)` is what the pager shows.
@@ -1462,21 +1479,26 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   cancelled call, the CDN lane, renewals, R2 on both paths, the cached-video table of R9, R20's drop with a real image store
   and video cache, a post marked removed mid-download, log lines with no link, host or pk, Mock mode's clip, Delete library;
   R23's `prefetchImage`: the CDN lane and a later load that serves its file, nothing for the cover, a video item, past the
-  last item, a post unsaved, deleted, not a carousel or without stored items, every failure quiet with no `mediaInfo` and the
-  visit still able to renew, an on-demand load that waits for the item's download ahead, another item's that does not),
+  last item, a post unsaved, deleted (before or while it downloads), not a carousel or without stored items, an on-demand
+  load that waits for the item's download ahead (and renews when that stored nothing), another item's that does not; P1:
+  the CDN's 429, offline and an unforeseen failure stop with no `mediaInfo` and the visit still able to renew; R25: a refused
+  link or none spends the renewal and loads the renewed link, a spent renewal (failed, or on the links stored now) stops, a
+  refused link is never asked twice in a visit, a prefetch and an item refused together send one `mediaInfo`; P2: a
+  download ahead or on demand out across a reshape writes the new item, never the old shape's),
   `CarouselImageStoreTest`, `VideoCacheTest` (`removeCarouselItems`), `MediaEvictionTest` (`eachStep`).
 - **Wiring** (source and runtime pins). `BackendWiringGuardTest` (the carousel request's gates in both modes, anchored at both
   ends, the folders, the construction sites, the eviction, R20's shared drop and Delete library wiring),
   `InstagramTransportWiringTest` (a Mock mode carousel visit never builds the transport or moves the real budget, nor does a
-  picture fetched ahead, which stores the fake fetcher's placeholder),
+  picture fetched ahead, which stores the fake fetcher's placeholder on the fake backend's own CDN lane, never the real one),
   `VideoWiringGuardTest` (one `ContentFrame`, no cookie jar, the resolver's gate).
 - **Viewer.** `CarouselPagerTest` (also: a held drag reports no settle, the bright dot follows the item, an item without its
   image is not the cover, every picture is fitted), `ViewerPlaybackTest` (the unit, in order, with a fake player; the C1 gate's
   placeholder rule; the main-thread effects), `ViewerViewModelTest` (the visit, R8 and R11, the refresh once per item, R16, the
   prefetch when the first item was swiped past before it resolved, a real repository over the fake client; R23's queue: in
-  order and one at a time, reordered by an item settle without cancelling the download out, cancelled with the post, a
-  failed picture skipped, no request even when every one is refused, the item on screen never stuck behind it, and no next-post
-  prefetch from it),
+  order and one at a time, reordered by an item settle without cancelling the download out, the earlier items nearest first,
+  cancelled with the post, the item on screen never stuck behind it, another post's settle loading nothing, a failed item not
+  loaded again in the visit, and no next-post prefetch from it; P1: the CDN's 429 and offline stop it; R25: old links renew
+  once and the queue goes on, a spent renewal stops it, one `mediaInfo` when it and the item on screen are refused together),
   `ViewerScreenCarouselTest` (the real screen over a player the test watches and whose every call is checked for its thread;
   C1's list moves; R16 on screen), `ViewerOverlayTest` (the icon buttons: labels, tooltips, which button when, no text button
   left), `ViewerPageTest`, `AppIconGuardTest` (the layers, the safe zone, no stroke, no activity icon, each glyph's own outline,
@@ -1796,7 +1818,7 @@ Mock mode switch.
 | Instagram access | Private web endpoints, isolated in the `:instagram` JVM module | No official API exposes saved items, and the endpoints change without notice. |
 | API transport | Every API call is a same-origin `fetch()` in a hidden instagram.com WebView page (`WebViewTransport`); the OkHttp client stays only for the cookieless CDN and as the JVM-test transport | OkHttp's first two requests got HTTP 429, and copying headers cannot copy Chromium's TLS and HTTP/2 fingerprint. The page's cookies, client hints and Sec-Fetch headers are the browser's own. |
 | Video | Streamed on demand with per-item link refresh; LRU cache keyed by media `pk` | Gigabytes saved, and no bulk-download pattern. |
-| Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore` (and, while a post is open, its other pictures one at a time ahead of the swipe, R23), video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). Swiping on the phone showed each new picture's download as a black placeholder, so an open post fetches its pictures ahead (R23): CDN downloads only, one at a time. |
+| Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore` (and, while a post is open, its other pictures one at a time ahead of the swipe, R23), video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). Swiping on the phone showed each new picture's download as a black placeholder, so an open post fetches its pictures ahead (R23): CDN downloads one at a time, stopped by a 429 or offline, and with old links the visit's one renewal (R25). |
 | Motion | A post grows from and shrinks back into its grid tile (shared bounds, scale-to-bounds, key `media-<pk>`); every other page uses shared-axis X; predictive back; nothing animates when the animator duration scale is 0 | `sharedElement` zoomed visibly on the emulator and cut a playing video to the cover (R14); Navigation 2.10's own predictive transitions scale the page out, so the NavHost names its own (R15). |
 | Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds (an older item newly added to a collection included) | Detecting removals needs a full walk, so it stays an explicit, paced action. |
 | Collection names | The website's own GraphQL query, sent by the hidden page; when its doc id goes stale a second, desktop-mode hidden page learns the current one from the site (at most once per 24 h); the last names are kept when that fails | The website answers the first design's collections-list call with a 404. A query id changes with every site deploy, and the owner wants the names to keep working with no computer: no rebuild, no reinstall. |

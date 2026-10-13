@@ -378,36 +378,57 @@ migration, tests by mutation, docs), then refuters for its findings, then one fi
 - **Next, the owner's phone.** Unchanged: README section 8, "The viewer update", now including the offline video item (step 4)
   and the install rule of step 1.
 
-## 2026-10-13: an open carousel fetches its other pictures ahead (R23)
+## 2026-10-13: an open carousel fetches its other pictures ahead (R23, R25)
 
-Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, R23 (it amends R10's "no prefetch of items").
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, R23 (it amends R10's "no prefetch of items") and R25, the
+controller's ruling on the branch's review.
 
 - **Why.** On the phone, swiping through a carousel showed a black placeholder on every item: an item's picture downloaded
   only once the item settled, after the CDN lane's 200–800 ms jitter. The owner approved fetching the next item's picture
   ahead, then, having tried the viewer on the phone again, asked to load the whole carousel.
 - **What.** `CarouselRepository.prefetchImage` downloads one item's picture from its stored link through the same fetcher, CDN
-  lane and store as the on-demand `image`, and nothing else: no fill, no renewal, no `mediaInfo`, the visit's one request
-  untouched; any failure is a quiet null. A per-item lock in the `Visit` makes an item's own load wait for its download
-  ahead instead of fetching it twice. The viewer's carousel visit runs one queue in the post's scope: once the items are
-  known, every image item but the cover, one download at a time, the items after the settled one in order, then those before
-  it, the nearest first. An item settle reorders what is left without restarting it or cancelling the download that is out;
-  leaving the post cancels it. Video items are not fetched ahead. A picture that does not come is skipped without a word, and
-  its item loads as before when it settles.
+  lane and store as the on-demand `image`; it never fills. A per-item lock in the `Visit` makes an item's own load wait for
+  its download ahead instead of fetching it twice. The viewer's carousel visit runs one queue in the post's scope: once the
+  items are known, every image item but the cover, one download at a time, the items after the settled one in order, then
+  those before it, the nearest first. An item settle reorders what is left without restarting it or cancelling the download
+  that is out; leaving the post cancels it. Video items are not fetched ahead. A failure ahead never shows; its item loads as
+  before when it settles.
+- **The branch's review (pacing and tests lenses), and its fixes.**
+  - **P1.** A CDN 429 ahead did not stop the queue, which asked for every other item after it. Now the 429, offline and a
+    post gone stop the queue for the visit (`ImageAhead.Stop`). There is no shared CDN back-off to follow: the sync's is per
+    run.
+  - **P2.** A download ahead still out when a renewal reshaped the post (R20's drop) wrote the old shape's slide after the
+    drop, and every later visit showed it. A download, ahead or on demand, now reads the item's stored link again before it
+    writes, writes nothing for a link replaced meanwhile, and loads the item as stored now, once.
+  - **P3, ruled as R25.** Refused links were asked again on every visit, and twice for an item the owner then swiped to, and
+    loading ahead did nothing for a carousel older than its links. Now a refused link ahead (or none) may spend the visit's one
+    renewal, by the same rule and lane as an item's own load, and the queue goes on with the fresh links; a renewal spent
+    already, or failed, stops it. A link the CDN refused is never asked again in the visit.
+  - **P4.** ARCHITECTURE's pacing section no longer says flatly that no rate is raised.
+  - **F1 to F6, the tests lens's gaps:** the once-a-visit guard on an item's own load, an on-demand load that waited for a
+    prefetch that stored nothing, the earlier items nearest first, a post deleted while its picture downloaded ahead, another
+    post's item settle loading nothing, and Mock mode on the fake backend's own CDN lane. Each has a test now.
 - **CURSOR held on the phone.** Run 6 of 2026-10-11, a Sync (QUICK), ended DONE and stored 41 of the owner's collections with
   no "Collection N" placeholder; the names query asks for 12 a page, so every page from the second on was asked for with the
   page before's `page_info.end_cursor` as `after`. Ticked in `TODO.md`; STALE stays assumed.
-- **Tests.** `./gradlew check --no-build-cache`: 1151 app tests in 92 classes (14 new) and 382 `:instagram` tests, 0 failures,
-  lint with no errors and 16 warnings (none new). `connectedDebugAndroidTest` on the emulator in Mock mode: 54 of 54 (the first
-  run failed once in `SmokeTest.t3`, a `PixelCopy` screenshot timeout on the grid before the viewer opens; the rerun passed).
-  Five `ViewerViewModelTest` tests that expected an exact list of downloads now allow for the queue's; each still fails
-  without the rule it pinned before. Mutation-checked in a scratch export: 31 mutants, 29 killed; the 2 that survive are
-  equivalent (the queue's own skip of item 0 and of video items, which `prefetchImage`'s guards repeat; mutants of those
-  guards are killed).
-- **Pacing.** Opening a carousel downloads up to its other image items ahead, one at a time on the CDN lane, with no Instagram
-  API request. The lane's concurrency (2) and jitter (0.2–0.8 s) are unchanged, and one download ahead at a time leaves its
-  second slot for the item on screen. The cost: a few CDN downloads, at most one a visit per image item not on the phone yet,
-  for items the owner may never swipe to.
+- **Tests.** `./gradlew check --no-build-cache`: 1169 app tests in 92 classes and 382 `:instagram` tests, 0 failures, lint
+  with no errors and 16 warnings (none new). `connectedDebugAndroidTest` on the emulator in Mock mode: 54 of 54. Earlier runs
+  of the same code failed only in `SmokeTest`'s Back presses and screenshots, while another session's suite ran on the same
+  emulator, and later while its system server kept restarting under the host's load, with a system "Application Not
+  Responding" dialog over the app; after a reboot, on a quiet emulator, the suite passed. Mutation-checked in scratch exports:
+  the first round's 31 mutants (29 killed; 2 equivalent, the queue's own skip of item 0 and of video items, which
+  `prefetchImage`'s guards repeat), then the fix round's 44 (P1, P2, R25, F1 to F6, and R23's re-anchored on the new code),
+  all killed; one of them (pages taken twice) only after a test was added for a page the renewal turns into a video. Changed
+  tests: six `ViewerViewModelTest` tests that expected an exact list of downloads now allow for the queue's, and each still
+  fails without the rule it pinned; two that pinned the opposite of R25 were replaced by tests of the ruling;
+  `anExpiredImageLinkIsRenewedOncePerVisit` no longer expects a refused link to be asked for twice.
+- **Pacing.** Opening a carousel downloads up to its other image items ahead, one at a time on the CDN lane; the lane's
+  concurrency (2) and jitter (0.2–0.8 s) are unchanged, and one download ahead at a time leaves its second slot for the item
+  on screen. The queue stops for the visit on the CDN's first 429 or when offline. A carousel whose stored links are old may
+  spend its visit's one `mediaInfo` as it opens (R25), even if the owner never swipes; the bound stays at most one a visit,
+  the fill, the queue's and the items' own renewals together. A refused link is never asked again in a visit.
 - **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, local data and the emulator in Mock
   mode only.
 - **Next, the owner's phone.** README section 8, "The viewer update", step 2: open a carousel, wait a second or two, and the
-  next item's picture should be there as it slides in.
+  next item's picture should be there as it slides in; a carousel with old links may log its one `GET api/v1/media/<n>/info/`
+  as it opens.

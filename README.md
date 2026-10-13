@@ -505,15 +505,17 @@ A carousel post keeps all its items, and the viewer shows them on demand, as it 
 - **On open.** The first item shows at once (it is the picture already in the grid). The post's other pictures then load in
   the background, one at a time, starting with the item after the one on screen (a swipe moves the next item to the front),
   from Instagram's image servers, with no cookies and at the thumbnails' pace, so a picture is usually ready by the time you
-  swipe to it. They are kept on the phone, so an item that loaded shows with no network. Loading them ahead sends Instagram
-  itself nothing. A video item is not loaded ahead: it streams like a reel when you reach it and is cached under the post's id
-  and its position.
-- **At most one request a visit.** If the post has no stored items, or a link has run out (an image the server refuses, a
-  video link with 10 minutes or less left, a video the player is refused), the app asks Instagram once for the post: the same
-  `GET api/v1/media/<n>/info/` as a reel's link renewal, on the interactive lane, counted in the 600 per 24 hours. The answer
-  serves the rest of the visit. It never asks twice in a visit, even when the answer was a failure: leave the post and come
-  back for another try. Without a valid session it asks nothing, and the first picture shows with "Instagram session needs
-  attention (Sync screen)".
+  swipe to it. They are kept on the phone, so an item that loaded shows with no network. If the image servers refuse the
+  post's stored addresses (they run out after a while), loading them ahead takes the visit's one request below to renew
+  them, as you open the post, and goes on with the new ones. It stops for the visit if the image servers say "too many
+  requests" or the phone is offline. A video item is not loaded ahead: it streams like a reel when you reach it and is cached
+  under the post's id and its position.
+- **At most one request a visit.** If the post has no stored items, or a link has run out (an image the server refuses, also
+  while loading ahead, a video link with 10 minutes or less left, a video the player is refused), the app asks Instagram once
+  for the post: the same `GET api/v1/media/<n>/info/` as a reel's link renewal, on the interactive lane, counted in the 600
+  per 24 hours. The answer serves the rest of the visit. It never asks twice in a visit, even when the answer was a failure:
+  leave the post and come back for another try. Without a valid session it asks nothing, and the first picture shows with
+  "Instagram session needs attention (Sync screen)".
 - **Unsaving and deleting.** A Full sync that finds a post unsaved drops its downloaded images and its cached videos (the
   small stored list of its items' addresses stays with the removed post), and **Delete library** removes everything.
 - **When a carousel changes.** If the poster deletes a slide (or swaps an image for a video), the next sync or link renewal
@@ -796,10 +798,11 @@ real library (a grid tile reading "1/N"). Steps 5 to 8 also work in Mock mode, w
 
 **What it sends.** A sync is unchanged and sends nothing new. A visit to a carousel sends at most one
 `GET api/v1/media/<n>/info/` (the interactive lane) in all, and only when its items are not stored yet or a link it needs has
-run out; swiping through the items adds nothing beyond that one. Loading its pictures in the background downloads only from
-the image servers, one at a time, and adds no `GET api/...` line to the log (a picture that could not load that way logs
-`carousel prefetch failed (<reason>)`, and its item loads as before when you swipe to it). If a cooldown is running, wait it
-out first.
+run out; swiping through the items adds nothing beyond that one. Loading its pictures in the background downloads from the
+image servers, one at a time. A carousel whose stored links are old may send that one request as it opens, before you swipe
+(the first picture loaded ahead is refused, and the renewal serves the rest); one whose links still work sends none. A
+picture that could not load ahead logs `carousel prefetch failed (<reason>)`, and its item loads as before when you swipe to
+it. If a cooldown is running, wait it out first.
 
 For the log checks, clear the log, then watch the requests in a second terminal (the start of this section says how):
 

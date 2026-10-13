@@ -541,7 +541,8 @@ class CarouselRepositoryTest {
         assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 1, visit))
         assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 0, visit))
         assertEquals(listOf("mediaInfo:$pk"), fake.calls, "no second request in this visit")
-        assertEquals(listOf(oldImage(0), newImage(0), newImage(1), newImage(0)), fetcher.fetched)
+        // R25: item 0's renewed link, refused already in this visit, is not asked for again.
+        assertEquals(listOf(oldImage(0), newImage(0), newImage(1)), fetcher.fetched)
         assertNull(images.path(pk, 0))
     }
 
@@ -620,7 +621,7 @@ class CarouselRepositoryTest {
         assertEquals(post.carouselCount, rows().size)
     }
 
-    // --- R23: an image fetched ahead ---
+    // --- R23: an image fetched ahead; R25: a refused one may renew once; P1: what stops it; P2: no stale write ---
 
     /**
      * A prefetch downloads the item's stored link through the CDN lane (its jitter passes first), stores it as [image] would, and
@@ -635,10 +636,10 @@ class CarouselRepositoryTest {
         val visit = CarouselRepository.Visit()
         val before = testScheduler.currentTime
 
-        val path = repository.prefetchImage(media, 1, visit)
+        val path = assertIs<ImageAhead.Shown>(repository.prefetchImage(media, 1, visit)).path
 
         assertEquals(images.path(pk, 1), path)
-        assertContentEquals(oldImage(1).toByteArray(), File(path!!).readBytes())
+        assertContentEquals(oldImage(1).toByteArray(), File(path).readBytes())
         val waited = checkNotNull(calledAt) - before
         assertTrue(waited in PacingPolicy.Conservative.cdnJitterMs, "the fetch waited $waited ms: not the CDN lane's jitter")
         assertEquals(ItemImage.File(path), repository.image(media, 1, visit))
@@ -654,9 +655,9 @@ class CarouselRepositoryTest {
         val repository = repository()
         val visit = CarouselRepository.Visit()
 
-        for (position in listOf(0, 2, 3, -1)) assertNull(repository.prefetchImage(media, position, visit), "item $position")
+        for (position in listOf(0, 2, 3, -1)) assertEquals(ImageAhead.Skipped, repository.prefetchImage(media, position, visit), "item $position")
         val stored = images.write(pk, 1, byteArrayOf(7))
-        assertEquals(stored, repository.prefetchImage(media, 1, visit), "a stored file is served, not downloaded again")
+        assertEquals(ImageAhead.Shown(stored), repository.prefetchImage(media, 1, visit), "a stored file is served, not downloaded again")
 
         assertEquals(emptyList(), fetcher.fetched)
         assertEquals(emptyList(), fake.calls)
@@ -668,49 +669,189 @@ class CarouselRepositoryTest {
         fetcher.answer = { url -> url.toByteArray() }
         val repository = repository()
         storePost()
-        assertNull(repository.prefetchImage(media, 1, CarouselRepository.Visit()), "no stored items: never the fill")
+        assertEquals(ImageAhead.Skipped, repository.prefetchImage(media, 1, CarouselRepository.Visit()), "no stored items: never the fill")
 
         storeOldItems()
         for (type in listOf(MediaType.REEL, MediaType.VIDEO, MediaType.IMAGE)) {
-            assertNull(repository.prefetchImage(mediaEntity(pk, type), 1, CarouselRepository.Visit()), "$type")
+            assertEquals(ImageAhead.Skipped, repository.prefetchImage(mediaEntity(pk, type), 1, CarouselRepository.Visit()), "$type")
         }
         db.mediaDao().markRemoved(listOf(pk), START)
-        assertNull(repository.prefetchImage(media, 1, CarouselRepository.Visit()), "unsaved by a sync")
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(media, 1, CarouselRepository.Visit()), "unsaved by a sync")
         db.mediaDao().deleteAll()
-        assertNull(repository.prefetchImage(media, 1, CarouselRepository.Visit()), "deleted")
+        assertEquals(ImageAhead.Skipped, repository.prefetchImage(media, 1, CarouselRepository.Visit()), "deleted")
 
         assertEquals(emptyList(), fetcher.fetched)
         assertEquals(emptyList(), fake.calls)
     }
 
+    /** F4: a post deleted while its picture was being fetched ahead keeps no file behind, as for an on-demand image. */
+    @Test
+    fun aPrefetchOfAPostDeletedWhileItDownloadedKeepsNoFile() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> db.mediaDao().deleteAll(); url.toByteArray() }
+
+        assertEquals(ImageAhead.Stop, repository().prefetchImage(media, 1, CarouselRepository.Visit()))
+
+        assertEquals(listOf(oldImage(1)), fetcher.fetched, "precondition: the download ran")
+        assertNull(images.path(pk, 1))
+        assertTrue(File(tmp.root, "carousel").list().isNullOrEmpty(), "no file was written")
+    }
+
     /**
-     * Every failure ahead is quiet (null), sends no `mediaInfo` and leaves the visit's one request alone: refused (as for a 403),
-     * offline, the CDN's 429, no link, an unsafe key. The item's own load afterwards still renews the post's links.
+     * F4, D3 ahead: a FULL sync's reconcile unsaves the post while its picture is being fetched ahead. The row and its items stay
+     * (marked removed), and the reconcile's eviction has already run, so the bytes are not written and the queue stops.
      */
     @Test
-    fun aFailedPrefetchIsQuietAndLeavesTheVisitsRequest() = runTest {
+    fun aPrefetchOfAPostUnsavedWhileItDownloadedKeepsNoFile() = runTest {
+        storeOldItems()
+        fetcher.answer = { url ->
+            db.mediaDao().markRemoved(listOf(pk), START)
+            images.deleteFor(pk) // the reconcile's eviction, right after its commit
+            url.toByteArray()
+        }
+
+        assertEquals(ImageAhead.Stop, repository().prefetchImage(media, 1, CarouselRepository.Visit()))
+
+        assertEquals(listOf(oldImage(1)), fetcher.fetched, "precondition: the download ran")
+        assertTrue(File(tmp.root, "carousel").list().isNullOrEmpty(), "no file was written")
+    }
+
+    /**
+     * P1: what keeps the CDN from being reached stops the queue (Stop) and sends no `mediaInfo`: the CDN's 429, offline, an
+     * unforeseen failure (an unsafe key). None of them is a refusal, so the visit's one request is still there for the item's
+     * own load, which renews when its link is refused.
+     */
+    @Test
+    fun aPrefetchThatCannotReachTheCdnStopsAndLeavesTheVisitsRequest() = runTest {
         storeOldItems()
         val repository = repository()
         val visit = CarouselRepository.Visit()
 
-        fetcher.answer = { null }
-        assertNull(repository.prefetchImage(media, 1, visit), "refused")
-        fetcher.answer = { throw java.io.IOException("no route") }
-        assertNull(repository.prefetchImage(media, 1, visit), "offline")
         fetcher.answer = { throw CdnRateLimited() }
-        assertNull(repository.prefetchImage(media, 1, visit), "cdn limit")
-        db.carouselItemDao().replace(pk, rows().map { if (it.position == 1) it.copy(imageUrl = "") else it })
-        assertNull(repository.prefetchImage(media, 1, visit), "no link")
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(media, 1, visit), "cdn limit")
+        fetcher.answer = { throw java.io.IOException("no route") }
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(media, 1, visit), "offline")
         val unsafe = mediaEntity("12-34", MediaType.CAROUSEL)
         db.mediaDao().upsert(listOf(unsafe))
         db.carouselItemDao().replace(unsafe.pk, listOf(CarouselItemEntity(unsafe.pk, 1, MediaType.IMAGE, 1, 1, oldImage(1), null, null)))
-        assertNull(repository.prefetchImage(unsafe, 1, visit), "an unsafe key")
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(unsafe, 1, visit), "an unsafe key")
         assertEquals(emptyList(), fake.calls, "no request for any of them")
         assertNull(images.path(pk, 1))
 
         fetcher.answer = { url -> if (url.startsWith("fake://")) url.toByteArray() else null }
         assertIs<ItemImage.File>(repository.image(media, 1, visit), "the item's own load renews and loads")
         assertEquals(listOf("mediaInfo:$pk"), fake.calls, "the visit's one request was still there")
+    }
+
+    /**
+     * R25: a link refused ahead spends the visit's one renewal (one `mediaInfo`, the interactive lane), and the item loads from
+     * its renewed link. The renewal is the visit's: the item's own load afterwards uses the stored file, and asks nothing more.
+     */
+    @Test
+    fun aRefusedPrefetchSpendsTheVisitsRenewalAndLoadsTheRenewedLink() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> if (url.startsWith("fake://")) url.toByteArray() else null }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        val path = assertIs<ImageAhead.Shown>(repository.prefetchImage(media, 1, visit)).path
+
+        assertContentEquals(newImage(1).toByteArray(), File(path).readBytes())
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(List(post.carouselCount!!) { newImage(it) }, rows().map { it.imageUrl }, "the renewed links are stored")
+        assertEquals(listOf(oldImage(1), newImage(1)), fetcher.fetched)
+        assertEquals(ItemImage.File(path), repository.image(media, 1, visit))
+        assertEquals(ImageAhead.Shown(path), repository.prefetchImage(media, 1, visit), "a later prefetch finds the file")
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "still the one request")
+    }
+
+    /** R25: an item with no link ahead spends the renewal too, as a refused one does. */
+    @Test
+    fun aPrefetchOfAnItemWithoutALinkRenewsToo() = runTest {
+        storeOldItems()
+        db.carouselItemDao().replace(pk, rows().map { if (it.position == 1) it.copy(imageUrl = "") else it })
+        fetcher.answer = { url -> url.toByteArray() }
+
+        assertIs<ImageAhead.Shown>(repository().prefetchImage(media, 1, CarouselRepository.Visit()))
+
+        assertEquals(listOf(newImage(1)), fetcher.fetched, "no download of an empty link")
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    /**
+     * R25: a renewal the visit spent already stops the queue. Spent and failed (here offline), a refused link ahead gets
+     * nothing more; spent on the links stored now, a refusal of one of them is final too. Neither sends a second request.
+     */
+    @Test
+    fun aSpentRenewalStopsThePrefetch() = runTest {
+        storeOldItems(videoExpiresAt = START - 1)
+        fetcher.answer = { null }
+        val repository = repository()
+
+        val failed = CarouselRepository.Visit()
+        fake.failures = FakeFailures { InstagramException.Transient() }
+        assertEquals(VideoSource.Unavailable(OFFLINE), repository.video(media, 2, failed), "precondition: the visit's renewal failed")
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(media, 1, failed))
+        assertEquals(1, mediaInfoCalls.size)
+
+        fake.failures = FakeFailures { null }
+        val renewed = CarouselRepository.Visit()
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(media, 1, renewed), "the old link, then the renewed one, refused")
+        assertEquals(2, mediaInfoCalls.size, "that visit's own one request")
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(media, 1, renewed), "its renewed link, refused before: final")
+        assertEquals(2, mediaInfoCalls.size, "no second request in that visit")
+        assertEquals(listOf(oldImage(1), oldImage(1), newImage(1)), fetcher.fetched, "and no link asked twice in a visit")
+    }
+
+    /**
+     * R25: a link the CDN refused is not requested again in the visit. Here the renewal cannot be made (no session): the
+     * prefetch stops, and the item's own load goes straight to the visit's (failed) renewal, with no second try of the link.
+     * A new visit may ask again.
+     */
+    @Test
+    fun aRefusedLinkIsNeverRequestedTwiceInAVisit() = runTest {
+        storeOldItems()
+        fetcher.answer = { null }
+        sessionReady = false
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        assertEquals(ImageAhead.Stop, repository.prefetchImage(media, 1, visit))
+        assertEquals(ItemImage.Failed(NEEDS_ATTENTION), repository.image(media, 1, visit))
+        assertEquals(ItemImage.Failed(NEEDS_ATTENTION), repository.image(media, 1, visit))
+
+        assertEquals(listOf(oldImage(1)), fetcher.fetched)
+        assertEquals(emptyList(), fake.calls, "nothing sent without a session")
+        repository.image(media, 1, CarouselRepository.Visit())
+        assertEquals(listOf(oldImage(1), oldImage(1)), fetcher.fetched, "a new visit asks again")
+    }
+
+    /**
+     * The hard bound: a prefetch and the item on screen are refused at the same moment. They share the visit's one renewal:
+     * one `mediaInfo` in all, and both load from the renewed links.
+     */
+    @Test
+    fun aPrefetchAndAnImageRefusedTogetherSendOneRequest() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> if (url.startsWith("fake://")) url.toByteArray() else null }
+        val reply = CompletableDeferred<Unit>()
+        onReply = { reply.await(); it }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        try {
+            val ahead = async { repository.prefetchImage(media, 1, visit) }
+            val shown = async { repository.image(media, 0, visit) }
+            withContext(Dispatchers.Default) {
+                withTimeout(5_000) { while (mediaInfoCalls.isEmpty() || !fetcher.fetched.containsAll(listOf(oldImage(0), oldImage(1)))) delay(10) }
+            }
+            reply.complete(Unit)
+
+            assertIs<ImageAhead.Shown>(ahead.await())
+            assertIs<ItemImage.File>(shown.await())
+            assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        } finally {
+            reply.complete(Unit)
+        }
     }
 
     /**
@@ -735,9 +876,43 @@ class CarouselRepositoryTest {
 
             held.complete(Unit)
 
-            val path = assertNotNull(ahead.await())
+            val path = assertIs<ImageAhead.Shown>(ahead.await()).path
             assertEquals(ItemImage.File(path), shown.await())
             assertEquals(listOf(oldImage(1)), fetcher.fetched, "one download")
+        } finally {
+            held.complete(Unit)
+        }
+    }
+
+    /**
+     * F2: the item's own load waited for its prefetch, which stored nothing (offline, so it stopped without a renewal): the load
+     * then goes on as if there had been none, and when the CDN refuses the link it renews and loads.
+     */
+    @Test
+    fun anImageThatWaitedForAFailedPrefetchStillRenewsAndLoads() = runTest {
+        storeOldItems()
+        val held = CompletableDeferred<Unit>()
+        fetcher.answer = { url ->
+            if (fetcher.fetched.size == 1) {
+                held.await()
+                throw java.io.IOException("no route")
+            }
+            if (url.startsWith("fake://")) url.toByteArray() else null
+        }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        try {
+            val ahead = async { repository.prefetchImage(media, 1, visit) }
+            withContext(Dispatchers.Default) { withTimeout(5_000) { while (fetcher.fetched.isEmpty()) delay(10) } }
+            val shown = async { repository.image(media, 1, visit) }
+            withContext(Dispatchers.Default) { withTimeoutOrNull(500) { while (!shown.isCompleted) delay(10) } }
+            assertTrue(!shown.isCompleted, "precondition: the load waits for the prefetch")
+            held.complete(Unit)
+
+            assertEquals(ImageAhead.Stop, ahead.await(), "the prefetch could not reach the CDN")
+            assertIs<ItemImage.File>(shown.await(), "the item's own load still renewed and loaded")
+            assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+            assertEquals(listOf(oldImage(1), oldImage(1), newImage(1)), fetcher.fetched, "offline is no refusal: the link was asked again")
         } finally {
             held.complete(Unit)
         }
@@ -759,7 +934,77 @@ class CarouselRepositoryTest {
             assertIs<ItemImage.File>(withContext(Dispatchers.Default) { withTimeout(5_000) { shown.await() } }, "item 0 loaded meanwhile")
 
             held.complete(Unit)
-            assertNotNull(ahead.await())
+            assertIs<ImageAhead.Shown>(ahead.await())
+        } finally {
+            held.complete(Unit)
+        }
+    }
+
+    /** Stored by an earlier sync: four images. The fake's reply (image, image, video, ...) is another shape (R20). */
+    private suspend fun storeFourImages() {
+        storePost()
+        db.carouselItemDao().replace(pk, (0..3).map { CarouselItemEntity(pk, it, MediaType.IMAGE, 1080, 1350, oldImage(it), null, null) })
+    }
+
+    /**
+     * P2: item 1's picture is being fetched ahead when item 2's refused link renews the post's links into another shape, and
+     * R20 drops the post's pictures. The bytes of item 1's old link are not written after the drop: the prefetch reads the
+     * item again and loads the new item 1, so position 1 never shows the old shape's slide, on this visit or a later one.
+     */
+    @Test
+    fun aPictureFetchedAheadAcrossAReshapeIsNotWritten() = runTest {
+        storeFourImages()
+        images.write(pk, 3, byteArrayOf(3)) // an earlier visit's picture: the drop takes it
+        val held = CompletableDeferred<Unit>()
+        fetcher.answer = { url ->
+            when (url) {
+                oldImage(1) -> { held.await(); url.toByteArray() }
+                oldImage(2) -> null // refused: item 2's own load renews the post's links, the visit's one request
+                else -> url.toByteArray()
+            }
+        }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        try {
+            val ahead = async { repository.prefetchImage(media, 1, visit) }
+            withContext(Dispatchers.Default) { withTimeout(5_000) { while (oldImage(1) !in fetcher.fetched) delay(10) } }
+            repository.image(media, 2, visit)
+            assertEquals(listOf(MediaType.IMAGE, MediaType.IMAGE, MediaType.VIDEO), rows().take(3).map { it.type }, "precondition: reshaped")
+            assertNull(images.path(pk, 3), "precondition: R20 dropped the post's pictures")
+            held.complete(Unit)
+
+            val path = assertIs<ImageAhead.Shown>(ahead.await()).path
+            assertContentEquals(newImage(1).toByteArray(), File(path).readBytes(), "the new item 1, never the old shape's")
+            assertEquals(ItemImage.File(path), repository.image(media, 1, CarouselRepository.Visit()))
+            assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        } finally {
+            held.complete(Unit)
+        }
+    }
+
+    /** P2 for the item's own load: its download out across a reshape is not written either; the load takes the new item. */
+    @Test
+    fun anImageDownloadedAcrossAReshapeLoadsTheNewItem() = runTest {
+        storeFourImages()
+        val held = CompletableDeferred<Unit>()
+        fetcher.answer = { url ->
+            when (url) {
+                oldImage(1) -> { held.await(); url.toByteArray() }
+                oldImage(2) -> null
+                else -> url.toByteArray()
+            }
+        }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        try {
+            val shown = async { repository.image(media, 1, visit) }
+            withContext(Dispatchers.Default) { withTimeout(5_000) { while (oldImage(1) !in fetcher.fetched) delay(10) } }
+            assertEquals(ImageAhead.Skipped, repository.prefetchImage(media, 2, visit), "refused, renewed: item 2 is a video now")
+            held.complete(Unit)
+
+            val path = assertIs<ItemImage.File>(shown.await()).path
+            assertContentEquals(newImage(1).toByteArray(), File(path).readBytes())
+            assertEquals(listOf("mediaInfo:$pk"), fake.calls)
         } finally {
             held.complete(Unit)
         }
