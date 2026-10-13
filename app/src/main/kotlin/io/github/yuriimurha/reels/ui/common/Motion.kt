@@ -8,6 +8,9 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -17,35 +20,53 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntOffset
 
 /*
- * The app's motion (spec 2026-10-12 §3.6). A post grows from its grid tile into the viewer and shrinks back into the tile of
- * the post the viewer is on (a shared element, [sharedMedia]); every other page change is the Material shared-axis X
- * transition. When the system's animations are removed (animator duration scale 0), nothing animates.
+ * The app's motion (spec 2026-10-12 §3.6, as amended by R24). A post grows from its grid tile into the viewer and shrinks back
+ * into the tile of the post the viewer is on (a shared element, [sharedMedia]); every other page change is a push, as in
+ * Instagram: the new page slides in over the old one, which drifts a third of the way out under it, and Back is the reverse.
+ * Only the viewer fades. When the system's animations are removed (animator duration scale 0), nothing animates.
  */
 
 /** False when the system's animator duration scale is 0 (Remove animations): then no page transition and no shared element. */
 fun motionEnabled(context: Context): Boolean =
     Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
 
-/** The fade of every page transition, and of the viewer's own. */
+/** The viewer's own fade, in and out. */
 private const val FADE_MS = 300
 
-/** Shared-axis X, forward: the new page slides in from the end, with a fade. */
-fun sharedAxisEnter(context: Context): EnterTransition =
-    if (motionEnabled(context)) slideInHorizontally { it / 10 } + fadeIn(tween(FADE_MS)) else EnterTransition.None
+/** A page push, forward or back. */
+private const val PAGE_MS = 300
 
-/** Shared-axis X, forward: the page being left slides out to the start, with a fade. */
-fun sharedAxisExit(context: Context): ExitTransition =
-    if (motionEnabled(context)) slideOutHorizontally { -it / 10 } + fadeOut(tween(FADE_MS)) else ExitTransition.None
+/**
+ * A push's timing: decelerating for a tap or a Back press ([FastOutSlowInEasing]); linear under the back gesture, which seeks
+ * the transition by the gesture's progress, so the page moves in step with the finger rather than ahead of it or behind.
+ */
+private fun pageSpec(gesture: Boolean): FiniteAnimationSpec<IntOffset> =
+    tween(PAGE_MS, easing = if (gesture) LinearEasing else FastOutSlowInEasing)
 
-/** Shared-axis X, back: the reverse of [sharedAxisExit], the previous page slides back in from the start. */
-fun sharedAxisPopEnter(context: Context): EnterTransition =
-    if (motionEnabled(context)) slideInHorizontally { -it / 10 } + fadeIn(tween(FADE_MS)) else EnterTransition.None
+/** Push, forward: the new page slides in from the end edge, its whole width, over the page left. No fade. */
+fun pageEnter(context: Context): EnterTransition =
+    if (motionEnabled(context)) slideInHorizontally(pageSpec(gesture = false)) { it } else EnterTransition.None
 
-/** Shared-axis X, back: the reverse of [sharedAxisEnter], the page being closed slides out to the end. */
-fun sharedAxisPopExit(context: Context): ExitTransition =
-    if (motionEnabled(context)) slideOutHorizontally { it / 10 } + fadeOut(tween(FADE_MS)) else ExitTransition.None
+/** Push, forward: the page left drifts a third of its width towards the start, under the new one. No fade. */
+fun pageExit(context: Context): ExitTransition =
+    if (motionEnabled(context)) slideOutHorizontally(pageSpec(gesture = false)) { -it / 3 } else ExitTransition.None
+
+/**
+ * Push, back: the reverse of [pageExit], the previous page comes back from a third of its width towards the start, under the
+ * page closed. [gesture]: the back gesture seeks it (linear timing).
+ */
+fun pagePopEnter(context: Context, gesture: Boolean = false): EnterTransition =
+    if (motionEnabled(context)) slideInHorizontally(pageSpec(gesture)) { -it / 3 } else EnterTransition.None
+
+/**
+ * Push, back: the reverse of [pageEnter], the page closed slides out to the end edge, its whole width, over the previous one.
+ * [gesture]: the back gesture seeks it (linear timing).
+ */
+fun pagePopExit(context: Context, gesture: Boolean = false): ExitTransition =
+    if (motionEnabled(context)) slideOutHorizontally(pageSpec(gesture)) { it } else ExitTransition.None
 
 /** The viewer only fades in, and out: the post's shared element ([sharedMedia]) carries the motion. */
 fun viewerEnter(context: Context): EnterTransition = if (motionEnabled(context)) fadeIn(tween(FADE_MS)) else EnterTransition.None

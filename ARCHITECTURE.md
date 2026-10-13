@@ -45,8 +45,9 @@ tests, which load only local servers. What is still unconfirmed needs the owner'
     fixture only), that its images load and its video items play, and that an expired link is renewed by the one
     `mediaInfo` a visit may send ([Carousels](#carousels));
   - the launcher icon and its themed layer ([App icon](#app-icon));
-  - the post-to-tile motion and the back gesture on the phone, where a debug build's first open after a cold start may
-    only fade ([Motion](#motion)).
+  - the page push (R24), which replaced the shared axis after the owner's first look at the motion on the phone
+    (2026-10-13: the grow and shrink and the gestures were fine there), and whether a debug build's first open after a
+    cold start only fades ([Motion](#motion)).
 
 A debug build starts in Mock mode (the fake library); a release build always uses the real one.
 
@@ -103,7 +104,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
 | Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 home loads per user action (counted again after an idle close), plus at most one repair page view of the owner's Saved page per 24 h or per Forget. [Details](#wiring). |
-| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages change with the shared-axis X transition, and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
+| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages push, the new page sliding in over the last (R24), and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
 | App icon | `app/src/main/res/mipmap-anydpi-v26/`, `drawable/ic_launcher_*.xml` | An adaptive icon, all vectors, with a monochrome layer. [Details](#app-icon). |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list, and inside a carousel post a horizontal pager of its items ([Viewer](#viewer)); one reused ExoPlayer (Media3 `ContentFrame` in `VideoFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, and two icon buttons: "Open on Instagram" at the start (via `Permalinks`, an `ACTION_VIEW` intent, so whichever app handles the link) and Mute/Unmute at the end, for a video, or a carousel while its settled item is one. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
@@ -1344,12 +1345,18 @@ renewal and the cache are in [Video](#video).
 
 `app/.../ui/common/Motion.kt`, `ui/ReelsNavHost.kt`, `ui/common/MediaGrid.kt` (spec §3.6, as amended).
 
-- **One place.** `Motion.kt` holds every transition. Pages use shared-axis X: forward, the new page slides in from the end by a
-  tenth of its width with a 300 ms fade while the old one slides out to the start by a tenth with a fade; back is the reverse
-  (`sharedAxisEnter`, `sharedAxisExit`, `sharedAxisPopEnter`, `sharedAxisPopExit`). The viewer only fades (`viewerEnter`,
-  `viewerExit`, 300 ms): the post's shared element carries its motion. `motionEnabled(context)` is false when the system's
-  animator duration scale is 0 (Remove animations), and then every factory gives `None` and `sharedMedia` does nothing, so no
-  transition runs; an unset scale counts as 1.
+- **One place.** `Motion.kt` holds every transition. Pages push, as in Instagram (R24): forward, the new page slides in from
+  the end edge, its whole width, over the page left, which drifts a third of its width towards the start (`pageEnter`,
+  `pageExit`); back is the exact reverse, the page closed sliding out to the end edge over the previous one coming back from
+  a third (`pagePopEnter`, `pagePopExit`). 300 ms with `FastOutSlowInEasing`, and nothing fades. The viewer only fades
+  (`viewerEnter`, `viewerExit`, 300 ms): the post's shared element carries its motion. `motionEnabled(context)` is false when
+  the system's animator duration scale is 0 (Remove animations), and then every factory gives `None` and `sharedMedia` does
+  nothing, so no transition runs; an unset scale counts as 1. The slides are `slideInHorizontally`/`slideOutHorizontally`,
+  whose offsets are screen pixels: in a right-to-left layout they are not mirrored (nor were the shared axis's).
+- **The moving page is on top (R24).** Nothing in the app sets a z-index. Navigation 2.10's `NavHost` gives the arriving
+  page the z-index of the page left plus one on a navigate, and minus one on a pop and under the back gesture: a page
+  arriving lies over the page it covers, and a page closing over the page coming back, so its slide-out is never hidden.
+  `NavigationBackTest.theMovingPageIsDrawnOnTopAndNothingFades` pins it from the screen's pixels.
 - **The shared element.** `ReelsNavHost` wraps the `NavHost` in a `SharedTransitionLayout` and provides
   `LocalSharedTransitionScope`; a private `screen<T>` wrapper around `composable<T>` provides `LocalNavAnimatedVisibilityScope`
   (the destination's own scope) for every destination. `Modifier.sharedMedia(pk)` uses the key `"media-<pk>"` and sits on the
@@ -1369,7 +1376,7 @@ renewal and the cache are in [Video](#video).
   applied during the motion (the overlay is unclipped), so the corners snap round at the end.
 - **The page under the viewer stays put (R15).** When the viewer opens, the grid (or the search results) uses
   `KeepUntilTransitionsFinished` (`underViewerExit`, an extension on `AnimatedContentTransitionScope` because that is its only
-  public form in Compose 1.12); on the way back it uses `EnterTransition.None`. With the NavHost-wide shared-axis the grid slid
+  public form in Compose 1.12); on the way back it uses `EnterTransition.None`. With the NavHost-wide page slide the grid slid
   while the post grew, and the shrink then landed on the tile's final spot while the tile was still moving. (In 1.12
   `ExitTransition.None` keeps the page until the end too, so the two read alike; the former states the intent.)
 - **Back from the viewer: `revealTile` (R15).** The viewer still writes its settled index to the previous entry
@@ -1386,9 +1393,12 @@ renewal and the cache are in [Video](#video).
   predictive transitions for the gesture (a 0.7 scale-out of the page being left, a fade in), and a destination's own pop
   transition does not apply to the gesture, so the gesture first showed the viewer shrinking to a 0.7 card instead of into its
   tile. `ReelsNavHost` therefore sets `predictivePopEnterTransition` and `predictivePopExitTransition` with the same logic as
-  the pop transitions: the viewer's fade, none for the page under it, shared-axis pop for every other page. The gesture seeks
-  them frame by frame and can be cancelled: letting go short of Back brings the post back full screen, with the viewer still
-  open.
+  the pop transitions: the viewer's fade, none for the page under it, and for every other page the push's reverse with linear
+  timing (`gesture = true`, R24). The gesture seeks them frame by frame by its progress, so a page closing is moved by that
+  share of its width and follows the finger (on the emulator its edge trailed the fingertip by 50 to 110 px of 1080),
+  and it can be cancelled: letting go short of Back brings the post back full screen, or the page back in place, eased, with
+  the viewer or the page still open. Letting go past it finishes the slide at the same constant pace, the rest of the 300 ms,
+  rather than easing into the end.
 - **A late first page only fades.** The shared element needs the viewer's first page to exist while the transition runs. That
   page arrives with Paging's first Room load (about 110 ms after the viewer composes on the emulator), and the viewer's first
   composition after a cold start stalls the main thread (class loading, JIT, building ExoPlayer: 200 to 500 ms for a debug
@@ -1450,8 +1460,11 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
 - **Motion.** `MotionTest` (the transitions, scale 0, an unset scale, the nav host's use of every factory, the shared key, a
   late page), `NavigationBackTest` (the real nav host and Room, bounds read frame by frame on a paused clock: open grows from
   the tile, back shrinks into the tile of the post the viewer is on, a tile in view stays put, the search results' returns, no
-  motion at scale 0, the back gesture shrinks and can be cancelled, a page gesture, the shared-axis direction forward and
-  back), `MediaGridTest` (`revealTile`, a tall tile included), `ManifestGuardTest` (predictive back is on, with its target API).
+  motion at scale 0, the back gesture shrinks and can be cancelled; and R24's push: forward and back its direction, distance
+  (the whole width, a third), length (over within 24 frames) and easing (slowing into its end), the page gesture following its
+  progress linearly on both pages, and, from the screen's pixels under Robolectric's native graphics, the moving page on top
+  with neither page faded, forward, back and under the gesture), `MediaGridTest` (`revealTile`, a tall tile included),
+  `ManifestGuardTest` (predictive back is on, with its target API).
 - **Emulator, Mock mode.** `SmokeTest` `t6Carousel_aCarouselSwipesToItsSecondItem` and
   `t7Motion_backFromAFarPostShowsThatPostsTile`. Its viewer controls are matched by content description now.
 - **Lint.** `./gradlew check` runs lint, with no errors. The update adds one warning, left alone: `ObsoleteSdkInt` for the
@@ -1763,7 +1776,7 @@ Mock mode switch.
 | API transport | Every API call is a same-origin `fetch()` in a hidden instagram.com WebView page (`WebViewTransport`); the OkHttp client stays only for the cookieless CDN and as the JVM-test transport | OkHttp's first two requests got HTTP 429, and copying headers cannot copy Chromium's TLS and HTTP/2 fingerprint. The page's cookies, client hints and Sec-Fetch headers are the browser's own. |
 | Video | Streamed on demand with per-item link refresh; LRU cache keyed by media `pk` | Gigabytes saved, and no bulk-download pattern. |
 | Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore`, video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). |
-| Motion | A post grows from and shrinks back into its grid tile (shared bounds, scale-to-bounds, key `media-<pk>`); every other page uses shared-axis X; predictive back; nothing animates when the animator duration scale is 0 | `sharedElement` zoomed visibly on the emulator and cut a playing video to the cover (R14); Navigation 2.10's own predictive transitions scale the page out, so the NavHost names its own (R15). |
+| Motion | A post grows from and shrinks back into its grid tile (shared bounds, scale-to-bounds, key `media-<pk>`); every other page pushes, sliding in over the last, with no fade (R24); predictive back; nothing animates when the animator duration scale is 0 | `sharedElement` zoomed visibly on the emulator and cut a playing video to the cover (R14); Navigation 2.10's own predictive transitions scale the page out, so the NavHost names its own (R15); the owner did not like the shared axis's short slide and fade on the phone and asked for Instagram's slide (R24). |
 | Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds (an older item newly added to a collection included) | Detecting removals needs a full walk, so it stays an explicit, paced action. |
 | Collection names | The website's own GraphQL query, sent by the hidden page; when its doc id goes stale a second, desktop-mode hidden page learns the current one from the site (at most once per 24 h); the last names are kept when that fails | The website answers the first design's collections-list call with a 404. A query id changes with every site deploy, and the owner wants the names to keep working with no computer: no rebuild, no reinstall. |
 | Sync trigger | Manual only, executed by WorkManager | The fewest requests; runs survive leaving the app and resume. |
