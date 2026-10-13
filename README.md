@@ -508,8 +508,11 @@ A carousel post keeps all its items, and the viewer shows them on demand, as it 
   swipe to it. They are kept on the phone, so an item that loaded shows with no network. If the image servers refuse the
   post's stored addresses (they run out after a while), loading them ahead takes the visit's one request below to renew
   them, as you open the post, and goes on with the new ones. It stops for the visit if the image servers say "too many
-  requests" or the phone is offline. A video item is not loaded ahead: it streams like a reel when you reach it and is cached
-  under the post's id and its position.
+  requests" or the phone is offline. A video item's preview picture (its poster) loads with the pictures, and shows when you
+  reach the item until the video's first frame. Once every picture is in, the first megabyte of each video item loads in the
+  background too, one at a time, into the video cache (under the post's id and the item's position), so a video item starts
+  from the phone; the rest streams like a reel. That part never asks Instagram anything: a video whose address is about to
+  run out is simply not loaded ahead.
 - **At most one request a visit.** If the post has no stored items, or a link has run out (an image the server refuses, also
   while loading ahead, a video link with 10 minutes or less left, a video the player is refused), the app asks Instagram once
   for the post: the same `GET api/v1/media/<n>/info/` as a reel's link renewal, on the interactive lane, counted in the 600
@@ -799,12 +802,16 @@ real library (a grid tile reading "1/N"). Steps 5 to 8 also work in Mock mode, w
 **What it sends.** A sync is unchanged and sends nothing new. A visit to a carousel sends at most one
 `GET api/v1/media/<n>/info/` (the interactive lane) in all, and only when its items are not stored yet or a link it needs has
 run out; swiping through the items adds nothing beyond that one. Loading its pictures in the background downloads from the
-image servers, one at a time. A carousel whose stored links are old sends that one request as it opens, even if you never
+image servers, one at a time, and that now includes each video item's preview picture and then the first megabyte of each
+video item (about 1 MB of data per video item of every carousel you open, even ones you never watch); loading a video ahead
+never asks Instagram anything. A carousel whose stored links are old sends that one request as it opens, even if you never
 swipe (the first picture loaded ahead is refused, and the renewal serves the rest); before this update such a visit sent
-none. One whose links still work sends none. A picture that could not load ahead logs `carousel prefetch failed (<reason>)`,
-and its item loads as before when you swipe to it; a picture the image servers refused is not asked for again in the visit,
-but one that met "too many requests" or no network is tried again by its item. If a cooldown is running, wait it out
-first.
+none. One whose links still work sends none. A picture that could not load ahead logs `carousel prefetch failed (<reason>)`
+(`carousel poster failed (<reason>)` for a video item's preview picture, `carousel start failed (<reason>)` for a video's
+start), and its item loads as before when you swipe to it; a picture the image servers refused is not asked for again in the visit,
+but one that met "too many requests" or no network is tried again by its item. A video whose start the servers refused is not
+asked again either: when you reach it, it asks for a new address (that same one request). If a cooldown is running, wait it
+out first.
 
 For the log checks, clear the log, then watch the requests in a second terminal (the start of this section says how):
 
@@ -833,12 +840,16 @@ adb -d logcat -s InstagramHttp
    the dots follow ("2/5"); a swipe up or down moves to the next post, never to the next item; leaving the post and coming back
    starts it at the first item again. Opening a carousel loads its pictures in the background, so wait a second or two before
    the first swipe: after the first item, the next item's picture should usually be there as it slides in, not a black page
-   that fills in after the swipe (a video item still starts dark). In the log: at most one `GET api/v1/media/<n>/info/` for
+   that fills in after the swipe (a video item shows its preview picture, step 3). In the log: at most one `GET api/v1/media/<n>/info/` for
    the whole visit (none if its items were already stored and no link had run out). **Report:** a pass, the counter you saw,
    whether the pictures were there as you swiped, and the request lines.
-3. **Play a video item.** Swipe to an item that is a video. **Look for:** it plays and loops, a tap pauses it, the speaker
-   button mutes it (the button shows only while a video item is on screen), and it stops when you swipe to an image item or to
-   another post. **Report:** a pass, or what happened.
+3. **Play a video item.** Open a carousel with a video item, wait a few seconds (its pictures load first, then the start
+   of its videos), and swipe to the video item. **Look for:** it starts quickly, and until it does you see its preview picture,
+   never a black page; the picture gives way to the video as it starts (no flash of black between them). Then: it plays and
+   loops, a tap pauses it, the speaker button mutes it (the button shows only while a video item is on screen), and it stops
+   when you swipe to an image item or to another post. If the carousel has two video items, swipe from one to the other: each
+   shows its own preview picture, never the other's. **Report:** a pass, roughly how long a video item took to start, whether
+   you ever saw black before it, and what happened otherwise.
 4. **Reopen it offline.** After you have viewed some of a carousel's items, run one Sync (it re-stores the carousel's items;
    the images you viewed must survive it), then turn on airplane mode, leave the viewer and open the same carousel again. **Look for:** the items you viewed show; an image you never viewed, and a video item you never watched
    through, say "Offline: this item isn't cached yet" (a video item says it whether its link was still good or had to be

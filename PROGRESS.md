@@ -550,3 +550,49 @@ controller's ruling on the branch's review.
 - **Next, the owner's phone.** README section 8, "The viewer update", step 2: open a carousel, wait a second or two, and the
   next item's picture should be there as it slides in; a carousel with old links may log its one `GET api/v1/media/<n>/info/`
   as it opens.
+
+## 2026-10-13: a carousel's video items start sooner (R26)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, R26 (it reverses R10's "video items have no poster").
+
+- **Why.** On the phone (2026-10-13) a carousel's pictures were there as they slid in (R23), but its video items were still
+  slow: a video item began to stream only when it settled, and the screen stayed black until the first frame, because R10
+  gave video items no poster. The app sent no Instagram request during that test (the links were fresh from a Full sync), so
+  the delay was the CDN stream and the start buffer.
+- **What.**
+  - **The start buffer.** The viewer's one player gets `viewerLoadControl()`: start once 1 s is buffered, go on after a stall
+    once 2 s is, every other value Media3's default. Finding: Media3 1.11.1's own streaming defaults are already 1 s and 2 s
+    (the 2.5 s start buffer of the brief is older ExoPlayer's), so this pins them against a library update and changes no
+    playback today.
+  - **Posters.** A video item's `imageUrl` (its preview frame) is fetched by R23's queue in the pictures' order
+    (`CarouselRepository.prefetchPoster`), into the same `CarouselImageStore` file `{pk}_{position}` (a video item has no other
+    picture there), with R20, D3, P2, R25 and P1 as for an image; an item's own load fetches it when it settles first, and a
+    poster that does not come says nothing. It is the shutter of the item's own `ContentFrame`, so it shows until the player
+    renders that item's first frame and hides; each item's page has its own frame, so no poster covers another item's video.
+    A failed video keeps its poster under the message.
+  - **Video starts.** Once no picture is left, the same queue writes the first 1 MiB of each video item but the settled one
+    into the video cache under `{pk}_{position}` (`CarouselRepository.preloadVideo`, `CacheVideoStarts` with Media3's
+    `CacheWriter` and a bounded request), through the player's own cookieless stack, one at a time inside `pacer.cdn { }`. Only
+    a link the item would play as it is: a stale one is skipped, never renewed, and no `mediaInfo` is sent for a start. A
+    cached start fetches nothing; a refused link is skipped and not asked again in the visit, by the queue or by the item's own
+    play (which goes to the visit's renewal); the CDN's 429 or offline stops the queue; leaving the post cancels the write and
+    leaves the cache consistent; the item the owner settles on stops its write first, so the player never reads past its lock;
+    a start written across a link change or an unsave is dropped again. Mock mode writes none (its clip is in the app).
+  - Two things the code needed: `CacheWriter` asks again, unbounded, when its bounded request fails, which would send a refused
+    link, a 429 or no connection a second request, so the write's upstream allows one try (`OneTryUpstream`); and the item's
+    own play after a refused start renews for a 404 too, where a player's own 404 renews nothing (R19).
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1222 app tests in 94 classes and 382 `:instagram` tests, 0 failures, lint with no errors and 16 warnings (none new). `connectedDebugAndroidTest` on the emulator in Mock mode: 54 of 54. New: `VideoStartsTest` (the writer over MockWebServer and a real cache) and `ViewerLoadControlTest`, and R26 tests in `CarouselRepositoryTest`, `ViewerViewModelTest`, `CarouselPagerTest` (a player that raises the first-frame event), `ViewerScreenCarouselTest` (end to end in Mock mode) and `VideoWiringGuardTest`. Mutation-checked in a scratch export of the branch: 53 mutants, all killed (the load control, the one-try upstream, the writer's cancel, cache check, length and answers, every poster and start rule in the repository, the queue's order, stops and give-way, the shutter and the wiring). Three were left out as equivalent or unpinnable: the writer's `ensureActive` after a cancelled write (a cancelled caller's answer is never read), the start's own type check (an image item has no video link, so it is skipped anyway), and the real library's user agent value, which the guard pins by name only, as the player's was before.
+- **Changed tests.** R10's "no poster" was in seven `ViewerViewModelTest` tests: `ahead` (the pages whose picture the queue
+  fetches) now counts the video items' posters, so `openingACarouselFetchesItsOtherPicturesAheadOneAtATimeInOrder`,
+  `imagesDownloadOnDemandOnceAVisitAndItemZeroUsesTheCover` and `aSpentRenewalStopsThePicturesFetchedAhead` expect the posters
+  where they expected none, three more take their lists from `ahead`, and `aPageTheRenewalMadeAVideoIsPassedOnceAndTheQueueGoesOn`
+  waits for the image pages only (`imagesAhead`), as before. Each still fails without the rule it pinned.
+- **Pacing.** No new Instagram request and no new request type: still at most one `mediaInfo` a visit, every path together
+  (a refused poster may spend it by R25's rule; a start never asks). The posters and the starts are extra CDN downloads on the
+  existing CDN lane, one at a time, with its concurrency (2), jitter (0.2–0.8 s) and rate unchanged; the player's stream stays
+  off the lane. The cost: about 1 MB of data per video item of every carousel opened, even for items never watched, and one
+  small poster image each.
+- **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, MockWebServer, local data and the
+  emulator in Mock mode only.
+- **Next, the owner's phone.** README section 8, "The viewer update", step 3: open a carousel with a video item, wait a few
+  seconds, swipe to it: its preview picture until it starts, never black, and a quick start.

@@ -5,6 +5,7 @@ import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.DatabaseProvider
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
@@ -13,10 +14,12 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.ContentMetadata
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import java.io.File
+import java.io.IOException
 
 /** Removed items' cached videos go too (engine reconcile, Delete library). */
 fun interface MediaEviction {
@@ -96,16 +99,80 @@ class VideoCache(dir: File, databaseProvider: DatabaseProvider, maxBytes: Long =
  *
  * Redirects ARE followed. [DefaultHttpDataSource] has no switch to refuse them: `setAllowCrossProtocolRedirects(false)`,
  * already its default, only refuses a change between http and https. A CDN redirect therefore costs one more request, to
- * the host it names, still without cookies. Unlike thumbnails, video is not on the Pacer's CDN lane.
+ * the host it names, still without cookies. Unlike thumbnails, the player's video is not on the Pacer's CDN lane.
+ *
+ * [onUpstream] wraps the network side and nothing else: the player's is the identity; a video start written ahead (R26,
+ * [videoStartDataSourceFactory]) adds [OneTryUpstream].
  */
 @UnstableApi
-fun cachedDataSourceFactory(context: Context, cache: Cache, userAgent: String?): DataSource.Factory {
+fun cachedDataSourceFactory(
+    context: Context,
+    cache: Cache,
+    userAgent: String?,
+    onUpstream: (DataSource.Factory) -> DataSource.Factory = { it },
+): CacheDataSource.Factory {
     val http = DefaultHttpDataSource.Factory().apply { userAgent?.let(::setUserAgent) }
     return CacheDataSource.Factory()
         .setCache(cache)
-        .setUpstreamDataSourceFactory(DefaultDataSource.Factory(context, http))
+        .setUpstreamDataSourceFactory(onUpstream(DefaultDataSource.Factory(context, http)))
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 }
+
+/**
+ * R26: what a carousel's video start is written through ([CacheVideoStarts]): the player's own stack, built by
+ * [cachedDataSourceFactory] over the same cache with the same user agent, cookieless, never the session. Its one addition
+ * is [OneTryUpstream], because `CacheWriter` asks again, unbounded, when its bounded request fails.
+ */
+@UnstableApi
+fun videoStartDataSourceFactory(context: Context, cache: Cache, userAgent: String?): CacheDataSource.Factory =
+    cachedDataSourceFactory(context, cache, userAgent, onUpstream = OneTryUpstream::Factory)
+
+/**
+ * R26: one try per write of a video start. Media3's `CacheWriter` opens a bounded request first and, if that fails for any
+ * reason, opens an unbounded one: for a refused link (403, 404, 410), the CDN's 429 or no connection, a second request to
+ * the CDN that the write must not send. After the first [open] that fails, every later one fails the same way at once,
+ * without reaching the network. Each data source the factory makes is one write's.
+ */
+@UnstableApi
+class OneTryUpstream(private val upstream: DataSource) : DataSource by upstream {
+    private var failure: IOException? = null
+
+    override fun open(dataSpec: DataSpec): Long {
+        failure?.let { throw it }
+        return try {
+            upstream.open(dataSpec)
+        } catch (e: IOException) {
+            failure = e
+            throw e
+        }
+    }
+
+    class Factory(private val upstream: DataSource.Factory) : DataSource.Factory {
+        override fun createDataSource(): DataSource = OneTryUpstream(upstream.createDataSource())
+    }
+}
+
+/**
+ * R26: the viewer's player starts a video once 1 s of it is buffered ([START_BUFFER_MS]) and, after a stall, 2 s
+ * ([RESTART_BUFFER_MS]), for every streamed video, reels and carousel items alike; every other value is Media3's default
+ * (local playback, Mock mode's bundled clip, keeps its own). Media3 1.11.1's streaming defaults are these same two values,
+ * so this pins them against a library update rather than changing today's behaviour.
+ */
+@UnstableApi
+fun viewerLoadControl(): DefaultLoadControl = DefaultLoadControl.Builder()
+    .setBufferDurationsMsForStreaming(
+        DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+        DefaultLoadControl.DEFAULT_MAX_BUFFER_MS,
+        START_BUFFER_MS,
+        RESTART_BUFFER_MS,
+    )
+    .build()
+
+/** R26: how much of a video the viewer's player buffers before it starts. */
+const val START_BUFFER_MS = 1_000
+
+/** R26: how much it buffers before it goes on after a stall. */
+const val RESTART_BUFFER_MS = 2_000
 
 /** What the viewer's player builds its media from: reads through [cachedDataSourceFactory], load errors per [VideoLoadErrorPolicy]. */
 @UnstableApi

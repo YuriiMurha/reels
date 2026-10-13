@@ -38,12 +38,15 @@ sealed interface ItemImage {
     data class Failed(val message: String) : ItemImage
 }
 
-/** What [CarouselRepository.prefetchImage] did for one item (R23, R25): what the queue of pictures fetched ahead does next. */
+/**
+ * What [CarouselRepository.prefetchImage] or [CarouselRepository.prefetchPoster] did for one item (R23, R25, R26): what the
+ * queue of pictures fetched ahead does next.
+ */
 sealed interface ImageAhead {
-    /** The item's picture is on disk at [path]: it was already, or it was just downloaded. */
+    /** The item's picture (an image item's image, a video item's poster) is on disk at [path]: it was already, or it was just downloaded. */
     data class Shown(val path: String) : ImageAhead
 
-    /** Nothing to fetch for this item (the cover, a video item, past the last item, no stored items): go on with the next. */
+    /** Nothing to fetch for this item (the cover, an item of the other type, past the last item, no stored items): go on with the next. */
     data object Skipped : ImageAhead
 
     /**
@@ -51,6 +54,24 @@ sealed interface ImageAhead {
      * and the visit's one renewal could not help (spent on links that are refused too, or failed) (R25).
      */
     data object Stop : ImageAhead
+}
+
+/**
+ * R26: how much of a carousel video item's start [CarouselRepository.preloadVideo] writes ahead: 1 MiB, a few seconds of a
+ * typical reel, more than the player's 1 s start buffer needs.
+ */
+const val VIDEO_START_BYTES = 1L shl 20
+
+/** What [CarouselRepository.preloadVideo] did for one video item (R26): what the queue does next. */
+sealed interface StartAhead {
+    /** The item's start is in the video cache: written now, or there already (nothing was fetched then). */
+    data object Cached : StartAhead
+
+    /** Nothing written for this item (not a video item, a stale or refused link, Mock mode): go on with the next. */
+    data object Skipped : StartAhead
+
+    /** Fetch nothing more ahead in this visit: the CDN said 429, the network is down, the post is gone (P1). */
+    data object Stop : StartAhead
 }
 
 /**
@@ -64,8 +85,10 @@ sealed interface ImageAhead {
  * the cookieless CDN [MediaFetcher] on the Pacer's CDN lane, like the sync's thumbnails, into [images], so a viewed item shows
  * offline (R1). [prefetchImage] downloads an item's picture the same way before the owner swipes to it (R23: the viewer fetches
  * a carousel's other pictures ahead, one at a time); a refused link may spend the visit's one request there too (R25), never
- * a second one. A link the CDN refused is not requested again in the visit. A video item plays from its link with its bytes
- * cached under `{pk}_{position}` (spec §3.2).
+ * a second one, and [prefetchPoster] does the same for a video item's poster (R26). A link the CDN refused is not requested
+ * again in the visit. A video item plays from its link with its bytes cached under `{pk}_{position}` (spec §3.2), and
+ * [preloadVideo] writes the first [VIDEO_START_BYTES] of it there ahead of the swipe (R26), from a link that plays as it is only:
+ * it never renews.
  *
  * Every call answers; none throws except [CancellationException]. A failure never deletes the post, its cover or its items.
  * The debug log ([log]) gets one line per request and per failed image, never a link or a pk.
@@ -90,6 +113,8 @@ class CarouselRepository(
      * downloaded item images and cached item videos (keyed by position) go. The container's is the sync's own.
      */
     private val itemEviction: MediaEviction = MediaEviction { },
+    /** R26: writes a video item's start into the video cache, through the player's own cookieless stack. Its writes run on [pacer]'s CDN lane. */
+    private val starts: VideoStarts = VideoStarts.NONE,
 ) {
     /**
      * One visit of a post, from the moment the viewer shows it until it leaves it: the visit's one `mediaInfo`, and what it
@@ -108,7 +133,11 @@ class CarouselRepository(
 
         internal fun downloadOf(position: Int): Mutex = downloads.computeIfAbsent(position) { Mutex() }
 
-        /** R25: the links the CDN refused in this visit. None is requested again in it, by a prefetch or by the item's own load. */
+        /**
+         * R25, R26: the links the CDN refused in this visit, pictures and video starts alike. None is requested again in it, by
+         * the queue or by the item's own load: a refused picture goes to the visit's renewal, a video item whose start was
+         * refused plays only a renewed link.
+         */
         internal val refused: MutableSet<String> = ConcurrentHashMap.newKeySet()
     }
 
@@ -147,8 +176,39 @@ class CarouselRepository(
      * the CDN's 429, offline and a post gone (P1). A failure never shows: the item's own load says why once the owner gets
      * there. Throws only [CancellationException].
      */
-    suspend fun prefetchImage(media: MediaEntity, position: Int, visit: Visit): ImageAhead = try {
-        loadAhead(media, position, visit)
+    suspend fun prefetchImage(media: MediaEntity, position: Int, visit: Visit): ImageAhead = ahead(media, position, visit, MediaType.IMAGE)
+
+    /**
+     * R26: the poster of the VIDEO item at [position] (its `imageUrl`, the preview frame), downloaded ahead exactly as
+     * [prefetchImage] downloads an image item's picture, into the same store under the same `{pk}_{position}` (a video item
+     * has no other picture there), by the same rules: never the fill, the visit's one renewal for a refused link (R25), the
+     * stale-link check (P2), the removed-post guard (D3), and the CDN's 429 or offline stop the queue (P1). The viewer shows
+     * it until the video's first frame. Only an item stored as a video: an image there (another shape, R20) is skipped.
+     */
+    suspend fun prefetchPoster(media: MediaEntity, position: Int, visit: Visit): ImageAhead = ahead(media, position, visit, MediaType.VIDEO)
+
+    /**
+     * R26: the first [VIDEO_START_BYTES] of the VIDEO item at [position], written into the video cache under `{pk}_{position}` before
+     * the owner swipes to it, one write at a time on the CDN lane, through the player's own cookieless stack ([starts]).
+     *
+     * Pacing: it never asks Instagram anything. Only a link [video] would play as it is (more than 10 minutes left) is used: a
+     * stale one, or one with no link, is skipped, never renewed. A start already cached costs nothing, and neither does Mock
+     * mode, whose clip is local. A link the CDN refuses is skipped quietly and never requested again in the visit, by this or
+     * by the item's own play ([video] renews it instead). The CDN's 429, offline and a post gone stop the queue (P1).
+     * Bytes written for a link that was replaced meanwhile, or for a post that left the library, are dropped again (P2, D3).
+     * Throws only [CancellationException]; cancelled, it returns once the write has stopped, its bytes so far kept.
+     */
+    suspend fun preloadVideo(media: MediaEntity, position: Int, visit: Visit): StartAhead = try {
+        loadStart(media, position, visit)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // Unforeseen (a failing cache): every other item would meet it too.
+        StartAhead.Stop
+    }
+
+    private suspend fun ahead(media: MediaEntity, position: Int, visit: Visit, type: MediaType): ImageAhead = try {
+        loadAhead(media, position, visit, type)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
@@ -159,7 +219,9 @@ class CarouselRepository(
     /**
      * A playable source for the VIDEO item at [position], keyed `{pk}_{position}`: its stored link while fresh (by the reel
      * links' rule) or while its bytes are all cached (R78), else the link one renewal a [visit] brings. [forceRefresh] is the
-     * player's refused link (a 403 or 410): only a different link is worth playing then.
+     * player's refused link (a 403 or 410): only a different link is worth playing then. A link the CDN refused in this
+     * visit, when its start was written ahead (R26), is not asked again either: the item plays its cached bytes if they are
+     * all there, else a renewed link only.
      */
     suspend fun video(media: MediaEntity, position: Int, visit: Visit, forceRefresh: Boolean = false): VideoSource = try {
         loadVideo(media, position, visit, forceRefresh)
@@ -224,43 +286,91 @@ class CarouselRepository(
         return download(pk, position, renewed.imageUrl, visit).toImage()
     }
 
-    /** [prefetchImage]: the stored items only, never the fill, and at most the visit's one renewal (R25). */
-    private suspend fun loadAhead(media: MediaEntity, position: Int, visit: Visit): ImageAhead {
-        // Not a carousel: no items. Item 0: the stored cover shows it (R10). Neither is downloaded ahead.
+    /**
+     * [prefetchImage] and [prefetchPoster]: the picture of the item at [position] if it is stored as a [type] item. The stored
+     * items only, never the fill, and at most the visit's one renewal (R25).
+     */
+    private suspend fun loadAhead(media: MediaEntity, position: Int, visit: Visit, type: MediaType): ImageAhead {
+        // Not a carousel: no items. Item 0: the stored cover shows it (R10), for an image and a video item alike. Neither is
+        // downloaded ahead.
         if (media.type != MediaType.CAROUSEL || position <= 0) return ImageAhead.Skipped
-        return visit.downloadOf(position).withLock { loadAheadNow(media, position, visit) }
+        return visit.downloadOf(position).withLock { loadAheadNow(media, position, visit, type) }
     }
 
     /** Holding the item's download lock. [again]: its link was replaced while it downloaded, so it reads once more. */
-    private suspend fun loadAheadNow(media: MediaEntity, position: Int, visit: Visit, again: Boolean = true): ImageAhead {
+    private suspend fun loadAheadNow(media: MediaEntity, position: Int, visit: Visit, type: MediaType, again: Boolean = true): ImageAhead {
         val pk = media.pk
         withContext(ioDispatcher) { images.path(pk, position) }?.let { return ImageAhead.Shown(it) }
-        // The item as stored now, read under the lock (P2). None stored, or none at this position (past the last item):
-        // nothing is asked.
-        val item = storedItem(pk, position)?.takeIf { it.type == MediaType.IMAGE } ?: return ImageAhead.Skipped
+        // The item as stored now, read under the lock (P2). None stored, none at this position (past the last item), or one
+        // of the other type: nothing is asked.
+        val item = storedItem(pk, position)?.takeIf { it.type == type } ?: return ImageAhead.Skipped
         // As for download's own check after the bytes: a post deleted or unsaved gets no download at all.
         if (!isLive(pk)) return ImageAhead.Stop
-        return when (val first = download(pk, position, item.imageUrl, visit, PREFETCH_LOG)) {
-            Download.Refused -> renewAhead(media, position, item, visit)
-            Download.Replaced -> if (again) loadAheadNow(media, position, visit, again = false) else ImageAhead.Skipped
+        val what = if (type == MediaType.VIDEO) POSTER_LOG else PREFETCH_LOG
+        return when (val first = download(pk, position, item.imageUrl, visit, what)) {
+            Download.Refused -> renewAhead(media, position, item, visit, what)
+            Download.Replaced -> if (again) loadAheadNow(media, position, visit, type, again = false) else ImageAhead.Skipped
             else -> first.toAhead()
         }
     }
+
+    /** [preloadVideo]: the stored items only, never the fill and never a renewal. */
+    private suspend fun loadStart(media: MediaEntity, position: Int, visit: Visit): StartAhead {
+        if (media.type != MediaType.CAROUSEL) return StartAhead.Skipped
+        // R3: Mock mode plays the bundled clip, which is in the app already: nothing to fetch ahead.
+        if (sampleClip != null) return StartAhead.Skipped
+        val pk = media.pk
+        val item = storedItem(pk, position)?.takeIf { it.type == MediaType.VIDEO } ?: return StartAhead.Skipped
+        // Only a link the item would play as it is: a stale one (or none) is never renewed for a start ahead, and one the CDN
+        // refused in this visit is not asked again.
+        val url = item.videoUrl?.takeIf { !item.videoLinkNeedsRefresh(now()) && it !in visit.refused } ?: return StartAhead.Skipped
+        val key = "${pk}_$position"
+        if (withContext(ioDispatcher) { starts.isCached(key, VIDEO_START_BYTES) }) return StartAhead.Cached
+        // D3: a post deleted or unsaved gets no request.
+        if (!isLive(pk)) return StartAhead.Stop
+        val written = pacer.cdn { starts.write(key, url.toUri(), VIDEO_START_BYTES) }
+        // P2, D3: the post's items were replaced while this was written (a renewal or a sync, whose R20 drop may already have
+        // run), or the post left the library: bytes written (all, or some before the connection dropped) may be another
+        // slide's, so they go again.
+        val dropped = (written == StartWrite.WRITTEN || written == StartWrite.OFFLINE) && !startStillStored(pk, position, url)
+        if (dropped) {
+            withContext(ioDispatcher) { starts.remove(key) }
+            log?.invoke("$START_LOG dropped (link replaced)")
+        }
+        return when (written) {
+            StartWrite.WRITTEN, StartWrite.CACHED -> when {
+                !dropped -> StartAhead.Cached
+                isLive(pk) -> StartAhead.Skipped
+                else -> StartAhead.Stop
+            }
+            StartWrite.REFUSED -> {
+                visit.refused += url
+                log?.invoke("$START_LOG failed (refused)")
+                StartAhead.Skipped
+            }
+            StartWrite.LIMITED -> StartAhead.Stop.also { log?.invoke("$START_LOG failed (cdn limit)") }
+            StartWrite.OFFLINE -> StartAhead.Stop.also { log?.invoke("$START_LOG failed (offline)") }
+        }
+    }
+
+    /** True while the post [pk] is live and its item at [position] is still the video of [url]. */
+    private suspend fun startStillStored(pk: String, position: Int, url: String): Boolean =
+        isLive(pk) && storedItem(pk, position)?.takeIf { it.type == MediaType.VIDEO }?.videoUrl == url
 
     /**
      * R25: [item]'s link was refused ahead (or it has none). The visit's one renewal, by [renewal]'s rule: the first call that
      * needs it sends it, a later one shares what it brought. A renewal that brings this item no other link (it was spent on
      * the links stored now) or that failed stops the queue; one that brings a new link loads it, and the queue goes on.
      */
-    private suspend fun renewAhead(media: MediaEntity, position: Int, item: CarouselItemEntity, visit: Visit): ImageAhead {
+    private suspend fun renewAhead(media: MediaEntity, position: Int, item: CarouselItemEntity, visit: Visit, what: String): ImageAhead {
         val renewed = when (val renewal = renewal(media, visit, RENEW)) {
             is Renewal.Failed -> return ImageAhead.Stop
             is Renewal.Items -> renewal.items.at(position)
         }
-        // R20's new shape has no image here any more: nothing to fetch for it, and the rest has fresh links.
-        if (renewed == null || renewed.type != MediaType.IMAGE) return ImageAhead.Skipped
+        // R20's new shape has another type here (or no item): nothing to fetch for it, and the rest has fresh links.
+        if (renewed == null || renewed.type != item.type) return ImageAhead.Skipped
         if (renewed.imageUrl == item.imageUrl) return ImageAhead.Stop
-        return when (val second = download(media.pk, position, renewed.imageUrl, visit, PREFETCH_LOG)) {
+        return when (val second = download(media.pk, position, renewed.imageUrl, visit, what)) {
             Download.Replaced -> ImageAhead.Skipped
             else -> second.toAhead()
         }
@@ -278,8 +388,10 @@ class CarouselRepository(
         if (item.type != MediaType.VIDEO) return VideoSource.Unavailable(CANT_LOAD)
         // R3: Mock mode plays the bundled clip; the fake library's links name nothing a player can open.
         sampleClip?.let { return VideoSource.Play(it, key) }
+        // R26: the CDN refused this very link when the item's start was written ahead in this visit; it is not asked again.
+        val refusedAhead = item.videoUrl?.let { it in visit.refused } == true
         if (!forceRefresh) {
-            if (!item.videoLinkNeedsRefresh(now())) return VideoSource.Play(checkNotNull(item.videoUrl).toUri(), key)
+            if (!refusedAhead && !item.videoLinkNeedsRefresh(now())) return VideoSource.Play(checkNotNull(item.videoUrl).toUri(), key)
             // The bytes are on disk, so the link that names them is beside the point (R78).
             item.cachedPlay(key)?.let { return it }
         }
@@ -293,8 +405,8 @@ class CarouselRepository(
             is Renewal.Items -> renewal.items.at(position)
         }
         val url = renewed?.takeIf { it.type == MediaType.VIDEO }?.videoUrl ?: return VideoSource.Unavailable(CANT_LOAD)
-        // The player was refused this very link: a renewal that brings it back has nothing better to offer.
-        if (forceRefresh && url == item.videoUrl) return VideoSource.Unavailable(CANT_LOAD)
+        // The player (or the start written ahead) was refused this very link: a renewal that brings it back has nothing better.
+        if ((forceRefresh || refusedAhead) && url == item.videoUrl) return VideoSource.Unavailable(CANT_LOAD)
         return VideoSource.Play(url.toUri(), key)
     }
 
@@ -443,6 +555,8 @@ class CarouselRepository(
         const val RENEW = "carousel renew"
         const val IMAGE_LOG = "carousel image"
         const val PREFETCH_LOG = "carousel prefetch"
+        const val POSTER_LOG = "carousel poster"
+        const val START_LOG = "carousel start"
 
         /** What a visit holds while its request is out, and keeps if that call never finishes. */
         val SPENT = Renewal.Failed(CANT_LOAD)

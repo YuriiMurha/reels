@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.FileDataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.CarouselItemEntity
@@ -76,6 +78,9 @@ class CarouselRepositoryTest {
         override suspend fun mediaInfo(mediaPk: String): RemoteMedia? = onReply(fake.mediaInfo(mediaPk))
     }
     private val fetcher = StubFetcher()
+
+    /** R26: where video starts are written; it records each write and answers what the test says. */
+    private val starts = RecordingStarts()
     private val images by lazy { CarouselImageStore(File(tmp.root, "carousel")) }
     private var sessionReady = true
 
@@ -103,6 +108,7 @@ class CarouselRepositoryTest {
         sampleClip: Uri? = null,
         cooldowns: InMemoryCooldownStore = InMemoryCooldownStore(),
         log: ((String) -> Unit)? = null,
+        starts: VideoStarts = this@CarouselRepositoryTest.starts,
     ): CarouselRepository {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
@@ -116,6 +122,7 @@ class CarouselRepositoryTest {
             log = log,
             // The container's R20 steps, over this test's own cache and image store.
             itemEviction = MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { images.deleteFor(it) }),
+            starts = starts,
         )
     }
 
@@ -1266,7 +1273,321 @@ class CarouselRepositoryTest {
         assertEquals(emptyList(), rows(), "the rows are gone all the same")
     }
 
+    // --- R26: a video item's poster fetched ahead; its start written ahead into the video cache ---
+
+    /**
+     * A video item's poster (its preview frame) is fetched ahead as an image item's picture is: its stored link, through the
+     * CDN lane, into the same store under `{pk}_{position}`, where nothing else of a video item is kept. The item's own load
+     * then serves that file, and Instagram is asked nothing.
+     */
+    @Test
+    fun aPosterIsFetchedAheadThroughTheCdnLaneIntoTheItemsOwnFile() = runTest {
+        storeOldItems()
+        var calledAt: Long? = null
+        fetcher.answer = { url -> calledAt = testScheduler.currentTime; url.toByteArray() }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        val before = testScheduler.currentTime
+
+        val path = assertIs<ImageAhead.Shown>(repository.prefetchPoster(media, 2, visit)).path
+
+        assertEquals(images.path(pk, 2), path)
+        assertContentEquals(oldImage(2).toByteArray(), File(path).readBytes())
+        assertTrue(checkNotNull(calledAt) - before in PacingPolicy.Conservative.cdnJitterMs, "through the CDN lane")
+        assertEquals(listOf("${pk}_2.jpg"), File(tmp.root, "carousel").list()!!.toList(), "the item's own file, and no other")
+        assertEquals(ItemImage.File(path), repository.image(media, 2, visit), "the item's own load serves it")
+        assertEquals(listOf(oldImage(2)), fetcher.fetched)
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(emptyList(), starts.writes, "a poster is no video start")
+    }
+
+    /** No poster ahead for item 0 (the cover shows it), an image item, past the last item, or a post without stored items. */
+    @Test
+    fun aPosterIsFetchedOnlyForAStoredVideoItemPastTheCover() = runTest {
+        fetcher.answer = { url -> url.toByteArray() }
+        val repository = repository()
+        storePost()
+        assertEquals(ImageAhead.Skipped, repository.prefetchPoster(media, 2, CarouselRepository.Visit()), "no stored items: never the fill")
+
+        db.carouselItemDao().replace(pk, (0..2).map { CarouselItemEntity(pk, it, MediaType.VIDEO, 1, 1, oldImage(it), OLD_VIDEO, null) })
+        for (position in listOf(0, 3, -1)) {
+            assertEquals(ImageAhead.Skipped, repository.prefetchPoster(media, position, CarouselRepository.Visit()), "item $position")
+        }
+        storeOldItems()
+        assertEquals(ImageAhead.Skipped, repository.prefetchPoster(media, 1, CarouselRepository.Visit()), "an image item has no poster")
+        assertEquals(ImageAhead.Skipped, repository.prefetchImage(media, 2, CarouselRepository.Visit()), "and a video item no image")
+
+        assertEquals(emptyList(), fetcher.fetched)
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /** R25 for posters: a poster link refused ahead spends the visit's one renewal, and the poster loads from its renewed link. */
+    @Test
+    fun aRefusedPosterSpendsTheVisitsRenewalAndLoadsTheRenewedLink() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> if (url.startsWith("fake://")) url.toByteArray() else null }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        val path = assertIs<ImageAhead.Shown>(repository.prefetchPoster(media, 2, visit)).path
+
+        assertContentEquals(newImage(2).toByteArray(), File(path).readBytes())
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+        assertEquals(ImageAhead.Shown(path), repository.prefetchPoster(media, 2, visit))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "still the one request")
+    }
+
+    /** P1 and D3 for posters: the CDN's 429, offline and a post unsaved stop the queue, and nothing is asked of Instagram. */
+    @Test
+    fun aPosterThatCannotBeFetchedStopsTheQueue() = runTest {
+        storeOldItems()
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        fetcher.answer = { throw CdnRateLimited() }
+        assertEquals(ImageAhead.Stop, repository.prefetchPoster(media, 2, visit), "cdn limit")
+        fetcher.answer = { throw java.io.IOException("no route") }
+        assertEquals(ImageAhead.Stop, repository.prefetchPoster(media, 2, visit), "offline")
+        fetcher.answer = { url -> url.toByteArray() }
+        db.mediaDao().markRemoved(listOf(pk), START)
+        assertEquals(ImageAhead.Stop, repository.prefetchPoster(media, 2, visit), "unsaved by a sync")
+
+        assertEquals(listOf(oldImage(2), oldImage(2)), fetcher.fetched, "nothing for the unsaved post")
+        assertNull(images.path(pk, 2))
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /** P2 for posters: the item's links were replaced while its poster downloaded; the old bytes are not written, the new link is. */
+    @Test
+    fun aPosterDownloadedAcrossALinkChangeIsNotWritten() = runTest {
+        storeOldItems()
+        fetcher.answer = { url ->
+            if (url == oldImage(2)) db.carouselItemDao().replace(pk, rows().map { it.copy(imageUrl = newImage(it.position)) })
+            url.toByteArray()
+        }
+
+        val path = assertIs<ImageAhead.Shown>(repository().prefetchPoster(media, 2, CarouselRepository.Visit())).path
+
+        assertContentEquals(newImage(2).toByteArray(), File(path).readBytes())
+        assertEquals(listOf(oldImage(2), newImage(2)), fetcher.fetched)
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * A video item's start goes into the video cache under `{pk}_{position}`: [VIDEO_START_BYTES] of its stored link, through
+     * the CDN lane (its jitter passes first), and Instagram is asked nothing.
+     */
+    @Test
+    fun aVideoStartIsWrittenUnderTheItemsKeyThroughTheCdnLane() = runTest {
+        storeOldItems()
+        var calledAt: Long? = null
+        starts.answer = { _, _ -> calledAt = testScheduler.currentTime; StartWrite.WRITTEN }
+        val before = testScheduler.currentTime
+
+        assertEquals(StartAhead.Cached, repository().preloadVideo(media, 2, CarouselRepository.Visit()))
+
+        assertEquals(listOf("${pk}_2 $OLD_VIDEO ${1 shl 20}"), starts.writes.toList())
+        assertTrue(checkNotNull(calledAt) - before in PacingPolicy.Conservative.cdnJitterMs, "through the CDN lane")
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(emptyList(), fetcher.fetched)
+    }
+
+    /** A start whose bytes are cached already costs nothing: no write, and not even the lane's jitter. */
+    @Test
+    fun aCachedStartFetchesNothing() = runTest {
+        storeOldItems()
+        starts.cached += "${pk}_2"
+        val before = testScheduler.currentTime
+
+        assertEquals(StartAhead.Cached, repository().preloadVideo(media, 2, CarouselRepository.Visit()))
+
+        assertEquals(emptyList(), starts.writes)
+        assertEquals(before, testScheduler.currentTime, "the lane was not waited for")
+    }
+
+    /** Only a link the item would play as it is: a stale one, or none, is skipped, never renewed for a start ahead. */
+    @Test
+    fun aStaleVideoLinkIsSkippedAndNothingIsAsked() = runTest {
+        val repository = repository()
+        storeOldItems(videoExpiresAt = START + RealVideoSourceResolver.FRESH_MARGIN_MS)
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, CarouselRepository.Visit()), "10 minutes or less left")
+        storeOldItems(videoUrl = null, videoExpiresAt = null)
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, CarouselRepository.Visit()), "no link")
+        storeOldItems(videoExpiresAt = null)
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, CarouselRepository.Visit()), "no expiry")
+
+        assertEquals(emptyList(), starts.writes)
+        assertEquals(emptyList(), fake.calls, "no mediaInfo for a start ahead")
+    }
+
+    /**
+     * A link the CDN refuses is skipped quietly (no renewal) and never asked again in the visit: not by another start ahead,
+     * and not by the item's own play, which goes straight to the visit's one renewal and plays the new link. A new visit may
+     * ask again.
+     */
+    @Test
+    fun aRefusedStartIsSkippedAndNeverAskedAgainInTheVisit() = runTest {
+        storeOldItems()
+        starts.answer = { _, _ -> StartWrite.REFUSED }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, visit))
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, visit))
+        assertEquals(1, starts.writes.size, "the refused link once in the visit")
+        assertEquals(emptyList(), fake.calls, "no renewal for a start ahead")
+
+        assertEquals(VideoSource.Play(Uri.parse(newVideo(2)), "${pk}_2"), repository.video(media, 2, visit), "the item plays a renewed link")
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+
+        storeOldItems()
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, CarouselRepository.Visit()))
+        assertEquals(2, starts.writes.size, "a new visit asks again")
+    }
+
+    /** The item's own play after a refused start, when the visit's renewal brings the same link back: nothing to play. */
+    @Test
+    fun aRefusedStartWhoseRenewalBringsTheSameLinkCannotLoad() = runTest {
+        storeOldItems()
+        starts.answer = { _, _ -> StartWrite.REFUSED }
+        replyWithFirstThree { items -> items.map { if (it.position == 2) it.copy(videoUrl = OLD_VIDEO) else it } }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        repository.preloadVideo(media, 2, visit)
+
+        assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(media, 2, visit))
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    /** P1: the CDN's 429 and offline stop the queue, with no request to Instagram. */
+    @Test
+    fun aLimitedOrOfflineStartStopsTheQueue() = runTest {
+        storeOldItems()
+        val repository = repository()
+        starts.answer = { _, _ -> StartWrite.LIMITED }
+        assertEquals(StartAhead.Stop, repository.preloadVideo(media, 2, CarouselRepository.Visit()))
+        starts.answer = { _, _ -> StartWrite.OFFLINE }
+        assertEquals(StartAhead.Stop, repository.preloadVideo(media, 2, CarouselRepository.Visit()))
+        assertEquals(emptyList(), fake.calls)
+        assertEquals(emptyList(), starts.removed, "what came before the connection dropped is the item's own start: kept")
+    }
+
+    /** D3: a post a sync unsaved gets no start; nor does an image item, a post that is not a carousel, or Mock mode (R3). */
+    @Test
+    fun noStartForAnUnsavedPostAnImageItemAReelOrMockMode() = runTest {
+        storeOldItems()
+        assertEquals(StartAhead.Skipped, repository().preloadVideo(media, 1, CarouselRepository.Visit()), "an image item")
+        assertEquals(StartAhead.Skipped, repository().preloadVideo(mediaEntity(pk, MediaType.REEL), 2, CarouselRepository.Visit()), "a reel")
+        val clip = Uri.parse("android.resource://io.github.yuriimurha.reels/raw/sample_clip")
+        assertEquals(StartAhead.Skipped, repository(sampleClip = clip).preloadVideo(media, 2, CarouselRepository.Visit()), "Mock mode: the clip is local")
+        db.mediaDao().markRemoved(listOf(pk), START)
+        assertEquals(StartAhead.Stop, repository().preloadVideo(media, 2, CarouselRepository.Visit()), "unsaved by a sync")
+
+        assertEquals(emptyList(), starts.writes)
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * P2 and D3 for starts: the item's link is replaced (a renewal, a sync) or the post unsaved while its start is written. The
+     * bytes may be another slide's, so the key is dropped again; the queue goes on, or stops for a post gone.
+     */
+    @Test
+    fun aStartWrittenWhileItsLinkWasReplacedIsDropped() = runTest {
+        storeOldItems()
+        starts.answer = { _, _ ->
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { "https://cdn.example.test/new/v2.mp4?oe=1" }) })
+            StartWrite.WRITTEN
+        }
+        assertEquals(StartAhead.Skipped, repository().preloadVideo(media, 2, CarouselRepository.Visit()))
+        assertEquals(listOf("${pk}_2"), starts.removed.toList())
+
+        storeOldItems()
+        starts.answer = { _, _ -> db.mediaDao().markRemoved(listOf(pk), START); StartWrite.WRITTEN }
+        assertEquals(StartAhead.Stop, repository().preloadVideo(media, 2, CarouselRepository.Visit()))
+        assertEquals(listOf("${pk}_2", "${pk}_2"), starts.removed.toList())
+
+        // The connection dropped part way, after some bytes of the replaced link: those go too, and the queue stops (offline).
+        storeOldItems()
+        starts.answer = { _, _ ->
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { "https://cdn.example.test/new/v2.mp4?oe=1" }) })
+            StartWrite.OFFLINE
+        }
+        assertEquals(StartAhead.Stop, repository().preloadVideo(media, 2, CarouselRepository.Visit()))
+        assertEquals(listOf("${pk}_2", "${pk}_2", "${pk}_2"), starts.removed.toList())
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * R20 for R26's files: a renewal that reshapes the post drops its video items' posters and their starts, with the rest of
+     * its item media. The start here is written by the real writer, from a local file, into this test's video cache.
+     */
+    @Test
+    fun aReshapeDropsThePostersAndTheVideoStarts() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> url.toByteArray() }
+        val source = File(tmp.root, "v2.mp4").apply { writeBytes(ByteArray(3_000) { it.toByte() }) }
+        val writer = CacheVideoStarts({ videoCache.cache }, {
+            CacheDataSource.Factory().setCache(videoCache.cache).setUpstreamDataSourceFactory(FileDataSource.Factory()).createDataSource()
+        })
+        assertEquals(StartWrite.WRITTEN, writer.write("${pk}_2", Uri.fromFile(source), 3_000L))
+        val repository = repository()
+        assertIs<ImageAhead.Shown>(repository.prefetchPoster(media, 2, CarouselRepository.Visit()))
+        assertTrue(videoCache.cache.getCachedBytes("${pk}_2", 0, Long.MAX_VALUE) > 0 && images.path(pk, 2) != null, "precondition: a poster and a start")
+        replyWithFirstThree { items -> items.map { if (it.position == 2) it.copy(type = MediaType.IMAGE, videoUrl = null, videoUrlExpiresAt = null) else it } }
+
+        repository.video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+
+        assertEquals(MediaType.IMAGE, rows()[2].type, "precondition: reshaped")
+        assertNull(images.path(pk, 2), "the poster went")
+        assertEquals(0L, videoCache.cache.getCachedBytes("${pk}_2", 0, Long.MAX_VALUE), "and the start")
+    }
+
+    /**
+     * The hard bound, every path of a visit together: old links everywhere, a picture, a poster and a start refused ahead, the
+     * items' own loads and plays. One `mediaInfo` in all.
+     */
+    @Test
+    fun everyPathOfAVisitTogetherSendsOneMediaInfo() = runTest {
+        storeOldItems()
+        fetcher.answer = { null }
+        starts.answer = { _, _ -> StartWrite.REFUSED }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        repository.preloadVideo(media, 2, visit)
+        repository.prefetchImage(media, 1, visit)
+        repository.prefetchPoster(media, 2, visit)
+        repository.preloadVideo(media, 2, visit)
+        repository.image(media, 1, visit)
+        repository.image(media, 2, visit)
+        repository.video(media, 2, visit)
+        repository.video(media, 2, visit, forceRefresh = true)
+        repository.items(media, visit)
+
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
     // --- fakes ---
+
+    /** R26: the video starts written ahead, recorded as "key uri bytes"; [cached] keys count as written already. */
+    private class RecordingStarts : VideoStarts {
+        val writes: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        val removed: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        val cached: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
+        var answer: suspend (key: String, uri: Uri) -> StartWrite = { _, _ -> StartWrite.WRITTEN }
+
+        override fun isCached(key: String, bytes: Long) = key in cached
+
+        override suspend fun write(key: String, uri: Uri, bytes: Long): StartWrite {
+            writes += "$key $uri $bytes"
+            return answer(key, uri).also { if (it == StartWrite.WRITTEN) cached += key }
+        }
+
+        override fun remove(key: String) {
+            removed += key
+            cached -= key
+        }
+    }
 
     private class StubFetcher : MediaFetcher {
         val fetched: MutableList<String> = Collections.synchronizedList(mutableListOf())

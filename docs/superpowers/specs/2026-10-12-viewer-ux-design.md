@@ -118,7 +118,7 @@ Added 2026-10-12, while the plan was executed. Each is a ruling taken when the d
 - **R7: image downloads run on the Pacer's CDN lane (§3.2 and §4).** As thumbnails do. Why: the cookieless CDN fetcher's contract is paced, and this can only lower rates. Cost: 200–800 ms of first-view jitter per image, and waiting behind a running sync's thumbnails.
 - **R8: a visit is spent by any outcome (§3.3).** A `Visit`, the one `mediaInfo` a visit may send, is spent by a failure and by a cancelled call too, so "at most one per visit" is strict. The viewer makes one `Visit` per settled post, and runs the fill, the images and the items' video resolves in a coroutine of the post, which an item swipe does not cancel. Why: pacing is a hard rule, and telling a sent request from an unsent cancellation is fragile. Cost: a cancelled fill leaves the post cover-only until it is shown again.
 - **R9: the cached-video fallback is the reels' (§3.3).** A carousel video item whose renewal could not be made plays cached bytes for `NO_SESSION`, `REFUSED` and `OFFLINE` only, as the reel resolver does. Why: one rule for "may cached bytes play" across reels and items. Cost: an item whose renewal hit a login or challenge reply, or a rate limit, says unavailable even if its bytes are cached, as a reel does.
-- **R10: the viewer's product calls (§3.2).** Item 0 shows the stored cover (the same picture, no download). An image item downloads when it settles: on demand, once a visit, with no prefetch of items. Video items have no poster. An item swipe does not cancel the next post's prefetch. Why: each matches "on demand" and saves CDN requests. Cost: a 200–800 ms placeholder on each newly viewed image, and a dark frame before a video item starts.
+- **R10: the viewer's product calls (§3.2).** Item 0 shows the stored cover (the same picture, no download). An image item downloads when it settles: on demand, once a visit, with no prefetch of items. Video items have no poster (reversed by R26 below: a video item now shows its poster until its first frame). An item swipe does not cancel the next post's prefetch. Why: each matches "on demand" and saves CDN requests. Cost: a 200–800 ms placeholder on each newly viewed image, and a dark frame before a video item starts.
 - **R11: only a post's first unit starts the next post's prefetch (§4).** An item settle never does. Why: pacing is a hard rule, and item swipes must not become a prefetch trigger. Cost: none visible (the prefetch was decided at the post settle before this update).
 - **R12: the notice file is `res/raw/license_material_symbols.txt` (§3.4).** Why: AAPT2 rejects upper case and hyphens in resource names.
 - **R13: the monochrome layer cuts the play triangle out of its tile (§3.5).** An even-odd fill, not a second single-colour path. Why: a themed icon tints every path one colour, so an uncut triangle would vanish into its tile. The full-colour layer is as designed.
@@ -160,3 +160,46 @@ Smaller changes, none of which raises a rate:
 - **§3.6, the viewer's player effects** now run on `Dispatchers.Main.immediate` (`onMainThread`): Media3 requires the main thread, and a test's dispatcher once woke an effect on a Room thread. A test pins it with a player that checks its thread on every call.
 - **§3.6, a tile taller than the grid** (landscape, a short split-screen window) aligns by its top on the way back, never scrolled past it.
 - **`PacedMediaInfo`** is the reel resolver's `mediaInfo` request and its session gates (R76 and R79), cut out so that a reel and a carousel share them. The resolver's answers are unchanged.
+
+R26 comes from the owner's test of R23 on the phone (2026-10-13). It changes the code, with tests that fail without it.
+
+- **R26: a carousel's video items start sooner: a poster until the first frame, and their start written ahead (amends §3.2,
+  R10, R23 and §4; it reverses R10's "Video items have no poster").** Why: on the phone (2026-10-13) a carousel's pictures
+  were there as they slid in (R23), but a video item stayed black until it played: it began to stream only when it settled,
+  the player waited for its start buffer, and nothing covered the surface until the first frame, because R10 gave video
+  items no poster. The app sent no Instagram request during that test (the links were fresh from a Full sync), so the delay
+  was the CDN stream and the start buffer. The decision, in three parts:
+  1. **The start buffer.** The viewer's one player is built with a `DefaultLoadControl` that starts a streamed video once
+     1 s is buffered and goes on after a stall once 2 s is, every other value Media3's default, for every video, reels
+     included. Media3 1.11.1's own streaming defaults turned out to be these two values already (older ExoPlayer releases
+     used 2.5 s and 5 s), so this part pins them rather than changing today's playback; the start-up delay was the stream
+     and the black surface.
+  2. **A poster for video items.** A video item's `imageUrl` (its preview frame) is fetched by the same queue as the
+     pictures, at the same place in its order, into the same `CarouselImageStore` file `{pk}_{position}` (a video item has no
+     other picture there), with every rule a picture has: R20's drop, D3, P2, R25's renewal and refusal, and P1's stop on a
+     429 or offline. An item's own load fetches its poster when it settles before the queue got to it; a poster that does not
+     come says nothing. The poster is the shutter of Media3's `ContentFrame` for that item's page, so it shows until the
+     player renders that item's first frame (the shutter's own first-frame event), then hides; every item's page has its own
+     frame, so no item's poster covers another's video. When the video fails, the poster stays under the message.
+  3. **The start of each video item written ahead.** Once no picture is left, the same queue writes the first 1 MiB of each
+     video item but the settled one into the video cache under `{pk}_{position}`, with Media3's `CacheWriter` and a bounded
+     request, through the player's own cookieless stack, in the queue's order, one write at a time inside `pacer.cdn { }`.
+     Only a link the item would play as it is (more than 10 minutes left) is used: a stale one is skipped and never renewed,
+     and no `mediaInfo` is ever sent for a start. A start already cached is not fetched. A refused link is skipped quietly and
+     not asked again in the visit, by the queue or by the item's own play, which goes to the visit's one renewal instead; the
+     CDN's 429 or offline stops the queue; leaving the post cancels the write, which leaves the cache consistent. The item the
+     owner settles on stops its write first (what it wrote stays), so the player never reads past the write's lock. A start
+     written while its link was replaced, or its post unsaved, is dropped again (P2, D3). Mock mode writes none: its clip is
+     in the app (and a copy of the short clip would make every Mock-mode item read as fully cached).
+
+  Two details the code needed. `CacheWriter` opens an unbounded request when its bounded one fails, which for a refused link,
+  a 429 or no connection is a second request; the write's upstream allows one try (`OneTryUpstream`). And a refused start
+  sends the item's own play to the visit's renewal for a 404 too, where a player's own 404 renews nothing (R19): it saves a
+  request to a link the CDN refused, inside the same bound.
+
+  Pacing: no new Instagram request and no new request type; still at most one `mediaInfo` a visit, every path together (a
+  refused poster may spend it by R25's rule, a start never). The posters and the starts are extra CDN downloads on the
+  existing CDN lane, one at a time, with the lane's concurrency (2), jitter (0.2–0.8 s) and rate unchanged; the player's own
+  stream stays off the lane, as before. Cost: about 1 MB of data per video item of every carousel opened, even for items the
+  owner never watches, and one small poster image each (the CDN request R10 had saved); the cache's 512 MB bound evicts the
+  starts as it evicts watched videos.

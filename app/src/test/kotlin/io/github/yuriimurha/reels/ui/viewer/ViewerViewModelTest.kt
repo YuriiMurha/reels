@@ -12,6 +12,7 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.ALL_SAVED_ID
+import io.github.yuriimurha.reels.data.db.CarouselItemEntity
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.data.library.LibraryRepository
@@ -27,6 +28,8 @@ import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSource
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
+import io.github.yuriimurha.reels.data.media.VideoStarts
+import io.github.yuriimurha.reels.data.media.StartWrite
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.Account
 import io.github.yuriimurha.reels.instagram.InstagramClient
@@ -169,7 +172,12 @@ class ViewerViewModelTest {
     private val sampleClip = Uri.parse("android.resource://io.github.yuriimurha.reels/raw/sample_clip")
 
     /** The repository the container would build, here over the fake client and the real Conservative Pacer, in virtual time when [scope] is given. */
-    private fun carouselRepository(scope: TestScope? = null, sampleClip: Uri? = null, fetcher: MediaFetcher = this.fetcher): CarouselRepository {
+    private fun carouselRepository(
+        scope: TestScope? = null,
+        sampleClip: Uri? = null,
+        fetcher: MediaFetcher = this.fetcher,
+        starts: VideoStarts = VideoStarts.NONE,
+    ): CarouselRepository {
         val clock = { START + (scope?.testScheduler?.currentTime ?: 0L) }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = clock)
         return CarouselRepository(
@@ -179,6 +187,7 @@ class ViewerViewModelTest {
             isVideoCached = { key -> videoCacheAsked += key; videoCached },
             now = clock,
             sampleClip = sampleClip,
+            starts = starts,
         )
     }
 
@@ -195,8 +204,17 @@ class ViewerViewModelTest {
         )
     }
 
-    /** R23: the pages the queue fetches ahead, in position order: every image item but item 0 (the fake's 1, 3, 4, 6, ...). */
-    private val ahead: List<Int> = post.carouselItems!!.filter { it.type == MediaType.IMAGE && it.position > 0 }.map { it.position }
+    /**
+     * R23, R26: the pages whose picture the queue fetches ahead, in position order: every item but item 0, an image item's image
+     * and a video item's poster alike (the fake's 1, 2, 3, 4, 5, ...).
+     */
+    private val ahead: List<Int> = post.carouselItems!!.filter { it.position > 0 }.map { it.position }
+
+    /** The image items among [ahead] (the fake's 1, 3, 4, 6, ...); the others are its video items (2, 5, ...). */
+    private val imagesAhead: List<Int> = post.carouselItems!!.filter { it.type == MediaType.IMAGE && it.position > 0 }.map { it.position }
+
+    /** The video items past item 0 (the fake's 2, 5, ...): their posters are fetched ahead with the images (R26). */
+    private val videosAhead: List<Int> = ahead - imagesAhead.toSet()
 
     /** True once the items are in and every one of [pages] shows its downloaded picture. */
     private fun CarouselUiState.shows(pages: List<Int>) = items.isNotEmpty() && pages.all { items.getOrNull(it)?.imagePath != null }
@@ -590,8 +608,8 @@ class ViewerViewModelTest {
 
     /**
      * Item 0's image is the cover (the sync takes the cover from the first item, by the same rule): it is never downloaded.
-     * Every other image item downloads once a visit, whether it settles or is fetched ahead (R23), however often it settles; a
-     * video item downloads nothing. A later visit finds the downloaded files on disk.
+     * Every other item's picture downloads once a visit, whether it settles or is fetched ahead (R23), however often it settles:
+     * an image item's image, and a video item's poster (R26). A later visit finds the downloaded files on disk.
      */
     @Test
     fun imagesDownloadOnDemandOnceAVisitAndItemZeroUsesTheCover() = runTest {
@@ -603,9 +621,9 @@ class ViewerViewModelTest {
         for (position in listOf(0, 1, 2, 1, 0, 1)) viewModel.onItemSettled(pk, position)
         val state = viewModel.awaitCarousel { it.shows(ahead) }
 
-        assertEquals(ahead.map(::old).sorted(), fetched.toList().sorted(), "each image item once; item 0 and the videos never")
+        assertEquals(ahead.map(::old).sorted(), fetched.toList().sorted(), "each item's picture once, a video item's poster too; item 0 never")
         assertNull(state.items[0].imagePath, "item 0 shows the cover")
-        assertNull(state.items[2].imagePath)
+        assertTrue(state.items[2].imagePath != null, "video item 2 has its poster (R26)")
 
         viewModel.onSettled(reel("m9", fresh))
         viewModel.onSettled(carousel)
@@ -855,7 +873,10 @@ class ViewerViewModelTest {
 
     // --- R23: a carousel's other pictures, fetched ahead one at a time; R25: one renewal at most; P1: what stops them ---
 
-    /** Opening a carousel fetches every image item after the cover, in order, ONE download at a time, and asks Instagram nothing. */
+    /**
+     * Opening a carousel fetches every item's picture after the cover, an image item's image and a video item's poster alike
+     * (R26), in order, ONE download at a time, and asks Instagram nothing.
+     */
     @Test
     fun openingACarouselFetchesItsOtherPicturesAheadOneAtATimeInOrder() = runTest {
         storeCarousel()
@@ -865,10 +886,10 @@ class ViewerViewModelTest {
         viewModel.onSettled(carousel)
 
         val state = viewModel.awaitCarousel { it.shows(ahead) }
-        assertEquals(ahead.map(::old), cdn.fetched.toList(), "every image item after the cover, in order, once")
+        assertEquals(ahead.map(::old), cdn.fetched.toList(), "every item's picture after the cover, in order, once")
         assertEquals(1, cdn.mostOut.get(), "one download at a time")
         assertNull(state.items[0].imagePath, "item 0 shows the cover: never fetched")
-        assertTrue(state.items.filter { it.type == MediaType.VIDEO }.all { it.imagePath == null }, "a video item: never fetched")
+        assertTrue(videosAhead.isNotEmpty() && videosAhead.all { state.items[it].imagePath != null }, "every video item's poster (R26)")
         assertEquals(emptyList(), mediaInfoCalls)
     }
 
@@ -978,7 +999,7 @@ class ViewerViewModelTest {
 
         viewModel.onSettled(carousel)
 
-        viewModel.awaitCarousel { it.shows(ahead) }
+        viewModel.awaitCarousel { it.shows(imagesAhead) }
         assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
         val videos = post.carouselItems!!.filter { it.type == MediaType.VIDEO }.map { it.position }
         assertTrue(videos.isNotEmpty(), "precondition: the new shape has videos")
@@ -997,15 +1018,15 @@ class ViewerViewModelTest {
         viewModel.onSettled(carousel)
         eventually { while ("fake://thumb/$pk-3" !in cdn.fetched) delay(10) }
         // A queue that went on would ask for the next picture within this (the lane's jitter is under a second).
-        eventually { withTimeoutOrNull(1_000) { while (cdn.fetched.size == 2) delay(10) } }
+        eventually { withTimeoutOrNull(1_000) { while (cdn.fetched.size == 3) delay(10) } }
 
-        assertEquals(listOf("fake://thumb/$pk-1", "fake://thumb/$pk-3"), cdn.fetched.toList(), "nothing after the refusal")
+        assertEquals(listOf("fake://thumb/$pk-1", "fake://thumb/$pk-2", "fake://thumb/$pk-3"), cdn.fetched.toList(), "nothing after the refusal")
         assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "the fill's, no other")
 
         viewModel.onItemSettled(pk, 3)
 
         assertEquals("Can't load this item", viewModel.awaitCarousel { it.items[3].failure != null }.items[3].failure)
-        assertEquals(listOf("fake://thumb/$pk-1", "fake://thumb/$pk-3"), cdn.fetched.toList(), "item 3's refused link not asked again")
+        assertEquals(listOf("fake://thumb/$pk-1", "fake://thumb/$pk-2", "fake://thumb/$pk-3"), cdn.fetched.toList(), "item 3's refused link not asked again")
         assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
     }
 
@@ -1156,6 +1177,282 @@ class ViewerViewModelTest {
             assertEquals(listOf(old(1)), cdn.fetched.toList(), "only the queue's own download")
         } finally {
             cdn.releaseAll()
+        }
+    }
+
+    // --- R26: video items' posters with the pictures, then their starts, one at a time; never a request of their own ---
+
+    private fun start(position: Int) = "${pk}_$position"
+
+    /**
+     * Opening a carousel fetches every picture first, its video items' posters among them, then writes the start of every video
+     * item, in the same order: ONE download or write out at a time, and no request to Instagram.
+     */
+    @Test
+    fun theQueueFetchesThePicturesAndPostersFirstThenTheVideoStartsOneAtATime() = runTest {
+        storeCarousel()
+        val cdn = Cdn().apply { takes = 300 } // long enough that two out together would overlap
+        val starts = Starts(cdn).apply { takes = 300 }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+
+        viewModel.onSettled(carousel)
+
+        eventually { while (starts.written.size < videosAhead.size) delay(10) }
+        eventually { withTimeoutOrNull(1_000) { while (starts.written.size == videosAhead.size) delay(10) } }
+        assertTrue(videosAhead.size >= 2, "precondition: at least two video items, $videosAhead")
+        assertEquals(videosAhead.map(::start), starts.written.toList(), "every video item's start, in order, once")
+        assertEquals(ahead.size, starts.picturesBeforeFirstStart, "every picture and poster came before the first start")
+        assertEquals(ahead.map(::old), cdn.fetched.toList())
+        assertEquals(1, cdn.mostOut.get(), "one download or write at a time")
+        assertEquals(emptyList(), mediaInfoCalls)
+    }
+
+    /**
+     * The starts follow the settled item as the pictures do: the video items after it in order, then those before it, the
+     * nearest first; never the settled one, which the player is reading.
+     */
+    @Test
+    fun theVideoStartsFollowTheSettledItemAndPassIt() = runTest {
+        storeCarousel()
+        val cdn = Cdn().apply { hold(old(1)) }
+        val starts = Starts(cdn)
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) }
+            val settled = videosAhead[1]
+            viewModel.onItemSettled(pk, settled)
+            cdn.release(old(1))
+
+            val expected = videosAhead.filter { it > settled } + videosAhead.filter { it < settled }.reversed()
+            eventually { while (starts.written.size < expected.size) delay(10) }
+            eventually { withTimeoutOrNull(1_000) { while (starts.written.size == expected.size) delay(10) } }
+            assertEquals(expected.map(::start), starts.written.toList(), "after $settled in order, then before it; never $settled")
+        } finally {
+            cdn.releaseAll()
+        }
+    }
+
+    /**
+     * The owner settles on the video item whose start is being written: the write stops BEFORE the player is handed the item,
+     * so the player never meets the write's lock on the cache, and the queue goes on with the next start.
+     */
+    @Test
+    fun aStartTheOwnerSettlesOnGivesWayToThePlayerAndTheQueueGoesOn() = runTest {
+        storeCarousel()
+        val cdn = Cdn()
+        val starts = Starts(cdn).apply {
+            hold(start(2))
+            stopTakesMs = 300 // a write stops only at its next read: the player must wait for that, not just for the cancel
+        }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        starts.onCancelled = { player.events += "gave way:$it" }
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val job = following(viewModel, player, resolved)
+        try {
+            runCurrent()
+            settle(player, resolved, item(0))
+            eventually { while (start(2) !in starts.written) delay(10) }
+
+            viewModel.onItemSettled(pk, 2)
+            settleItem(player, item(2), played = start(2))
+
+            val events = player.events.toList()
+            assertTrue(events.indexOf("gave way:${start(2)}") in 0 until events.indexOf("set:${start(2)}"), "the write stopped first: $events")
+            eventually { while (starts.written.size < videosAhead.size) delay(10) }
+            assertEquals(videosAhead.map(::start), starts.written.toList(), "and the queue went on")
+            assertEquals(listOf(start(2)), starts.cancelled.toList())
+        } finally {
+            starts.releaseAll()
+            job.cancel()
+        }
+    }
+
+    /**
+     * Item 0 has no picture to fetch (the cover is its picture), but a video item 0 has a start like any other: written ahead
+     * once the owner is on another item, after the items after that one.
+     */
+    @Test
+    fun aVideoItemZerosStartIsWrittenWhenTheOwnerIsElsewhere() = runTest {
+        db.mediaDao().upsert(listOf(carousel))
+        db.carouselItemDao().replace(
+            pk,
+            listOf(MediaType.VIDEO, MediaType.IMAGE, MediaType.VIDEO).mapIndexed { position, type ->
+                CarouselItemEntity(
+                    pk, position, type, 1080, 1350, old(position),
+                    if (type == MediaType.VIDEO) "https://cdn.example.test/old/v$position.mp4?oe=1" else null,
+                    if (type == MediaType.VIDEO) fresh else null,
+                )
+            },
+        )
+        val cdn = Cdn().apply { hold(old(1)) }
+        val starts = Starts(cdn)
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) }
+            viewModel.onItemSettled(pk, 1)
+            cdn.release(old(1))
+
+            eventually { while (starts.written.size < 2) delay(10) }
+            assertEquals(listOf(start(2), start(0)), starts.written.toList(), "item 2 after the settled item, then item 0 before it")
+            assertEquals(listOf(old(1), old(2)), cdn.fetched.toList(), "no picture fetched for item 0: the cover")
+        } finally {
+            cdn.releaseAll()
+        }
+    }
+
+    /** Leaving the post cancels the start being written, with the visit (R8); nothing more is written. */
+    @Test
+    fun leavingThePostCancelsTheStartBeingWritten() = runTest {
+        storeCarousel()
+        val cdn = Cdn()
+        val starts = Starts(cdn).apply { hold(start(2)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        viewModel.onSettled(carousel)
+        eventually { while (starts.written.isEmpty()) delay(10) }
+
+        viewModel.onSettled(reel("m9", fresh))
+        eventually { while (starts.cancelled.isEmpty()) delay(10) }
+        starts.releaseAll()
+        advanceUntilIdle()
+
+        assertEquals(listOf(start(2)), starts.cancelled.toList())
+        assertEquals(listOf(start(2)), starts.written.toList(), "nothing after it")
+    }
+
+    /** P1: the CDN's 429, or no connection, on a start ends the queue for the visit; Instagram is not asked. */
+    @Test
+    fun aLimitedOrOfflineStartStopsTheQueue() = runTest {
+        storeCarousel()
+        assertTrue(videosAhead.size >= 2, "precondition: a start after the first, $videosAhead")
+        for (outcome in listOf(StartWrite.LIMITED, StartWrite.OFFLINE)) {
+            val cdn = Cdn()
+            val starts = Starts(cdn) { outcome }
+            val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+
+            viewModel.onSettled(carousel)
+
+            eventually { while (starts.written.isEmpty()) delay(10) }
+            eventually { withTimeoutOrNull(1_000) { while (starts.written.size == 1) delay(10) } }
+            assertEquals(listOf(start(videosAhead.first())), starts.written.toList(), "$outcome: no start after it")
+        }
+        assertEquals(emptyList(), mediaInfoCalls)
+    }
+
+    /** P1: a queue its pictures stopped (the CDN's 429) writes no start either. */
+    @Test
+    fun aQueueStoppedOnItsPicturesWritesNoStart() = runTest {
+        storeCarousel()
+        val cdn = Cdn { throw CdnRateLimited() }
+        val starts = Starts(cdn)
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+
+        viewModel.onSettled(carousel)
+
+        eventually { while (cdn.fetched.isEmpty()) delay(10) }
+        eventually { withTimeoutOrNull(1_000) { while (starts.written.isEmpty()) delay(10) } }
+        assertEquals(emptyList(), starts.written.toList())
+    }
+
+    /**
+     * A start the CDN refuses is passed quietly and the queue goes on; nothing is renewed for it. When the owner then settles
+     * on that item, it does not ask the refused link again: its own play takes the visit's one renewal and plays the new link.
+     * Settling on it again in the visit asks nothing more, and the queue never writes it again.
+     */
+    @Test
+    fun aRefusedStartIsPassedAndItsItemPlaysARenewedLinkWithTheVisitsOneRequest() = runTest {
+        storeCarousel()
+        val cdn = Cdn()
+        val starts = Starts(cdn) { key -> if (key == start(2)) StartWrite.REFUSED else StartWrite.WRITTEN }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val job = following(viewModel, player, resolved)
+        try {
+            runCurrent()
+            settle(player, resolved, item(0))
+            eventually { while (starts.written.size < videosAhead.size) delay(10) }
+            assertEquals(videosAhead.map(::start), starts.written.toList(), "passed, and the queue went on")
+            assertEquals(emptyList(), mediaInfoCalls, "no renewal for a start ahead")
+
+            viewModel.onItemSettled(pk, 2)
+            settleItem(player, item(2), played = start(2))
+            assertEquals(Uri.parse("fake://video/$pk-2"), player.uris.last(), "a renewed link, never the refused one")
+            assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+
+            viewModel.onItemSettled(pk, 1)
+            settleItem(player, item(1))
+            viewModel.onItemSettled(pk, 2)
+            settleItem(player, item(2), played = start(2))
+            assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "still the visit's one request")
+            assertEquals(videosAhead.size, starts.written.size, "the refused start was never written again")
+        } finally {
+            job.cancel()
+        }
+    }
+
+    /**
+     * A video item's own load fetches its poster when the queue has not yet (its download out elsewhere); a poster that cannot
+     * come (refused, and refused again after the visit's renewal) says nothing on the item: its video speaks for it.
+     */
+    @Test
+    fun aVideoItemsOwnLoadFetchesItsPosterAndOneThatCannotComeSaysNothing() = runTest {
+        storeCarousel()
+        val second = videosAhead[1]
+        val cdn = Cdn { url -> if (url == old(second) || url == "fake://thumb/$pk-$second") null else byteArrayOf(1, 2, 3) }.apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) } // the queue's first download, held
+
+            viewModel.onItemSettled(pk, 2)
+            assertTrue(viewModel.awaitCarousel { it.items[2].imagePath != null }.items[2].imagePath!!.isNotEmpty())
+            assertEquals(1, cdn.fetched.count { it == old(2) }, "video item 2's poster, by its own load")
+
+            viewModel.onItemSettled(pk, second)
+            eventually { while ("fake://thumb/$pk-$second" !in cdn.fetched) delay(10) }
+            eventually { withTimeoutOrNull(1_000) { while (viewModel.carousel.value!!.state.items[second].failure == null) delay(10) } }
+            val state = viewModel.carousel.value!!.state
+            assertNull(state.items[second].failure, "no failure for a poster")
+            assertNull(state.items[second].imagePath)
+        } finally {
+            cdn.releaseAll()
+        }
+    }
+
+    /**
+     * The hard bound with every R26 path in play: old picture links (refused, then renewed), every start refused, each video
+     * item played and a player refusal recovered. One `mediaInfo` in the visit.
+     */
+    @Test
+    fun everyPathOfAVisitSendsOneMediaInfo() = runTest {
+        storeCarousel()
+        val cdn = Cdn { url -> if (url.startsWith("fake://")) byteArrayOf(1, 2, 3) else null } // only renewed links load
+        val starts = Starts(cdn) { StartWrite.REFUSED }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val job = following(viewModel, player, resolved)
+        try {
+            runCurrent()
+            settle(player, resolved, item(0))
+            viewModel.awaitCarousel { it.shows(ahead) }
+            eventually { while (starts.written.size < videosAhead.size) delay(10) }
+
+            for (position in videosAhead) {
+                val stops = player.events.count { it == "stop" }
+                viewModel.onItemSettled(pk, position)
+                settleItem(player, item(position))
+                // The settle's stop, then the item's own: its refused link is not asked again, and the spent renewal brings no other.
+                eventually { while (player.events.count { it == "stop" } < stops + 2) delay(10) }
+            }
+            viewModel.recover(carousel, playbackFailure(403), position = videosAhead.last())
+
+            assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+        } finally {
+            job.cancel()
         }
     }
 
@@ -1860,9 +2157,11 @@ class ViewerViewModelTest {
         val cancelled: MutableList<String> = Collections.synchronizedList(mutableListOf())
         var takes = 0L
         private val gates = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
-        private val out = AtomicInteger()
 
-        /** The most downloads that were out at once. */
+        /** Downloads out now, and (R26) video starts being written through [Starts] over this CDN. */
+        val out = AtomicInteger()
+
+        /** The most downloads (and video starts) that were out at once. */
         val mostOut = AtomicInteger()
 
         fun hold(url: String) {
@@ -1888,6 +2187,58 @@ class ViewerViewModelTest {
             }
             return answer(url)
         }
+    }
+
+    /**
+     * R26: where the queue writes video starts, over the [cdn] of the pictures: every write is recorded (its key), and counted
+     * as out on that CDN with its downloads, so [Cdn.mostOut] covers both. [picturesBeforeFirstStart] is how many pictures had
+     * been fetched when the first start began. A start of a key in [hold] waits until it is released; each takes [takes] ms.
+     */
+    private class Starts(private val cdn: Cdn, private val answer: (String) -> StartWrite = { StartWrite.WRITTEN }) : VideoStarts {
+        val written: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        val cancelled: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        var takes = 0L
+        var picturesBeforeFirstStart: Int? = null
+
+        /** Told the key of every write that is cancelled, once it has stopped. */
+        var onCancelled: (String) -> Unit = {}
+
+        /** How long a cancelled write takes to stop, in real time on an IO thread (as `CacheWriter` stops at its next read). */
+        var stopTakesMs = 0L
+        private val gates = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+
+        fun hold(key: String) {
+            gates[key] = CompletableDeferred()
+        }
+
+        fun release(key: String) = gates[key]?.complete(Unit)
+
+        /** So a test that fails half way cannot leave a write waiting for ever. */
+        fun releaseAll() = gates.values.forEach { it.complete(Unit) }
+
+        override fun isCached(key: String, bytes: Long) = false
+
+        override suspend fun write(key: String, uri: Uri, bytes: Long): StartWrite {
+            if (picturesBeforeFirstStart == null) picturesBeforeFirstStart = cdn.fetched.size
+            written += key
+            cdn.mostOut.accumulateAndGet(cdn.out.incrementAndGet(), ::maxOf)
+            try {
+                gates[key]?.await()
+                if (takes > 0) delay(takes)
+            } catch (e: CancellationException) {
+                withContext(NonCancellable) {
+                    if (stopTakesMs > 0) withContext(Dispatchers.IO) { Thread.sleep(stopTakesMs) }
+                    cancelled += key
+                    onCancelled(key)
+                }
+                throw e
+            } finally {
+                cdn.out.decrementAndGet()
+            }
+            return answer(key)
+        }
+
+        override fun remove(key: String) = Unit
     }
 
     private class CountingClient : InstagramClient {

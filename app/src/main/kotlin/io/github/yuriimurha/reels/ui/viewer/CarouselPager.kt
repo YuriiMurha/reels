@@ -52,6 +52,9 @@ const val CAROUSEL_LOADING_TAG = "carousel-loading"
 /** Test tag of item [position]'s downloaded image. */
 fun carouselImageTag(position: Int) = "carousel-image-$position"
 
+/** Test tag of video item [position]'s downloaded poster (R26), which shows until the video's first frame. */
+fun carouselPosterTag(position: Int) = "carousel-poster-$position"
+
 /**
  * One item of a carousel as the viewer shows it. It has no width or height on purpose: a stored item's may be 0, or mixed
  * (Task 1), so the viewer never sizes from them; it fits each item to the screen ([ContentScale.Fit]) instead.
@@ -60,7 +63,10 @@ data class CarouselItemUi(
     val position: Int,
     /** [MediaType.IMAGE] or [MediaType.VIDEO]. */
     val type: MediaType,
-    /** The downloaded image (absolute path), or null while there is none: item 0 shows the cover meanwhile, any other a placeholder. */
+    /**
+     * The downloaded picture (absolute path): an image item's image, or a video item's poster (R26), shown until its first
+     * frame and under its failure. Null while there is none: item 0 shows the cover meanwhile, any other the viewer's black.
+     */
     val imagePath: String? = null,
     /** Why the item cannot show or play ("Can't load this item", "Offline: this item isn't cached yet", ...), or null. */
     val failure: String? = null,
@@ -111,7 +117,9 @@ fun rememberCarouselPagerState(state: CarouselUiState): PagerState {
  * A carousel post in the viewer (spec 2026-10-12 §3.2): its items side by side, swiped left and right inside the vertical post
  * pager, with an "N/M" counter at the top end. Item 0 shows the stored cover at once, so the first frame never waits for the
  * network; an image item shows its downloaded file once there is one (R7: until then its placeholder, the pager is never held
- * up); a video item draws [player] while it is the settled one (the screen gives [player] only to the unit that plays).
+ * up); a video item draws [player] while it is the settled one (the screen gives [player] only to the unit that plays), with
+ * its own poster (R26), or item 0's cover, as the frame's shutter: Media3's `ContentFrame` covers the surface with it until
+ * the player renders this unit's first frame, and each item's frame is its own, so no item's picture covers another's video.
  * [onItemSettled] gets the page every time the pager settles. The dots are [CarouselDots], placed by the page with its overlay.
  */
 @Composable
@@ -201,12 +209,18 @@ private fun CarouselItemPage(
     }
 }
 
-/** What an item shows when it is not drawing video: its image, else the cover for item 0, else the viewer's black. */
+/**
+ * What an item shows when it is not drawing video, and a video item's shutter until its first frame: its picture (an image,
+ * or a video item's poster, R26), else the cover for item 0, else the viewer's black.
+ */
 @Composable
 private fun ItemStill(media: MediaEntity, item: CarouselItemUi?, index: Int) {
     val path = item?.imagePath
     when {
-        path != null -> Thumbnail(path, Modifier.fillMaxSize().testTag(carouselImageTag(index)), ContentScale.Fit)
+        path != null -> {
+            val tag = if (item.type == MediaType.VIDEO) carouselPosterTag(index) else carouselImageTag(index)
+            Thumbnail(path, Modifier.fillMaxSize().testTag(tag), ContentScale.Fit)
+        }
         index == 0 && media.thumbPath != null ->
             Thumbnail(media.thumbPath, Modifier.fillMaxSize().testTag(CAROUSEL_COVER_TAG), ContentScale.Fit)
         else -> Box(Modifier.fillMaxSize())
