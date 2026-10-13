@@ -18,6 +18,7 @@ import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.media.CarouselImageStore
 import io.github.yuriimurha.reels.data.media.CarouselRepository
+import io.github.yuriimurha.reels.data.media.CdnRateLimited
 import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.MediaFetcher
 import io.github.yuriimurha.reels.data.media.PacedMediaInfo
@@ -67,6 +68,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -76,6 +78,8 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.IOException
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -190,6 +194,15 @@ class ViewerViewModelTest {
             },
         )
     }
+
+    /** R23: the pages the queue fetches ahead, in position order: every image item but item 0 (the fake's 1, 3, 4, 6, ...). */
+    private val ahead: List<Int> = post.carouselItems!!.filter { it.type == MediaType.IMAGE && it.position > 0 }.map { it.position }
+
+    /** True once the items are in and every one of [pages] shows its downloaded picture. */
+    private fun CarouselUiState.shows(pages: List<Int>) = items.isNotEmpty() && pages.all { items.getOrNull(it)?.imagePath != null }
+
+    /** Item [position]'s stored link, as [storeCarousel] stores it. */
+    private fun old(position: Int) = "https://cdn.example.test/old/i$position.jpg?oe=1"
 
     /** Another fake carousel (a video at position 2 too), with its items stored: the post after [carousel] in some tests. */
     private val otherPost: RemoteMedia =
@@ -577,8 +590,8 @@ class ViewerViewModelTest {
 
     /**
      * Item 0's image is the cover (the sync takes the cover from the first item, by the same rule): it is never downloaded.
-     * Another image item downloads when it settles, once a visit; a video item downloads nothing. A later visit finds the
-     * downloaded file on disk.
+     * Every other image item downloads once a visit, whether it settles or is fetched ahead (R23), however often it settles; a
+     * video item downloads nothing. A later visit finds the downloaded files on disk.
      */
     @Test
     fun imagesDownloadOnDemandOnceAVisitAndItemZeroUsesTheCover() = runTest {
@@ -588,9 +601,9 @@ class ViewerViewModelTest {
         viewModel.awaitCarousel { it.items.isNotEmpty() }
 
         for (position in listOf(0, 1, 2, 1, 0, 1)) viewModel.onItemSettled(pk, position)
-        val state = viewModel.awaitCarousel { it.items[1].imagePath != null }
+        val state = viewModel.awaitCarousel { it.shows(ahead) }
 
-        assertEquals(listOf("https://cdn.example.test/old/i1.jpg?oe=1"), fetched.toList(), "item 1 once; item 0 and the video never")
+        assertEquals(ahead.map(::old).sorted(), fetched.toList().sorted(), "each image item once; item 0 and the videos never")
         assertNull(state.items[0].imagePath, "item 0 shows the cover")
         assertNull(state.items[2].imagePath)
 
@@ -598,8 +611,8 @@ class ViewerViewModelTest {
         viewModel.onSettled(carousel)
         viewModel.awaitCarousel { it.items.isNotEmpty() }
         viewModel.onItemSettled(pk, 1)
-        viewModel.awaitCarousel { it.items[1].imagePath != null }
-        assertEquals(1, fetched.size, "the next visit read it from disk")
+        viewModel.awaitCarousel { it.shows(ahead) }
+        assertEquals(ahead.size, fetched.size, "the next visit read them from disk")
     }
 
     @Test
@@ -611,7 +624,8 @@ class ViewerViewModelTest {
         viewModel.onSettled(carousel.copy(thumbPath = null))
 
         viewModel.awaitCarousel { it.items.firstOrNull()?.imagePath != null }
-        assertEquals(listOf("fake://thumb/$pk-0"), fetched.toList())
+        // The queue of R23 fetches the other pictures alongside; item 0 is the settled item's own download, and only once.
+        assertEquals(1, fetched.count { it == "fake://thumb/$pk-0" }, "$fetched")
     }
 
     @Test
@@ -774,8 +788,11 @@ class ViewerViewModelTest {
                 settleItem(player, item(position), played = "${pk}_$position".takeIf { position == 2 })
                 runCurrent()
             }
+            // R23: the post's pictures were fetched ahead meanwhile, and that is no trigger either.
+            viewModel.awaitCarousel { it.shows(ahead) }
+            runCurrent()
 
-            assertEquals(emptyList(), resolver.calls, "item swipes sent no prefetch")
+            assertEquals(emptyList(), resolver.calls, "item swipes and the pictures fetched ahead sent no prefetch")
         } finally {
             job.cancel()
         }
@@ -813,7 +830,11 @@ class ViewerViewModelTest {
         assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "no second request in the visit")
     }
 
-    /** The fill spent the visit's request: an image the CDN refuses is not renewed with a second one. */
+    /**
+     * The fill spent the visit's request: an image the CDN refuses is not renewed with a second one. And a link refused once is
+     * never asked for again in the visit (R25): whichever of the queue and the item's own load meets it first, the other asks
+     * the CDN nothing, and the queue stops there.
+     */
     @Test
     fun aRefusedImageAfterTheFillSendsNoSecondRequest() = runTest {
         storeCarousel(withItems = false)
@@ -829,7 +850,313 @@ class ViewerViewModelTest {
 
         assertEquals("Can't load this item", viewModel.awaitCarousel { it.items[1].failure != null }.items[1].failure)
         assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "no second request in the visit")
-        assertEquals(listOf("fake://thumb/$pk-1"), fetched.toList(), "and the refused link is not asked for again")
+        assertEquals(listOf("fake://thumb/$pk-1"), fetched.toList(), "item 1's link once in all, and nothing ahead after it")
+    }
+
+    // --- R23: a carousel's other pictures, fetched ahead one at a time; R25: one renewal at most; P1: what stops them ---
+
+    /** Opening a carousel fetches every image item after the cover, in order, ONE download at a time, and asks Instagram nothing. */
+    @Test
+    fun openingACarouselFetchesItsOtherPicturesAheadOneAtATimeInOrder() = runTest {
+        storeCarousel()
+        val cdn = Cdn().apply { takes = 300 } // long enough that two downloads out together would overlap
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+
+        viewModel.onSettled(carousel)
+
+        val state = viewModel.awaitCarousel { it.shows(ahead) }
+        assertEquals(ahead.map(::old), cdn.fetched.toList(), "every image item after the cover, in order, once")
+        assertEquals(1, cdn.mostOut.get(), "one download at a time")
+        assertNull(state.items[0].imagePath, "item 0 shows the cover: never fetched")
+        assertTrue(state.items.filter { it.type == MediaType.VIDEO }.all { it.imagePath == null }, "a video item: never fetched")
+        assertEquals(emptyList(), mediaInfoCalls)
+    }
+
+    /**
+     * An item settle reorders what is left: the items after it first, then those before it. The download that is out carries on,
+     * and nothing finished is fetched again; the settled item's own picture comes on the lane's other slot meanwhile.
+     */
+    @Test
+    fun anItemSettleReordersWhatIsLeftWithoutCancellingTheDownloadThatIsOut() = runTest {
+        storeCarousel()
+        val cdn = Cdn().apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        viewModel.onSettled(carousel)
+        eventually { while (cdn.fetched.isEmpty()) delay(10) }
+        assertEquals(listOf(old(1)), cdn.fetched.toList(), "the queue starts with the item after the settled one")
+
+        viewModel.onItemSettled(pk, 4)
+        viewModel.awaitCarousel { it.items[4].imagePath != null } // its own download, while item 1's is still out
+        cdn.release(old(1))
+        viewModel.awaitCarousel { it.shows(ahead) }
+
+        val queued = listOf(1) + ahead.filter { it > 4 } + ahead.filter { it in 2 until 4 }.reversed()
+        assertEquals(queued.map(::old), cdn.fetched.filter { it != old(4) }, "item 1, then the items after 4, then 3")
+        assertEquals(1, cdn.fetched.count { it == old(4) }, "item 4 once, by its own load")
+        assertEquals(emptyList(), cdn.cancelled.toList(), "item 1's download was not cancelled")
+    }
+
+    /** F3: settled on the last item while the queue's first download is out: what is left comes nearest first, every one. */
+    @Test
+    fun earlierItemsComeNearestFirst() = runTest {
+        storeCarousel()
+        val cdn = Cdn().apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) }
+            val last = post.carouselItems!!.maxOf { it.position }
+
+            viewModel.onItemSettled(pk, last)
+            cdn.release(old(1))
+            viewModel.awaitCarousel { it.shows(ahead) }
+
+            val earlier = ahead.filter { it in 2 until last }.reversed()
+            assertTrue(earlier.size >= 2, "precondition: at least two earlier pictures left, $earlier")
+            assertEquals((listOf(1) + earlier).map(::old), cdn.fetched.filter { it != old(last) })
+        } finally {
+            cdn.releaseAll()
+        }
+    }
+
+    /** Leaving the post cancels the queue with the visit (R8): the download out is cancelled, nothing more is fetched or kept. */
+    @Test
+    fun leavingThePostCancelsThePicturesFetchedAhead() = runTest {
+        storeCarousel()
+        val cdn = Cdn().apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        viewModel.onSettled(carousel)
+        eventually { while (cdn.fetched.isEmpty()) delay(10) }
+
+        viewModel.onSettled(reel("m9", fresh))
+        eventually { while (cdn.cancelled.isEmpty()) delay(10) }
+        cdn.releaseAll()
+        advanceUntilIdle()
+
+        assertEquals(listOf(old(1)), cdn.cancelled.toList())
+        assertEquals(listOf(old(1)), cdn.fetched.toList(), "nothing after it")
+        assertNull(CarouselImageStore(File(tmp.root, "carousel")).path(pk, 1), "and no file")
+    }
+
+    /**
+     * R25: the stored links are old (as after a few days), so the first picture ahead is refused. That spends the visit's one
+     * renewal as the post opens, and the queue goes on with the fresh links: every picture loads, with one request in all,
+     * and no failure shows.
+     */
+    @Test
+    fun aRefusedPictureAheadRenewsOnceAndTheQueueGoesOnWithTheFreshLinks() = runTest {
+        storeCarousel()
+        val cdn = Cdn { url -> if (url.startsWith("fake://")) byteArrayOf(1, 2, 3) else null } // only renewed links load
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+
+        viewModel.onSettled(carousel)
+
+        val state = viewModel.awaitCarousel { it.shows(ahead) }
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "the visit's one request, as the post opened")
+        assertEquals(listOf(old(1)) + ahead.map { "fake://thumb/$pk-$it" }, cdn.fetched.toList(), "one refusal, then the fresh links")
+        assertTrue(state.items.all { it.failure == null })
+
+        viewModel.onItemSettled(pk, 1)
+        runCurrent()
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "the item on screen shows its picture: nothing more")
+    }
+
+    /**
+     * R25 with R20: the queue's renewal brings another shape, in which some items are videos, while the pager keeps the shape it
+     * was shown with (every item an image here). The queue passes each such page once and goes on: every item that is an
+     * image in the new shape loads, and no video's picture is fetched.
+     */
+    @Test
+    fun aPageTheRenewalMadeAVideoIsPassedOnceAndTheQueueGoesOn() = runTest {
+        db.mediaDao().upsert(listOf(carousel))
+        db.carouselItemDao().replace(
+            pk,
+            post.carouselItems!!.map { it.toEntity(pk).copy(type = MediaType.IMAGE, imageUrl = old(it.position), videoUrl = null, videoUrlExpiresAt = null) },
+        )
+        val cdn = Cdn { url -> if (url.startsWith("fake://")) byteArrayOf(1, 2, 3) else null } // only renewed links load
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+
+        viewModel.onSettled(carousel)
+
+        viewModel.awaitCarousel { it.shows(ahead) }
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+        val videos = post.carouselItems!!.filter { it.type == MediaType.VIDEO }.map { it.position }
+        assertTrue(videos.isNotEmpty(), "precondition: the new shape has videos")
+        assertTrue(cdn.fetched.none { url -> videos.any { url == "fake://thumb/$pk-$it" || url == old(it) } }, "no video's picture: ${cdn.fetched}")
+    }
+
+    /**
+     * R25: the visit's renewal is spent already (here by the fill), so the first refusal ahead stops the queue; the item's own
+     * load later asks the CDN nothing for that refused link, and Instagram nothing more.
+     */
+    @Test
+    fun aSpentRenewalStopsThePicturesFetchedAhead() = runTest {
+        storeCarousel(withItems = false)
+        val cdn = Cdn { url -> if (url == "fake://thumb/$pk-3") null else byteArrayOf(1, 2, 3) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        viewModel.onSettled(carousel)
+        eventually { while ("fake://thumb/$pk-3" !in cdn.fetched) delay(10) }
+        // A queue that went on would ask for the next picture within this (the lane's jitter is under a second).
+        eventually { withTimeoutOrNull(1_000) { while (cdn.fetched.size == 2) delay(10) } }
+
+        assertEquals(listOf("fake://thumb/$pk-1", "fake://thumb/$pk-3"), cdn.fetched.toList(), "nothing after the refusal")
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "the fill's, no other")
+
+        viewModel.onItemSettled(pk, 3)
+
+        assertEquals("Can't load this item", viewModel.awaitCarousel { it.items[3].failure != null }.items[3].failure)
+        assertEquals(listOf("fake://thumb/$pk-1", "fake://thumb/$pk-3"), cdn.fetched.toList(), "item 3's refused link not asked again")
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+    }
+
+    /**
+     * The hard bound under concurrent refusals: the queue's first link is refused and the renewal it asked for is out when the
+     * owner settles on item 3, whose link is refused too. Both share the visit's one renewal: one `mediaInfo` in all, and every
+     * picture loads from the fresh links.
+     */
+    @Test
+    fun theQueueAndTheItemOnScreenRefusedTogetherSendOneRequest() = runTest {
+        storeCarousel()
+        val reply = CompletableDeferred<Unit>()
+        onReply = { reply.await(); it }
+        val cdn = Cdn { url -> if (url.startsWith("fake://")) byteArrayOf(1, 2, 3) else null }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (mediaInfoCalls.isEmpty()) delay(10) } // the queue's renewal is out
+            viewModel.onItemSettled(pk, 3)
+            eventually { while (old(3) !in cdn.fetched) delay(10) } // item 3's own link is refused meanwhile
+            reply.complete(Unit)
+
+            val state = viewModel.awaitCarousel { it.shows(ahead) }
+            assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+            assertEquals(1, cdn.fetched.count { it == old(3) })
+            assertTrue(state.items.all { it.failure == null })
+        } finally {
+            reply.complete(Unit)
+        }
+    }
+
+    /** P1: the CDN says 429 to the first picture ahead: nothing more is fetched ahead in the visit, and Instagram is not asked. */
+    @Test
+    fun aCdn429StopsThePicturesFetchedAhead() = runTest {
+        storeCarousel()
+        val cdn = Cdn { throw CdnRateLimited() }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        viewModel.onSettled(carousel)
+        eventually { while (cdn.fetched.isEmpty()) delay(10) }
+        eventually { withTimeoutOrNull(1_000) { while (cdn.fetched.size == 1) delay(10) } }
+
+        assertEquals(listOf(old(1)), cdn.fetched.toList(), "no request after the 429")
+        assertEquals(emptyList(), mediaInfoCalls)
+        assertTrue(viewModel.carousel.value!!.state.items.all { it.failure == null }, "and nothing shows it")
+    }
+
+    /** P1: offline, the first picture ahead fails and the queue stops, instead of trying every other item one by one. */
+    @Test
+    fun beingOfflineStopsThePicturesFetchedAhead() = runTest {
+        storeCarousel()
+        val cdn = Cdn { throw IOException("no route") }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        viewModel.onSettled(carousel)
+        eventually { while (cdn.fetched.isEmpty()) delay(10) }
+        eventually { withTimeoutOrNull(1_000) { while (cdn.fetched.size == 1) delay(10) } }
+
+        assertEquals(listOf(old(1)), cdn.fetched.toList(), "no request after the first failure")
+        assertEquals(emptyList(), mediaInfoCalls)
+    }
+
+    /**
+     * The owner settles on item 4 while the queue's first download is out, and item 4's own load fails (its link and the renewed
+     * one are both refused), then swipes back to item 3, which puts item 4 first in what is left. The queue does not try item 4
+     * again: the item says why, once a visit.
+     */
+    @Test
+    fun anItemWhoseOwnLoadFailedIsNotFetchedAheadAgain() = runTest {
+        storeCarousel()
+        val cdn = Cdn { url -> if (url == old(4) || url == "fake://thumb/$pk-4") null else byteArrayOf(1, 2, 3) }.apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        viewModel.onSettled(carousel)
+        eventually { while (cdn.fetched.isEmpty()) delay(10) }
+
+        viewModel.onItemSettled(pk, 4)
+        assertEquals("Can't load this item", viewModel.awaitCarousel { it.items[4].failure != null }.items[4].failure)
+        viewModel.onItemSettled(pk, 3)
+        cdn.release(old(1))
+        viewModel.awaitCarousel { it.shows(ahead - 4) }
+
+        assertEquals(listOf(old(4), "fake://thumb/$pk-4"), cdn.fetched.filter { it == old(4) || it.endsWith("-4") }, "item 4's own tries only")
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "its own renewal, the visit's one request")
+    }
+
+    /**
+     * F1, once a visit: item 4's own load fails (the CDN's 429, which renews nothing), and settling on it again in the same visit
+     * does not download it again: the item says why until the post is shown again.
+     */
+    @Test
+    fun aFailedItemSettledAgainIsNotDownloadedAgain() = runTest {
+        storeCarousel()
+        val cdn = Cdn { url -> if (url == old(4)) throw CdnRateLimited() else byteArrayOf(1, 2, 3) }.apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) } // the queue's first download, held
+            viewModel.onItemSettled(pk, 4)
+            assertEquals("Can't load this item", viewModel.awaitCarousel { it.items[4].failure != null }.items[4].failure)
+
+            viewModel.onItemSettled(pk, 3)
+            viewModel.onItemSettled(pk, 4)
+            runCurrent()
+            eventually { withTimeoutOrNull(1_000) { while (cdn.fetched.count { it == old(4) } == 1) delay(10) } }
+
+            assertEquals(1, cdn.fetched.count { it == old(4) }, "no new download for the failed item")
+        } finally {
+            cdn.releaseAll()
+        }
+    }
+
+    /**
+     * The queue has one download out, held: the item the owner settles on still loads, on the lane's other slot, without waiting
+     * for it (two downloads ahead at once would take both slots and keep the item on screen black).
+     */
+    @Test
+    fun theItemOnScreenIsNotStuckBehindThePicturesFetchedAhead() = runTest {
+        storeCarousel()
+        val cdn = Cdn().apply { ahead.filter { it != 4 }.forEach { hold(old(it)) } }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) }
+
+            viewModel.onItemSettled(pk, 4)
+
+            assertTrue(viewModel.awaitCarousel { it.items[4].imagePath != null }.items[4].imagePath!!.isNotEmpty())
+            assertEquals(listOf(old(1), old(4)), cdn.fetched.toList(), "item 1's download is still out")
+        } finally {
+            cdn.releaseAll()
+        }
+    }
+
+    /** F5: another post's item settle loads nothing in this visit, while this post's pictures are not all shown yet. */
+    @Test
+    fun anotherPostsItemSettleLoadsNothingHere() = runTest {
+        storeCarousel()
+        storeOther()
+        val cdn = Cdn().apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) }
+
+            viewModel.onItemSettled(other.pk, 3)
+            runCurrent()
+            eventually { withTimeoutOrNull(1_000) { while (cdn.fetched.size < 2) delay(10) } }
+
+            assertEquals(0, viewModel.carousel.value!!.state.settled)
+            assertEquals(listOf(old(1)), cdn.fetched.toList(), "only the queue's own download")
+        } finally {
+            cdn.releaseAll()
+        }
     }
 
     // --- nothing of one post reaches another ---
@@ -843,6 +1170,9 @@ class ViewerViewModelTest {
         viewModel.onSettled(carousel)
         viewModel.awaitCarousel { it.items.isNotEmpty() }
         viewModel.onItemSettled(pk, 2)
+        // R23: the settled post fetches its own pictures ahead; let that finish, so what follows is the other post's doing alone.
+        viewModel.awaitCarousel { it.shows(ahead) }
+        val before = fetched.toList()
 
         viewModel.onItemSettled(other.pk, 0)
         viewModel.onItemSettled(other.pk, 1)
@@ -850,7 +1180,8 @@ class ViewerViewModelTest {
 
         assertEquals(pk, viewModel.carousel.value!!.pk)
         assertEquals(2, viewModel.carousel.value!!.state.settled)
-        assertEquals(emptyList(), fetched.toList(), "no image fetched for a post nobody settled on")
+        assertEquals(before, fetched.toList(), "no image fetched for a post nobody settled on")
+        assertTrue(fetched.none { other.pk in it }, "$fetched")
     }
 
     /** A unit of a carousel that is not the settled post resolves to nothing and recovers nothing: never through this visit. */
@@ -901,7 +1232,8 @@ class ViewerViewModelTest {
             reply.complete(Unit)
 
             viewModel.awaitCarousel { it.items.firstOrNull()?.imagePath != null }
-            assertEquals(listOf("fake://thumb/$pk-0"), fetched.toList())
+            // The queue of R23 never takes item 0, so only the settled item's own download, by the newer row's rule, fetched it.
+            assertEquals(1, fetched.count { it == "fake://thumb/$pk-0" }, "$fetched")
             assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls, "the same visit")
         } finally {
             reply.complete(Unit)
@@ -1516,6 +1848,45 @@ class ViewerViewModelTest {
                 }
             }
             return if (forceRefresh) forcedAnswer else VideoSource.Play(Uri.parse("https://video.example.test/${media.pk}.mp4"), media.pk)
+        }
+    }
+
+    /**
+     * The CDN of the R23 tests: [answer] says what each download brings; one of a link in [hold] waits until it is released.
+     * It records every download, every one cancelled, and the most that were out at once (each takes [takes] ms of virtual time).
+     */
+    private class Cdn(private val answer: (String) -> ByteArray? = { byteArrayOf(1, 2, 3) }) : MediaFetcher {
+        val fetched: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        val cancelled: MutableList<String> = Collections.synchronizedList(mutableListOf())
+        var takes = 0L
+        private val gates = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+        private val out = AtomicInteger()
+
+        /** The most downloads that were out at once. */
+        val mostOut = AtomicInteger()
+
+        fun hold(url: String) {
+            gates[url] = CompletableDeferred()
+        }
+
+        fun release(url: String) = gates[url]?.complete(Unit)
+
+        /** So a test that fails half way cannot leave a download waiting for ever. */
+        fun releaseAll() = gates.values.forEach { it.complete(Unit) }
+
+        override suspend fun fetch(url: String): ByteArray? {
+            fetched += url
+            mostOut.accumulateAndGet(out.incrementAndGet(), ::maxOf)
+            try {
+                gates[url]?.await()
+                if (takes > 0) delay(takes)
+            } catch (e: CancellationException) {
+                cancelled += url
+                throw e
+            } finally {
+                out.decrementAndGet()
+            }
+            return answer(url)
         }
     }
 

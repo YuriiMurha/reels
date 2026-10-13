@@ -17,6 +17,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.cancellation.CancellationException
 
 /** A carousel post's items, as the viewer gets them from [CarouselRepository.items]. */
@@ -37,6 +38,21 @@ sealed interface ItemImage {
     data class Failed(val message: String) : ItemImage
 }
 
+/** What [CarouselRepository.prefetchImage] did for one item (R23, R25): what the queue of pictures fetched ahead does next. */
+sealed interface ImageAhead {
+    /** The item's picture is on disk at [path]: it was already, or it was just downloaded. */
+    data class Shown(val path: String) : ImageAhead
+
+    /** Nothing to fetch for this item (the cover, a video item, past the last item, no stored items): go on with the next. */
+    data object Skipped : ImageAhead
+
+    /**
+     * Fetch nothing more ahead in this visit: the CDN said 429, the network is down, the post is gone, or a link was refused
+     * and the visit's one renewal could not help (spent on links that are refused too, or failed) (R25).
+     */
+    data object Stop : ImageAhead
+}
+
 /**
  * A carousel's items on demand (spec 2026-10-12 §3.3). Stored items are used as they are. A post with none (synced before
  * items were kept, or a reply that did not carry them, R2/R4) gets them from one `mediaInfo` ([PacedMediaInfo]: the
@@ -46,7 +62,10 @@ sealed interface ItemImage {
  * Pacing: a [Visit] allows ONE such request, the fill and the renewal together, whatever came of it (a failure, a cancelled
  * call): every other call in the visit uses what that one brought. Nothing here runs during a sync. Images download through
  * the cookieless CDN [MediaFetcher] on the Pacer's CDN lane, like the sync's thumbnails, into [images], so a viewed item shows
- * offline (R1). A video item plays from its link with its bytes cached under `{pk}_{position}` (spec §3.2).
+ * offline (R1). [prefetchImage] downloads an item's picture the same way before the owner swipes to it (R23: the viewer fetches
+ * a carousel's other pictures ahead, one at a time); a refused link may spend the visit's one request there too (R25), never
+ * a second one. A link the CDN refused is not requested again in the visit. A video item plays from its link with its bytes
+ * cached under `{pk}_{position}` (spec §3.2).
  *
  * Every call answers; none throws except [CancellationException]. A failure never deletes the post, its cover or its items.
  * The debug log ([log]) gets one line per request and per failed image, never a link or a pk.
@@ -79,6 +98,18 @@ class CarouselRepository(
     class Visit {
         internal val lock = Mutex()
         internal var renewal: Renewal? = null
+
+        /**
+         * R23: one download of an item at a time in this visit. [image] and [prefetchImage] both hold the item's lock, so an
+         * item asked for while its prefetch is out waits for that download and then finds its file. Apart from the visit's
+         * request: a prefetch asks for that only by [renewal]'s rule, as [image] does (R25).
+         */
+        private val downloads = ConcurrentHashMap<Int, Mutex>()
+
+        internal fun downloadOf(position: Int): Mutex = downloads.computeIfAbsent(position) { Mutex() }
+
+        /** R25: the links the CDN refused in this visit. None is requested again in it, by a prefetch or by the item's own load. */
+        internal val refused: MutableSet<String> = ConcurrentHashMap.newKeySet()
     }
 
     /** Stored items; when none, one paced `mediaInfo` fills them (once a [visit]). Not a carousel: [ItemsResult.CoverOnly] (null). */
@@ -90,13 +121,39 @@ class CarouselRepository(
         ItemsResult.CoverOnly(CANT_LOAD)
     }
 
-    /** The image file of item [position], downloaded on demand; a refused or missing link renews the post's links once a [visit]. */
+    /**
+     * The image file of item [position], downloaded on demand; a refused or missing link renews the post's links once a [visit].
+     * While the item's [prefetchImage] is out it waits for it, and then serves the file it stored; if it stored none, the item
+     * is loaded as if there had been no prefetch, except that a link refused in this visit is not asked for again (R25): the
+     * item goes straight to the visit's renewal.
+     */
     suspend fun image(media: MediaEntity, position: Int, visit: Visit): ItemImage = try {
         loadImage(media, position, visit)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
         ItemImage.Failed(CANT_LOAD)
+    }
+
+    /**
+     * R23: item [position]'s picture, downloaded before the owner swipes to it (the viewer calls this for a carousel's other
+     * pictures, one at a time). Only an IMAGE item past the cover (item 0 shows the stored cover, R10) with stored items, of a
+     * post still in the library, through the CDN lane with the same fetcher and store as [image]; it shares the visit's
+     * per-item download lock with [image], so the two never download one item twice.
+     *
+     * Pacing (R25): it never fills. A refused link (or none) may spend the [visit]'s one renewal by the same rule as [image]
+     * (the first call that needs it sends it, every later one shares what it brought), and the item then loads from its
+     * renewed link. A renewal spent already on the links stored now, or failed, stops the queue ([ImageAhead.Stop]), and so do
+     * the CDN's 429, offline and a post gone (P1). A failure never shows: the item's own load says why once the owner gets
+     * there. Throws only [CancellationException].
+     */
+    suspend fun prefetchImage(media: MediaEntity, position: Int, visit: Visit): ImageAhead = try {
+        loadAhead(media, position, visit)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // Unforeseen (an unsafe key, a failing store): every other item would meet it too.
+        ImageAhead.Stop
     }
 
     /**
@@ -140,22 +197,73 @@ class CarouselRepository(
     private suspend fun loadImage(media: MediaEntity, position: Int, visit: Visit): ItemImage {
         // Not a carousel: no items to fill, so no request (a reel's link is the video resolver's).
         if (media.type != MediaType.CAROUSEL) return ItemImage.Failed(CANT_LOAD)
+        // R23: the item's prefetch may be out. Its lock makes this wait for it and then find its file, not download it again.
+        return visit.downloadOf(position).withLock { loadImageNow(media, position, visit) }
+    }
+
+    /** The item's own load, holding its download lock. [again]: its link was replaced while it downloaded, so it reads once more. */
+    private suspend fun loadImageNow(media: MediaEntity, position: Int, visit: Visit, again: Boolean = true): ItemImage {
         val pk = media.pk
         withContext(ioDispatcher) { images.path(pk, position) }?.let { return ItemImage.File(it) }
         val item = storedItem(pk, position) ?: when (val renewal = renewal(media, visit, FILL)) {
             is Renewal.Failed -> return ItemImage.Failed(renewal.message)
             is Renewal.Items -> renewal.items.at(position) ?: return ItemImage.Failed(CANT_LOAD)
         }
-        val first = download(pk, position, item.imageUrl)
+        val first = download(pk, position, item.imageUrl, visit)
+        // P2: the post's items were replaced while it downloaded (a renewal, a sync): the item as stored now loads instead.
+        if (first == Download.Replaced && again) return loadImageNow(media, position, visit, again = false)
         if (first != Download.Refused) return first.toImage()
-        // The CDN refused the link (it expired), or there is none: the post's links are renewed, once a visit.
+        // The CDN refused the link (it expired), now or earlier in the visit (R25), or there is none: the post's links are
+        // renewed, once a visit.
         val renewed = when (val renewal = renewal(media, visit, RENEW)) {
             is Renewal.Failed -> return ItemImage.Failed(renewal.message)
             is Renewal.Items -> renewal.items.at(position)
         }
         // Only a new link is worth a download: the one just refused would be refused again.
         if (renewed == null || renewed.imageUrl == item.imageUrl) return ItemImage.Failed(CANT_LOAD)
-        return download(pk, position, renewed.imageUrl).toImage()
+        return download(pk, position, renewed.imageUrl, visit).toImage()
+    }
+
+    /** [prefetchImage]: the stored items only, never the fill, and at most the visit's one renewal (R25). */
+    private suspend fun loadAhead(media: MediaEntity, position: Int, visit: Visit): ImageAhead {
+        // Not a carousel: no items. Item 0: the stored cover shows it (R10). Neither is downloaded ahead.
+        if (media.type != MediaType.CAROUSEL || position <= 0) return ImageAhead.Skipped
+        return visit.downloadOf(position).withLock { loadAheadNow(media, position, visit) }
+    }
+
+    /** Holding the item's download lock. [again]: its link was replaced while it downloaded, so it reads once more. */
+    private suspend fun loadAheadNow(media: MediaEntity, position: Int, visit: Visit, again: Boolean = true): ImageAhead {
+        val pk = media.pk
+        withContext(ioDispatcher) { images.path(pk, position) }?.let { return ImageAhead.Shown(it) }
+        // The item as stored now, read under the lock (P2). None stored, or none at this position (past the last item):
+        // nothing is asked.
+        val item = storedItem(pk, position)?.takeIf { it.type == MediaType.IMAGE } ?: return ImageAhead.Skipped
+        // As for download's own check after the bytes: a post deleted or unsaved gets no download at all.
+        if (!isLive(pk)) return ImageAhead.Stop
+        return when (val first = download(pk, position, item.imageUrl, visit, PREFETCH_LOG)) {
+            Download.Refused -> renewAhead(media, position, item, visit)
+            Download.Replaced -> if (again) loadAheadNow(media, position, visit, again = false) else ImageAhead.Skipped
+            else -> first.toAhead()
+        }
+    }
+
+    /**
+     * R25: [item]'s link was refused ahead (or it has none). The visit's one renewal, by [renewal]'s rule: the first call that
+     * needs it sends it, a later one shares what it brought. A renewal that brings this item no other link (it was spent on
+     * the links stored now) or that failed stops the queue; one that brings a new link loads it, and the queue goes on.
+     */
+    private suspend fun renewAhead(media: MediaEntity, position: Int, item: CarouselItemEntity, visit: Visit): ImageAhead {
+        val renewed = when (val renewal = renewal(media, visit, RENEW)) {
+            is Renewal.Failed -> return ImageAhead.Stop
+            is Renewal.Items -> renewal.items.at(position)
+        }
+        // R20's new shape has no image here any more: nothing to fetch for it, and the rest has fresh links.
+        if (renewed == null || renewed.type != MediaType.IMAGE) return ImageAhead.Skipped
+        if (renewed.imageUrl == item.imageUrl) return ImageAhead.Stop
+        return when (val second = download(media.pk, position, renewed.imageUrl, visit, PREFETCH_LOG)) {
+            Download.Replaced -> ImageAhead.Skipped
+            else -> second.toAhead()
+        }
     }
 
     private suspend fun loadVideo(media: MediaEntity, position: Int, visit: Visit, forceRefresh: Boolean): VideoSource {
@@ -242,29 +350,41 @@ class CarouselRepository(
         }
     }
 
-    /** Downloads [url] on the CDN lane into the image store. An empty [url] (Instagram sent no image) is refused without a request. */
-    private suspend fun download(pk: String, position: Int, url: String): Download {
-        if (url.isEmpty()) return failedImage(Download.Refused, "no link")
+    /**
+     * Downloads [url] on the CDN lane into the image store. An empty [url] (Instagram sent no image), or one the CDN refused
+     * earlier in the [visit] (R25), is refused without a request. A failure is logged under [what] (an on-demand image, or a
+     * prefetch).
+     */
+    private suspend fun download(pk: String, position: Int, url: String, visit: Visit, what: String = IMAGE_LOG): Download {
+        if (url.isEmpty()) return failedImage(Download.Refused, what, "no link")
+        if (url in visit.refused) return failedImage(Download.Refused, what, "refused before")
         val bytes = try {
             pacer.cdn { fetcher.fetch(url) }
         } catch (e: CdnRateLimited) {
-            return failedImage(Download.Failed, "cdn limit")
+            return failedImage(Download.Limited, what, "cdn limit")
         } catch (e: IOException) {
-            return failedImage(Download.Offline, "offline")
+            return failedImage(Download.Offline, what, "offline")
         }
-        if (bytes == null) return failedImage(Download.Refused, "refused")
+        if (bytes == null) {
+            visit.refused += url
+            return failedImage(Download.Refused, what, "refused")
+        }
         // A post deleted (Delete library) or unsaved (a sync's reconcile, whose eviction may already have run) while its image
         // was on the way keeps no file behind: nothing would remove it later. The check and the write are not one step, so a
         // delete in between can still leave one; it only takes space until the next Delete library.
-        if (!isLive(pk)) return failedImage(Download.Failed, "post gone")
+        if (!isLive(pk)) return failedImage(Download.Gone, what, "post gone")
+        // P2: the post's items were replaced while this downloaded (a renewal or a sync, whose R20 drop may already have removed
+        // the post's pictures). Bytes of a link no longer stored at this position may be another slide's: none is written. The
+        // same gap as above remains between this check and the write.
+        if (storedItem(pk, position)?.imageUrl != url) return failedImage(Download.Replaced, what, "link replaced")
         return Download.Stored(withContext(ioDispatcher) { images.write(pk, position, bytes) })
     }
 
     /** True while the post [pk] is in the library: stored, and not marked removed. Every viewer list shows only such posts. */
     private suspend fun isLive(pk: String): Boolean = mediaDao.byPks(listOf(pk)).singleOrNull()?.let { it.removedAt == null } == true
 
-    private fun failedImage(download: Download, reason: String): Download {
-        log?.invoke("carousel image failed ($reason)")
+    private fun failedImage(download: Download, what: String, reason: String): Download {
+        log?.invoke("$what failed ($reason)")
         return download
     }
 
@@ -287,19 +407,32 @@ class CarouselRepository(
     private sealed interface Download {
         data class Stored(val path: String) : Download
 
-        /** The CDN refused the link (403, 404, 410), or there is none: a renewal may bring a better one. */
+        /** The CDN refused the link (403, 404, 410), now or earlier in the visit, or there is none: a renewal may bring a better one. */
         data object Refused : Download
 
         data object Offline : Download
 
         /** The CDN is limiting requests (429): a renewal would not help. */
-        data object Failed : Download
+        data object Limited : Download
+
+        /** The post left the library while its picture downloaded. */
+        data object Gone : Download
+
+        /** P2: the item's stored link changed while it downloaded; the bytes were not written. */
+        data object Replaced : Download
     }
 
     private fun Download.toImage(): ItemImage = when (this) {
         is Download.Stored -> ItemImage.File(path)
         Download.Offline -> ItemImage.Failed(OFFLINE)
-        Download.Refused, Download.Failed -> ItemImage.Failed(CANT_LOAD)
+        Download.Refused, Download.Limited, Download.Gone, Download.Replaced -> ItemImage.Failed(CANT_LOAD)
+    }
+
+    /** For the queue of pictures fetched ahead: a picture shown, an item to pass, or nothing more in this visit (P1). */
+    private fun Download.toAhead(): ImageAhead = when (this) {
+        is Download.Stored -> ImageAhead.Shown(path)
+        Download.Replaced -> ImageAhead.Skipped
+        Download.Refused, Download.Offline, Download.Limited, Download.Gone -> ImageAhead.Stop
     }
 
     private companion object {
@@ -308,6 +441,8 @@ class CarouselRepository(
         const val GONE = "This item is no longer available on Instagram"
         const val FILL = "carousel fill"
         const val RENEW = "carousel renew"
+        const val IMAGE_LOG = "carousel image"
+        const val PREFETCH_LOG = "carousel prefetch"
 
         /** What a visit holds while its request is out, and keeps if that call never finishes. */
         val SPENT = Renewal.Failed(CANT_LOAD)

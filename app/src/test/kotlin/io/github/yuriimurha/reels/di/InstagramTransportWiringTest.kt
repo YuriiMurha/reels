@@ -8,6 +8,7 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.media.CarouselRepository
+import io.github.yuriimurha.reels.data.media.ImageAhead
 import io.github.yuriimurha.reels.data.media.ItemImage
 import io.github.yuriimurha.reels.data.media.ItemsResult
 import io.github.yuriimurha.reels.data.media.VideoSource
@@ -15,13 +16,17 @@ import io.github.yuriimurha.reels.data.media.sampleClipUri
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
+import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import java.util.concurrent.atomic.AtomicInteger
 import java.io.File
 import kotlin.test.assertIs
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.testutil.MainThreadTimeout
 import android.os.Looper
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -185,6 +190,69 @@ class InstagramTransportWiringTest {
         assertEquals(VideoSource.Play(sampleClipUri(context.packageName), "${post.pk}_2"), video)
         assertEquals(realRequestsBefore, container.instagramPacer.status().requestsLast24h, "the real budget did not move")
         assertFalse(container.instagramTransportCreated, "a Mock mode carousel visit built the transport")
+    }
+
+    /**
+     * R23 in Mock mode: a picture fetched ahead comes from the fake fetcher on the fake backend's own CDN lane, as an on-demand
+     * one does: the placeholder is stored, nothing more goes to the fake client, the real budget does not move and the transport
+     * is never built.
+     */
+    @Test
+    fun aMockModePrefetchStoresTheFakeFetchersPlaceholderAndAsksNothing() = runBlocking {
+        val container = container(useFake = true)
+        val fake = container.backend.client as FakeInstagramClient
+        val post = fake.library.allSaved().first { it.type == MediaType.CAROUSEL && (it.carouselCount ?: 0) >= 3 }
+        val media = MediaEntity(
+            pk = post.pk, code = post.code, type = post.type, author = post.author, caption = post.caption, takenAt = 0,
+            width = post.width, height = post.height, carouselCount = post.carouselCount, thumbPath = null, thumbUrl = post.thumbnailUrl,
+            videoUrl = null, videoUrlExpiresAt = null, collectionNames = "", firstSeenAt = 0, lastSeenAt = 0, removedAt = null,
+        )
+        container.db.mediaDao().upsert(listOf(media))
+        val realRequestsBefore = container.instagramPacer.status().requestsLast24h
+        val visit = CarouselRepository.Visit()
+        assertIs<ItemsResult.Items>(container.carouselRepository.items(media, visit))
+
+        val path = assertIs<ImageAhead.Shown>(container.carouselRepository.prefetchImage(media, 1, visit)).path
+
+        assertTrue(File(path).length() > 0, "the fake fetcher's placeholder was stored: $path")
+        assertEquals(ItemImage.File(path), container.carouselRepository.image(media, 1, visit), "and the item's own load serves it")
+        assertEquals(listOf("mediaInfo:${post.pk}"), fake.calls, "only the fill went to the fake client")
+        assertEquals(realRequestsBefore, container.instagramPacer.status().requestsLast24h, "the real budget did not move")
+        assertFalse(container.instagramTransportCreated, "a Mock mode prefetch built the transport")
+    }
+
+    /**
+     * F6: Mock mode's pictures, ahead or on demand, take the fake backend's own CDN lane, never the real Pacer's: with both of
+     * the real lane's slots held, a prefetch still stores its placeholder.
+     */
+    @Test
+    fun aMockModePrefetchNeverWaitsOnTheRealPacersCdnLane() = runBlocking {
+        val container = container(useFake = true)
+        val fake = container.backend.client as FakeInstagramClient
+        val post = fake.library.allSaved().first { it.type == MediaType.CAROUSEL && (it.carouselCount ?: 0) >= 3 }
+        val media = MediaEntity(
+            pk = post.pk, code = post.code, type = post.type, author = post.author, caption = post.caption, takenAt = 0,
+            width = post.width, height = post.height, carouselCount = post.carouselCount, thumbPath = null, thumbUrl = post.thumbnailUrl,
+            videoUrl = null, videoUrlExpiresAt = null, collectionNames = "", firstSeenAt = 0, lastSeenAt = 0, removedAt = null,
+        )
+        container.db.mediaDao().upsert(listOf(media))
+        val visit = CarouselRepository.Visit()
+        assertIs<ItemsResult.Items>(container.carouselRepository.items(media, visit))
+        val gate = CompletableDeferred<Unit>()
+        val taken = AtomicInteger()
+        val slots = PacingPolicy.Conservative.cdnConcurrency
+        val blockers = List(slots) { launch(Dispatchers.Default) { container.instagramPacer.cdn { taken.incrementAndGet(); gate.await() } } }
+        try {
+            withTimeout(5_000) { while (taken.get() < slots) delay(10) }
+
+            val ahead = withTimeout(5_000) { container.carouselRepository.prefetchImage(media, 1, visit) }
+
+            val path = assertIs<ImageAhead.Shown>(ahead).path
+            assertTrue(File(path).length() > 0, "stored without the real lane: $path")
+        } finally {
+            gate.complete(Unit)
+            blockers.forEach { it.join() }
+        }
     }
 
     /** Turns the main looper (so work posted to the main thread runs) until [condition] holds or [timeoutMs] passes. */

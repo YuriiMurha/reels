@@ -9,6 +9,7 @@ import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.media.CarouselRepository
+import io.github.yuriimurha.reels.data.media.ImageAhead
 import io.github.yuriimurha.reels.data.media.ItemImage
 import io.github.yuriimurha.reels.data.media.ItemsResult
 import io.github.yuriimurha.reels.data.media.VideoSource
@@ -119,7 +120,11 @@ class ViewerViewModel(
         next?.start()
     }
 
-    /** The pager of the carousel post [pk] settled on the item at [position]: that item's image is fetched, if it needs one. */
+    /**
+     * The pager of the carousel post [pk] settled on the item at [position]: that item's image is fetched, if it needs one, and
+     * the visit's queue of pictures fetched ahead (R23) takes the items after it first from now on. Nothing for any other post,
+     * and never the next post's prefetch (R11).
+     */
     fun onItemSettled(pk: String, position: Int) {
         val current = carouselVisit?.takeIf { it.media.pk == pk } ?: return
         current.update { it.copy(settled = position) }
@@ -229,8 +234,9 @@ class ViewerViewModel(
 
     /**
      * One visit of a carousel post (R8): ONE [CarouselRepository.Visit] (one `mediaInfo` at most, the fill and every renewal
-     * together), and a scope that only leaving the post cancels. The fill, the images and the items' video resolves all run
-     * there, so an item swipe (which cancels the settle that waits for them) never cancels a call that may have spent the visit.
+     * together), and a scope that only leaving the post cancels. The fill, the images, the queue of pictures fetched ahead
+     * (R23) and the items' video resolves all run there, so an item swipe (which cancels the settle that waits for them) never
+     * cancels a call that may have spent the visit.
      */
     private inner class CarouselVisit(media: MediaEntity) {
         /** The post's row as last settled: a re-settle in place brings the newer one, which the visit's later calls use. */
@@ -245,6 +251,9 @@ class ViewerViewModel(
         /** Pages whose image was asked for in this visit: once each (a failure says so until the post is shown again). */
         private val imagesAsked = HashSet<Int>()
 
+        /** R23: pages the queue of pictures fetched ahead has taken, done or out: each once a visit, whatever came of it. */
+        private val fetchedAhead = HashSet<Int>()
+
         /** Pages whose video link was renewed after the player refused it, in this visit. */
         val refreshed = HashSet<Int>()
 
@@ -255,6 +264,45 @@ class ViewerViewModel(
                     is ItemsResult.CoverOnly -> update { it.copy(coverOnlyMessage = result.message, loading = false) }
                 }
                 current()?.let { loadImage(it.settled) }
+                fetchAhead()
+            }
+        }
+
+        /**
+         * R23: the post's other pictures, downloaded while the owner looks at it, ONE at a time: the CDN lane allows two, so the
+         * second stays free for the item on screen ([loadImage]). Each turn takes the next page by the settled item as it is
+         * then, so an item settle reorders what is left without restarting it or cancelling the download that is out. Only
+         * image items past the cover, and none shown or asked for on demand already; through [CarouselRepository.prefetchImage]
+         * alone, whose only request to Instagram is the visit's one renewal for a refused link (R25), and a picture that does
+         * not come never shows a failure (its item says why once it settles). It ends when nothing is left, when the
+         * repository says to stop (the CDN's 429, offline, a post gone, a refusal the renewal cannot help: P1, R25), or with the
+         * visit.
+         */
+        private suspend fun fetchAhead() {
+            while (true) {
+                val page = nextAhead() ?: return
+                fetchedAhead += page
+                val position = current()?.items?.getOrNull(page)?.position ?: return
+                when (val ahead = carousels.prefetchImage(media, position, visit)) {
+                    is ImageAhead.Shown -> update { state -> state.withItem(page) { it.copy(imagePath = ahead.path) } }
+                    ImageAhead.Skipped -> Unit
+                    ImageAhead.Stop -> return
+                }
+            }
+        }
+
+        /**
+         * The page to fetch ahead next, or null: the items after the settled one in order, then those before it, the nearest
+         * first. Never item 0 (the cover, R10), a video item (it streams and is cached as it plays), a picture already shown,
+         * one the item's own [loadImage] asked for, or one taken before.
+         */
+        private fun nextAhead(): Int? {
+            val state = current() ?: return null
+            val settled = state.settled.coerceIn(0, state.items.size)
+            val order = (settled + 1 until state.items.size) + (settled - 1 downTo 1)
+            return order.firstOrNull { page ->
+                val item = state.items[page]
+                item.type == MediaType.IMAGE && item.imagePath == null && page !in imagesAsked && page !in fetchedAhead
             }
         }
 
@@ -269,8 +317,9 @@ class ViewerViewModel(
         }
 
         /**
-         * Item [index]'s image, on demand. Item 0's is the cover the sync stored (taken from the first item, by the same rule),
-         * so it is only fetched for a post without one. A video item has none to fetch.
+         * Item [index]'s image, on demand, once a visit. Item 0's is the cover the sync stored (taken from the first item, by the
+         * same rule), so it is only fetched for a post without one. A video item has none to fetch, and a picture the queue
+         * fetched ahead (R23) is shown already. If the queue's download of this very item is out, the repository waits for it.
          */
         fun loadImage(index: Int) {
             val item = current()?.items?.getOrNull(index) ?: return
@@ -282,7 +331,7 @@ class ViewerViewModel(
                     is ItemImage.File -> { entry -> entry.copy(imagePath = image.path) }
                     is ItemImage.Failed -> { entry -> entry.copy(failure = image.message) }
                 }
-                update { state -> state.copy(items = state.items.mapIndexed { i, entry -> if (i == index) shown(entry) else entry }) }
+                update { state -> state.withItem(index, shown) }
             }
         }
 
@@ -307,5 +356,9 @@ class ViewerViewModel(
     private companion object {
         /** No width or height: they may be 0 or mixed (Task 1), and the viewer fits every item instead of sizing from them. */
         fun toUi(item: CarouselItemEntity) = CarouselItemUi(item.position, item.type)
+
+        /** The state with the item at page [index] changed by [change]; unchanged if there is none. */
+        fun CarouselUiState.withItem(index: Int, change: (CarouselItemUi) -> CarouselItemUi): CarouselUiState =
+            copy(items = items.mapIndexed { i, entry -> if (i == index) change(entry) else entry })
     }
 }
