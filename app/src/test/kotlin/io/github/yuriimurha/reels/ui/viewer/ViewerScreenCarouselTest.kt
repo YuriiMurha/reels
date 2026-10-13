@@ -18,10 +18,12 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeRight
 import androidx.compose.ui.test.swipeUp
+import androidx.media3.common.FlagSet
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -122,6 +124,16 @@ class ViewerScreenCarouselTest {
         override fun addListener(listener: Player.Listener) {
             listeners += listener
             super.addListener(listener)
+        }
+
+        /** What Media3 tells its listeners when the first frame of the item it plays reaches the surface (R26: the poster goes). */
+        @androidx.annotation.OptIn(UnstableApi::class)
+        fun renderFirstFrame() {
+            val events = Player.Events(FlagSet.Builder().add(Player.EVENT_RENDERED_FIRST_FRAME).build())
+            for (listener in listeners.toList()) {
+                listener.onRenderedFirstFrame()
+                listener.onEvents(this, events)
+            }
         }
     }
 
@@ -231,6 +243,27 @@ class ViewerScreenCarouselTest {
         awaitUntil("item 2 of 3 again") { displayedWith(CAROUSEL_COUNTER_TAG, "2/3") }
         awaitUntil("the player to leave the video item") { compose.onAllNodesWithTag(VIDEO_SURFACE_TAG).fetchSemanticsNodes().isEmpty() }
         assertEquals(listOf("stop", "clear"), since(mark), "back on an image: stopped, so no sound goes on under it")
+    }
+
+    /**
+     * R26, end to end in Mock mode: opening A fetches its video item's poster with its pictures (the fake CDN's placeholder),
+     * and when the owner swipes to that item, the poster covers the video until the player renders its first frame.
+     */
+    @Test
+    fun aVideoItemShowsItsPosterFetchedAheadUntilItsFirstFrame() {
+        onCarouselA()
+        awaitUntil("the video item's poster, fetched ahead") { container.carouselImages.path(a.pk, 2) != null }
+        repeat(2) { i ->
+            pager().performTouchInput { swipeLeft() }
+            awaitUntil("A's item ${i + 2} of 3") { displayedWith(CAROUSEL_COUNTER_TAG, "${i + 2}/3") }
+        }
+        awaitUntil("the video item to get the player") { player.events.lastOrNull() == "set:${a.pk}_2" && displayedWith(VIDEO_SURFACE_TAG) }
+        assertTrue(displayedWith(carouselPosterTag(2)), "its poster covers the surface until the first frame")
+
+        compose.runOnIdle { player.renderFirstFrame() }
+
+        awaitUntil("the poster to go") { !displayedWith(carouselPosterTag(2)) }
+        assertTrue(displayedWith(VIDEO_SURFACE_TAG), "the video shows")
     }
 
     /** Review Focus 1: the next carousel starts at its item 0, with nothing of A's item (no second settle, no video). */

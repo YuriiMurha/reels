@@ -12,6 +12,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -24,7 +25,10 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeUp
+import androidx.media3.common.FlagSet
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -345,6 +349,156 @@ class CarouselPagerTest {
         } finally {
             player.release()
         }
+    }
+
+    // --- R26: a video item's poster, until its first frame ---
+
+    /**
+     * A player that raises the first-frame event when the test says, as Media3 does when the first frame of the item it plays
+     * reaches the surface: `onRenderedFirstFrame`, and `onEvents` with `EVENT_RENDERED_FIRST_FRAME`, which `ContentFrame`'s
+     * shutter follows.
+     */
+    @androidx.annotation.OptIn(UnstableApi::class)
+    private class FirstFramePlayer(player: Player) : ForwardingPlayer(player) {
+        private val listeners = mutableListOf<Player.Listener>()
+
+        override fun addListener(listener: Player.Listener) {
+            listeners += listener
+            super.addListener(listener)
+        }
+
+        override fun removeListener(listener: Player.Listener) {
+            listeners -= listener
+            super.removeListener(listener)
+        }
+
+        fun renderFirstFrame() {
+            val events = Player.Events(FlagSet.Builder().add(Player.EVENT_RENDERED_FIRST_FRAME).build())
+            for (listener in listeners.toList()) {
+                listener.onRenderedFirstFrame()
+                listener.onEvents(this, events)
+            }
+        }
+    }
+
+    /** The items' pictures as the queue fetched them: an image for item 1, a poster for each video item. */
+    private val withPosters = listOf(
+        CarouselItemUi(0, MediaType.IMAGE),
+        CarouselItemUi(1, MediaType.VIDEO, imagePath = "/carousel/1000001_1.jpg"),
+        CarouselItemUi(2, MediaType.VIDEO, imagePath = "/carousel/1000001_2.jpg"),
+    )
+
+    private fun displayed(tag: String): Boolean {
+        val nodes = compose.onAllNodesWithTag(tag)
+        return (0 until nodes.fetchSemanticsNodes().size).any { runCatching { nodes[it].isDisplayed() }.getOrDefault(false) }
+    }
+
+    private fun withPlayer(test: (FirstFramePlayer) -> Unit) {
+        val exo = ExoPlayer.Builder(ApplicationProvider.getApplicationContext()).build()
+        try {
+            test(FirstFramePlayer(exo))
+        } finally {
+            exo.release()
+        }
+    }
+
+    /** The settled video item shows its poster over the surface until the player renders its first frame; then the video shows. */
+    @Test
+    fun aVideoItemsPosterShowsUntilItsFirstFrameThenGoes() = withPlayer { player ->
+        state = CarouselUiState(items = withPosters, settled = 1)
+        showPager(player = player)
+        compose.onNodeWithTag(VIDEO_SURFACE_TAG).assertIsDisplayed()
+        assertTrue(displayed(carouselPosterTag(1)), "the poster covers the surface")
+
+        compose.runOnIdle { player.renderFirstFrame() }
+
+        compose.waitForIdle()
+        assertTrue(!displayed(carouselPosterTag(1)), "the first frame is there: the poster goes")
+        compose.onNodeWithTag(VIDEO_SURFACE_TAG).assertIsDisplayed()
+    }
+
+    /**
+     * Each video item's poster is its own: when the visit moves on to the next video item, that item shows ITS poster, never
+     * the item before's, and the first frame of the item before does not count for it: its poster stays until its own.
+     */
+    @Test
+    fun theNextVideoItemShowsItsOwnPosterUntilItsOwnFirstFrame() = withPlayer { player ->
+        state = CarouselUiState(items = withPosters, settled = 1)
+        showPager(player = player)
+        compose.runOnIdle { player.renderFirstFrame() }
+        compose.waitForIdle()
+        assertTrue(!displayed(carouselPosterTag(1)) && !displayed(carouselPosterTag(2)), "item 1 plays; no poster shows")
+
+        state = state.copy(settled = 2) // the owner swipes to the next video item; the screen hands it the player
+
+        compose.onNodeWithTag(CAROUSEL_COUNTER_TAG).assertTextEquals("3/3")
+        compose.onNodeWithTag(VIDEO_SURFACE_TAG).assertIsDisplayed()
+        assertTrue(displayed(carouselPosterTag(2)), "item 2's own poster, until its own first frame")
+        assertTrue(!displayed(carouselPosterTag(1)), "never item 1's")
+
+        compose.runOnIdle { player.renderFirstFrame() }
+        compose.waitForIdle()
+        assertTrue(!displayed(carouselPosterTag(2)), "item 2's first frame: its poster goes")
+    }
+
+    /** A video item that cannot play (the screen takes the player away) keeps its poster, under the message that says why. */
+    @Test
+    fun aVideoItemThatCannotPlayKeepsItsPosterUnderTheMessage() {
+        state = CarouselUiState(
+            items = withPosters.map { if (it.position == 1) it.copy(failure = "Can't load this item") else it },
+            settled = 1,
+        )
+        showPager(player = null)
+
+        assertTrue(displayed(carouselPosterTag(1)), "the poster stays")
+        compose.onNodeWithText("Can't load this item").assertIsDisplayed()
+        compose.onAllNodesWithTag(VIDEO_SURFACE_TAG).assertCountEquals(0)
+    }
+
+    /**
+     * Each poster is its own because only the settled video item gets the player: mid-swipe between two video items, both
+     * pages are on screen, and only one draws the surface (two frames on one player would let one item's first frame lower
+     * both shutters).
+     */
+    @Test
+    fun midSwipeOnlyTheSettledVideoItemHasASurface() = withPlayer { player ->
+        state = CarouselUiState(items = withPosters, settled = 1)
+        showPager(player = player)
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(CAROUSEL_PAGER_TAG).performTouchInput {
+            down(center)
+            moveBy(Offset(-width * 0.2f, 0f))
+            moveBy(Offset(-width * 0.2f, 0f))
+        }
+        compose.waitForIdle()
+
+        assertTrue(displayed(carouselPosterTag(2)), "precondition: item 2 is on screen too")
+        compose.onAllNodesWithTag(VIDEO_SURFACE_TAG).assertCountEquals(1)
+    }
+
+    /** A video item 0 has no poster of its own: the post's cover covers its surface until the first frame. */
+    @Test
+    fun aVideoItemZeroShowsTheCoverUntilItsFirstFrame() = withPlayer { player ->
+        state = CarouselUiState(items = listOf(CarouselItemUi(0, MediaType.VIDEO), CarouselItemUi(1, MediaType.IMAGE)), settled = 0)
+        showPager(player = player)
+        compose.onNodeWithTag(VIDEO_SURFACE_TAG).assertIsDisplayed()
+        assertTrue(displayed(CAROUSEL_COVER_TAG), "the cover covers the surface")
+
+        compose.runOnIdle { player.renderFirstFrame() }
+
+        compose.waitForIdle()
+        assertTrue(!displayed(CAROUSEL_COVER_TAG), "the first frame: the cover goes")
+    }
+
+    /** An image item's picture keeps the image tag: only a video item's is a poster. */
+    @Test
+    fun anImageItemsPictureIsNoPoster() {
+        state = CarouselUiState(items = threeItems.map { if (it.position == 1) it.copy(imagePath = "/carousel/1000001_1.jpg") else it }, settled = 1)
+        showPager()
+
+        assertTrue(displayed(carouselImageTag(1)))
+        compose.onAllNodesWithTag(carouselPosterTag(1)).assertCountEquals(0)
     }
 
     @Test

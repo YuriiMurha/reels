@@ -69,6 +69,7 @@ class VideoWiringGuardTest {
             "data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt",
             "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt", "ui/viewer/CarouselPager.kt",
             "data/media/PacedMediaInfo.kt", "data/media/CarouselRepository.kt", "data/media/CarouselImageStore.kt",
+            "data/media/VideoStarts.kt",
         )) {
             val hit = forbidden.find(main(path))
             assertTrue(hit == null, "$path must not use a cookie jar or the API client: ${hit?.value}")
@@ -91,6 +92,61 @@ class VideoWiringGuardTest {
         assertTrue(factory != null, "videoMediaSourceFactory must be defined in VideoCache.kt")
         assertTrue("cachedDataSourceFactory(" in factory, "it reads through the cache: $factory")
         assertTrue(Regex("""setLoadErrorHandlingPolicy\(\s*VideoLoadErrorPolicy\(\)\s*\)""").containsMatchIn(factory), "and never retries an HTTP error: $factory")
+    }
+
+    /**
+     * R26: the viewer's one player is built with `viewerLoadControl` (1 s to start, 2 s after a stall; `ViewerLoadControlTest`
+     * reads its values). No second player is built anywhere.
+     */
+    @Test
+    fun theViewersPlayerStartsOnTheViewersLoadControl() {
+        val screen = main("ui/viewer/ViewerScreen.kt")
+        val controls = callArguments(screen, "setLoadControl(")
+        assertEquals(listOf("viewerLoadControl()"), controls.map { it.trim() }, "the viewer's player's load control")
+        assertEquals(1, Regex("""ExoPlayer\.Builder\(""").findAll(screen).count(), "one player, built where it always was")
+
+        val control = Regex("""fun viewerLoadControl\(\)[^=]*=([^\n]*\n){1,8}""").find(main("data/media/VideoCache.kt"))?.value
+        assertTrue(control != null, "viewerLoadControl must be defined in VideoCache.kt")
+        val durations = callArguments(control, "setBufferDurationsMsForStreaming(").single()
+        assertTrue("START_BUFFER_MS" in durations && "RESTART_BUFFER_MS" in durations, "the streaming durations: $durations")
+        assertTrue("setBufferDurationsMs(" !in control, "the local playback values stay Media3's: $control")
+    }
+
+    /**
+     * R26: a carousel's video starts are written through the player's own cookieless stack: the container gives the carousel
+     * repository a [VideoStarts] over the one video cache, built by `videoStartDataSourceFactory` with the player's user agent,
+     * and that factory is `cachedDataSourceFactory`, the player's, with only its one-try upstream added.
+     */
+    @Test
+    fun videoStartsAreWrittenThroughThePlayersOwnStack() {
+        val container = main("di/AppContainer.kt")
+        val repository = callArguments(container, "CarouselRepository(").single()
+        assertTrue(Regex("""\bstarts\s*=\s*videoStarts\b""").containsMatchIn(repository), "the repository writes starts: $repository")
+        val starts = callArguments(container, "CacheVideoStarts(").single()
+        assertTrue("videoCache.cache" in starts, "over the one video cache: $starts")
+        val stack = callArguments(starts, "videoStartDataSourceFactory(").single()
+        assertTrue("videoRequestUserAgent" in stack && "videoCache.cache" in stack, "with the player's cache and user agent: $stack")
+        // M5: each write's own abort reaches its upstream, or cancelling a write could not close its request.
+        assertTrue(Regex("""dataSource\s*=\s*\{\s*abort\s*->""").containsMatchIn(starts), "the write's abort is taken: $starts")
+        assertTrue(Regex(""",\s*abort\s*$""").containsMatchIn(stack.trim()), "and handed to the stack: $stack")
+        // N1: Mock mode never loads the WebView for a user agent, for the player or a start.
+        assertTrue(
+            Regex("""val videoRequestUserAgent: String\? get\(\) = if \(usesFake\) null else videoUserAgent""").containsMatchIn(container),
+            "Mock mode's video requests use no WebView user agent",
+        )
+        assertTrue(
+            "container.videoRequestUserAgent" in callArguments(main("ui/viewer/ViewerScreen.kt"), "videoMediaSourceFactory(").single(),
+            "the player reads the same user agent",
+        )
+
+        val factory = Regex("""fun videoStartDataSourceFactory\([^)]*\)[^=]*=([^\n]*\n){1,3}""").find(main("data/media/VideoCache.kt"))?.value
+        assertTrue(factory != null, "videoStartDataSourceFactory must be defined in VideoCache.kt")
+        assertTrue(
+            Regex("""cachedDataSourceFactory\(\s*context\s*,\s*cache\s*,\s*userAgent\s*,\s*onUpstream\s*=\s*\{\s*OneTryUpstream\.Factory\(\s*it\s*,\s*abort\s*\)\s*}\s*\)""").containsMatchIn(factory),
+            "the player's stack plus one try: $factory",
+        )
+        // I1: a cache error fails the start; the player's FLAG_IGNORE_CACHE_ON_ERROR would stream past a failing cache.
+        assertTrue(Regex("""\)\s*\.setFlags\(0\)""").containsMatchIn(factory), "no ignoring a cache error: $factory")
     }
 
     /**

@@ -12,6 +12,7 @@ import io.github.yuriimurha.reels.data.media.CarouselRepository
 import io.github.yuriimurha.reels.data.media.ImageAhead
 import io.github.yuriimurha.reels.data.media.ItemImage
 import io.github.yuriimurha.reels.data.media.ItemsResult
+import io.github.yuriimurha.reels.data.media.StartAhead
 import io.github.yuriimurha.reels.data.media.VideoSource
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
 import io.github.yuriimurha.reels.data.media.isVideo
@@ -19,6 +20,7 @@ import io.github.yuriimurha.reels.data.media.videoLinkNeedsRefresh
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.MediaType
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +34,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException
 
 /** The settled post's carousel visit, for the post [pk]: what its [CarouselPager] shows. */
@@ -121,9 +125,9 @@ class ViewerViewModel(
     }
 
     /**
-     * The pager of the carousel post [pk] settled on the item at [position]: that item's image is fetched, if it needs one, and
-     * the visit's queue of pictures fetched ahead (R23) takes the items after it first from now on. Nothing for any other post,
-     * and never the next post's prefetch (R11).
+     * The pager of the carousel post [pk] settled on the item at [position]: that item's picture (an image, or a video item's
+     * poster, R26) is fetched, if it needs one, and the visit's queue of pictures and video starts fetched ahead (R23, R26)
+     * takes the items after it first from now on. Nothing for any other post, and never the next post's prefetch (R11).
      */
     fun onItemSettled(pk: String, position: Int) {
         val current = carouselVisit?.takeIf { it.media.pk == pk } ?: return
@@ -206,11 +210,16 @@ class ViewerViewModel(
         return resolver.resolve(media, forceRefresh = true) ?: VideoSource.Unavailable(CANT_PLAY)
     }
 
-    /** A carousel's item at [index]: a video item through the repository, under `pk_position`; an image item, nothing. */
+    /**
+     * A carousel's item at [index]: a video item through the repository, under `pk_position`; an image item, nothing. A start
+     * of this very item still being written ahead (R26) gives way first: it stops, keeping what it wrote, so the player reads
+     * the cache free instead of fetching the same bytes past it.
+     */
     private suspend fun resolveItem(media: MediaEntity, index: Int): VideoSource? {
         val current = carouselVisit?.takeIf { it.media.pk == media.pk } ?: return null
         // Until the fill is in, nobody knows what item 0 is: wait for it (in the post's scope, R8), then decide.
         val item = current.awaitItems()?.videoItemAt(index) ?: return null
+        current.stopStartOf(index)
         return current.awaitOrNull { carousels.video(media, item.position, current.visit) }
     }
 
@@ -234,9 +243,9 @@ class ViewerViewModel(
 
     /**
      * One visit of a carousel post (R8): ONE [CarouselRepository.Visit] (one `mediaInfo` at most, the fill and every renewal
-     * together), and a scope that only leaving the post cancels. The fill, the images, the queue of pictures fetched ahead
-     * (R23) and the items' video resolves all run there, so an item swipe (which cancels the settle that waits for them) never
-     * cancels a call that may have spent the visit.
+     * together), and a scope that only leaving the post cancels. The fill, the images, the queue of pictures and video starts
+     * fetched ahead (R23, R26) and the items' video resolves all run there, so an item swipe (which cancels the settle that
+     * waits for them) never cancels a call that may have spent the visit.
      */
     private inner class CarouselVisit(media: MediaEntity) {
         /** The post's row as last settled: a re-settle in place brings the newer one, which the visit's later calls use. */
@@ -254,6 +263,12 @@ class ViewerViewModel(
         /** R23: pages the queue of pictures fetched ahead has taken, done or out: each once a visit, whatever came of it. */
         private val fetchedAhead = HashSet<Int>()
 
+        /** R26: video items whose start the queue has taken, done, out or given way: each once a visit, whatever came of it. */
+        private val startsTaken = HashSet<Int>()
+
+        /** R26: the start being written ahead now (its page, and the write), or null. */
+        private var startOut: Pair<Int, Deferred<StartAhead>>? = null
+
         /** Pages whose video link was renewed after the player refused it, in this visit. */
         val refreshed = HashSet<Int>()
 
@@ -269,32 +284,59 @@ class ViewerViewModel(
         }
 
         /**
-         * R23: the post's other pictures, downloaded while the owner looks at it, ONE at a time: the CDN lane allows two, so the
-         * second stays free for the item on screen ([loadImage]). Each turn takes the next page by the settled item as it is
-         * then, so an item settle reorders what is left without restarting it or cancelling the download that is out. Only
-         * image items past the cover, and none shown or asked for on demand already; through [CarouselRepository.prefetchImage]
-         * alone, whose only request to Instagram is the visit's one renewal for a refused link (R25), and a picture that does
-         * not come never shows a failure (its item says why once it settles). It ends when nothing is left, when the
-         * repository says to stop (the CDN's 429, offline, a post gone, a refusal the renewal cannot help: P1, R25), or with the
-         * visit.
+         * R23, R26: the post's other pictures, then its video items' starts, downloaded while the owner looks at it, ONE at a
+         * time: the CDN lane allows two, so the second stays free for the item on screen ([loadImage]). Each turn takes the
+         * next page by the settled item as it is then, so an item settle reorders what is left without restarting it or
+         * cancelling the download that is out. It ends when nothing is left, when the repository says to stop (the CDN's 429,
+         * offline, a post gone, a refusal the renewal cannot help: P1, R25), or with the visit.
+         *
+         * First every picture past the cover, an image item's image and a video item's poster alike (R26), none shown or
+         * asked for on demand already: through [CarouselRepository.prefetchImage] and [CarouselRepository.prefetchPoster],
+         * whose only request to Instagram is the visit's one renewal for a refused link (R25). A picture that does not come
+         * never shows a failure (an image item says why once it settles; a video item's own video speaks for it).
+         *
+         * Then, once no picture is left, the first megabyte of every video item but the settled one (which plays), through
+         * [CarouselRepository.preloadVideo], which never asks Instagram anything. A start the owner settles on while it is
+         * being written gives way to the player ([stopStartOf]); the queue goes on with the next.
          */
         private suspend fun fetchAhead() {
             while (true) {
-                val page = nextAhead() ?: return
+                val page = nextAhead() ?: break
                 fetchedAhead += page
-                val position = current()?.items?.getOrNull(page)?.position ?: return
-                when (val ahead = carousels.prefetchImage(media, position, visit)) {
+                val item = current()?.items?.getOrNull(page) ?: return
+                val ahead = when (item.type) {
+                    MediaType.VIDEO -> carousels.prefetchPoster(media, item.position, visit)
+                    else -> carousels.prefetchImage(media, item.position, visit)
+                }
+                when (ahead) {
                     is ImageAhead.Shown -> update { state -> state.withItem(page) { it.copy(imagePath = ahead.path) } }
                     ImageAhead.Skipped -> Unit
                     ImageAhead.Stop -> return
                 }
             }
+            while (true) {
+                val page = nextStart() ?: return
+                startsTaken += page
+                val position = current()?.items?.getOrNull(page)?.position ?: return
+                val start = scope.async { carousels.preloadVideo(media, position, visit) }
+                startOut = page to start
+                val outcome = try {
+                    start.await()
+                } catch (e: CancellationException) {
+                    // `await` throws this both when the start gave way to the player and when the visit ended; only the second ends the queue.
+                    currentCoroutineContext().ensureActive()
+                    StartAhead.Skipped
+                } finally {
+                    if (startOut?.second === start) startOut = null
+                }
+                if (outcome == StartAhead.Stop) return
+            }
         }
 
         /**
-         * The page to fetch ahead next, or null: the items after the settled one in order, then those before it, the nearest
-         * first. Never item 0 (the cover, R10), a video item (it streams and is cached as it plays), a picture already shown,
-         * one the item's own [loadImage] asked for, or one taken before.
+         * The page whose picture to fetch ahead next, or null: the items after the settled one in order, then those before it,
+         * the nearest first. Never item 0 (the cover, R10, for an image and a video item alike), a picture already shown, one
+         * the item's own [loadImage] asked for, or one taken before.
          */
         private fun nextAhead(): Int? {
             val state = current() ?: return null
@@ -302,8 +344,33 @@ class ViewerViewModel(
             val order = (settled + 1 until state.items.size) + (settled - 1 downTo 1)
             return order.firstOrNull { page ->
                 val item = state.items[page]
-                item.type == MediaType.IMAGE && item.imagePath == null && page !in imagesAsked && page !in fetchedAhead
+                item.type in PICTURED && item.imagePath == null && page !in imagesAsked && page !in fetchedAhead
             }
+        }
+
+        /**
+         * R26: the video item whose start to write ahead next, or null, in the same order as [nextAhead] (item 0 included: the
+         * cover is its picture, not its video). Never the settled item (the player is reading it) or one taken before; one the
+         * owner watched already costs nothing (its start is cached).
+         */
+        private fun nextStart(): Int? {
+            val state = current() ?: return null
+            val settled = state.settled.coerceIn(0, state.items.size)
+            val order = (settled + 1 until state.items.size) + (settled - 1 downTo 0)
+            return order.firstOrNull { page -> state.items[page].type == MediaType.VIDEO && page !in startsTaken }
+        }
+
+        /**
+         * R26: the owner settled on the video item at [page]: a start of it still being written ahead stops now (its request
+         * is closed at once, M5), and this returns once the write has (what it wrote stays cached, and was checked, M2), so
+         * the player finds the cache free. Never more than [START_STOP_WAIT_MS] of real time, whatever the network does: a
+         * write that has not stopped by then finishes stopping on its own, and the player reads past its lock (the same bytes
+         * from the network, at worst the rest of one megabyte). Any other page's write goes on.
+         */
+        suspend fun stopStartOf(page: Int) {
+            val start = startOut?.takeIf { it.first == page }?.second ?: return
+            start.cancel()
+            withContext(Dispatchers.Default) { withTimeoutOrNull(START_STOP_WAIT_MS) { start.join() } }
         }
 
         fun end() = job.cancel()
@@ -317,19 +384,25 @@ class ViewerViewModel(
         }
 
         /**
-         * Item [index]'s image, on demand, once a visit. Item 0's is the cover the sync stored (taken from the first item, by the
-         * same rule), so it is only fetched for a post without one. A video item has none to fetch, and a picture the queue
-         * fetched ahead (R23) is shown already. If the queue's download of this very item is out, the repository waits for it.
+         * Item [index]'s picture, on demand, once a visit: an image item's image, or a video item's poster (R26), which shows
+         * until the video's first frame. Item 0's is the cover the sync stored (taken from the first item, by the same rule),
+         * so it is only fetched for a post without one, and a picture the queue fetched ahead (R23) is shown already. If the
+         * queue's download of this very item is out, the repository waits for it. A poster that does not come says nothing:
+         * the video plays, or says why it cannot, all the same.
          */
         fun loadImage(index: Int) {
             val item = current()?.items?.getOrNull(index) ?: return
-            if (item.type != MediaType.IMAGE || item.imagePath != null) return
+            if (item.type !in PICTURED || item.imagePath != null) return
             if (index == 0 && media.thumbPath != null) return
             if (!imagesAsked.add(index)) return
             scope.launch {
                 val shown: (CarouselItemUi) -> CarouselItemUi = when (val image = carousels.image(media, item.position, visit)) {
                     is ItemImage.File -> { entry -> entry.copy(imagePath = image.path) }
-                    is ItemImage.Failed -> { entry -> entry.copy(failure = image.message) }
+                    is ItemImage.Failed -> {
+                        if (item.type == MediaType.VIDEO) return@launch
+                        val failed: (CarouselItemUi) -> CarouselItemUi = { entry -> entry.copy(failure = image.message) }
+                        failed
+                    }
                 }
                 update { state -> state.withItem(index, shown) }
             }
@@ -354,6 +427,12 @@ class ViewerViewModel(
     }
 
     private companion object {
+        /** M5: the longest the settled video item waits for its start written ahead to stop, in real time. */
+        const val START_STOP_WAIT_MS = 300L
+
+        /** The items with a picture to show: an image item's image, and a video item's poster until its first frame (R26). */
+        val PICTURED = setOf(MediaType.IMAGE, MediaType.VIDEO)
+
         /** No width or height: they may be 0 or mixed (Task 1), and the viewer fits every item instead of sizing from them. */
         fun toUi(item: CarouselItemEntity) = CarouselItemUi(item.position, item.type)
 

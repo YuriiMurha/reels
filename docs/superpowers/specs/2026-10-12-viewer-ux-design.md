@@ -118,7 +118,7 @@ Added 2026-10-12, while the plan was executed. Each is a ruling taken when the d
 - **R7: image downloads run on the Pacer's CDN lane (§3.2 and §4).** As thumbnails do. Why: the cookieless CDN fetcher's contract is paced, and this can only lower rates. Cost: 200–800 ms of first-view jitter per image, and waiting behind a running sync's thumbnails.
 - **R8: a visit is spent by any outcome (§3.3).** A `Visit`, the one `mediaInfo` a visit may send, is spent by a failure and by a cancelled call too, so "at most one per visit" is strict. The viewer makes one `Visit` per settled post, and runs the fill, the images and the items' video resolves in a coroutine of the post, which an item swipe does not cancel. Why: pacing is a hard rule, and telling a sent request from an unsent cancellation is fragile. Cost: a cancelled fill leaves the post cover-only until it is shown again.
 - **R9: the cached-video fallback is the reels' (§3.3).** A carousel video item whose renewal could not be made plays cached bytes for `NO_SESSION`, `REFUSED` and `OFFLINE` only, as the reel resolver does. Why: one rule for "may cached bytes play" across reels and items. Cost: an item whose renewal hit a login or challenge reply, or a rate limit, says unavailable even if its bytes are cached, as a reel does.
-- **R10: the viewer's product calls (§3.2).** Item 0 shows the stored cover (the same picture, no download). An image item downloads when it settles: on demand, once a visit, with no prefetch of items. Video items have no poster. An item swipe does not cancel the next post's prefetch. Why: each matches "on demand" and saves CDN requests. Cost: a 200–800 ms placeholder on each newly viewed image, and a dark frame before a video item starts.
+- **R10: the viewer's product calls (§3.2).** Item 0 shows the stored cover (the same picture, no download). An image item downloads when it settles: on demand, once a visit, with no prefetch of items. Video items have no poster (reversed by R26 below: a video item now shows its poster until its first frame). An item swipe does not cancel the next post's prefetch. Why: each matches "on demand" and saves CDN requests. Cost: a 200–800 ms placeholder on each newly viewed image, and a dark frame before a video item starts.
 - **R11: only a post's first unit starts the next post's prefetch (§4).** An item settle never does. Why: pacing is a hard rule, and item swipes must not become a prefetch trigger. Cost: none visible (the prefetch was decided at the post settle before this update).
 - **R12: the notice file is `res/raw/license_material_symbols.txt` (§3.4).** Why: AAPT2 rejects upper case and hyphens in resource names.
 - **R13: the monochrome layer cuts the play triangle out of its tile (§3.5).** An even-odd fill, not a second single-colour path. Why: a themed icon tints every path one colour, so an uncut triangle would vanish into its tile. The full-colour layer is as designed.
@@ -154,9 +154,85 @@ Smaller changes, none of which raises a rate:
 
 - **§3.2, the settle gate (final review, C1).** A settle is reported only when the list's row at the settled index and the pager's laid-out key there agree (a placeholder row always settles). A sync adding or removing a post above the viewed one changes the list at once while the pager re-keys in its next measure; the viewer then reset the carousel to item 1 and handed the player the post that slid in. Now the move arrives as the same post at its new index, which keeps its visit.
 - **§3.3, the removed-post guard (final review, D3).** The repository treats a post that a sync marked removed as gone too: it writes no image file for it (the reconcile's eviction has already run) and sends no request for it.
-- **§3.3, what renews a link.** An image item has no stored expiry, so it is renewed when the CDN refuses its link (a 403, 404 or 410) or it has none; a video item when its stored link is missing, names no expiry, or has 10 minutes or less left, or the player is refused with a 403 or 410. A 429 from the CDN renews nothing.
+- **§3.3, what renews a link.** An image item has no stored expiry, so it is renewed when the CDN refuses its link (a 403, 404 or 410) or it has none; a video item when its stored link is missing, names no expiry, or has 10 minutes or less left, or the player is refused with a 403 or 410, or (R26, R27) its start written ahead was refused with a 403 or 410. A 429 from the CDN renews nothing, and neither does a 404 for a video item.
 - **§3.3, new copy.** "Can't load this item right now: <reason>", where the reason is the Pacer's own, when the Pacer refuses (a cooldown or the 24 h budget).
 - **§3.2, the viewer's state.** The carousel pager's state is hoisted to the page, to put the dots above the overlay, and is seeded with the visit's item so a rotation does not flip to item 0. `CarouselUiState` has a `loading` flag for the small loading mark. The public `ViewerScreen` delegates to an `internal` overload that takes the player, for tests only.
 - **§3.6, the viewer's player effects** now run on `Dispatchers.Main.immediate` (`onMainThread`): Media3 requires the main thread, and a test's dispatcher once woke an effect on a Room thread. A test pins it with a player that checks its thread on every call.
 - **§3.6, a tile taller than the grid** (landscape, a short split-screen window) aligns by its top on the way back, never scrolled past it.
 - **`PacedMediaInfo`** is the reel resolver's `mediaInfo` request and its session gates (R76 and R79), cut out so that a reel and a carousel share them. The resolver's answers are unchanged.
+
+R26 comes from the owner's test of R23 on the phone (2026-10-13). It changes the code, with tests that fail without it.
+
+- **R26: a carousel's video items start sooner: a poster until the first frame, and their start written ahead (amends §3.2,
+  R10, R23 and §4; it reverses R10's "Video items have no poster").** Why: on the phone (2026-10-13) a carousel's pictures
+  were there as they slid in (R23), but a video item stayed black until it played: it began to stream only when it settled,
+  the player waited for its start buffer, and nothing covered the surface until the first frame, because R10 gave video
+  items no poster. The app sent no Instagram request during that test (the links were fresh from a Full sync), so the delay
+  was the CDN stream and the start buffer. The decision, in three parts:
+  1. **The start buffer.** The viewer's one player is built with a `DefaultLoadControl` that starts a streamed video once
+     1 s is buffered and goes on after a stall once 2 s is, every other value Media3's default, for every video, reels
+     included. Media3 1.11.1's own streaming defaults turned out to be these two values already (older ExoPlayer releases
+     used 2.5 s and 5 s), so this part pins them rather than changing today's playback; the start-up delay was the stream
+     and the black surface.
+  2. **A poster for video items.** A video item's `imageUrl` (its preview frame) is fetched by the same queue as the
+     pictures, at the same place in its order, into the same `CarouselImageStore` file `{pk}_{position}` (a video item has no
+     other picture there), with every rule a picture has: R20's drop, D3, P2, R25's renewal and refusal, and P1's stop on a
+     429 or offline. An item's own load fetches its poster when it settles before the queue got to it; a poster that does not
+     come says nothing. The poster is the shutter of Media3's `ContentFrame` for that item's page, so it shows until the
+     player renders that item's first frame (the shutter's own first-frame event), then hides; every item's page has its own
+     frame, so no item's poster covers another's video. When the video fails, the poster stays under the message.
+  3. **The start of each video item written ahead.** Once no picture is left, the same queue writes the first 1 MiB of each
+     video item but the settled one into the video cache under `{pk}_{position}`, with Media3's `CacheWriter` and a bounded
+     request, through the player's own cookieless stack, in the queue's order, one write at a time inside `pacer.cdn { }`.
+     Only a link the item would play as it is (more than 10 minutes left) is used: a stale one is skipped and never renewed,
+     and no `mediaInfo` is ever sent for a start. A start already cached is not fetched. A link the CDN refuses is skipped
+     quietly and not asked again in the visit by a start; what the item's own play then does is R27's. The CDN's 429, offline
+     or a failing cache stops the queue; leaving the post cancels the write, which leaves the cache consistent. The item the
+     owner settles on stops its write first (what it wrote stays), so the player never reads past the write's lock, waiting
+     300 ms at most. A start written while its link was replaced, or its post unsaved, is dropped again (P2, D3), whether
+     the write finished or was cancelled. Mock mode writes none: its clip is in the app (and a copy of the short clip would
+     make every Mock-mode item read as fully cached).
+
+  `CacheWriter` needed one guard: it opens an unbounded request (the whole video) whenever its bounded one fails, which for a
+  refused link, a 429, no connection or a failing cache would be a second request, and with the player's
+  `FLAG_IGNORE_CACHE_ON_ERROR` a download of the whole video that caches nothing. The write's upstream allows one try and
+  refuses an unbounded request outright (`OneTryUpstream`), and the write's stack does not ignore a cache error.
+
+  Pacing: no request to Instagram that the visit would not already allow, and none from a pre-load itself; no new request
+  type; still at most one `mediaInfo` a visit, every path together (a refused poster may spend it by R25's rule, a start
+  never; R27 says when an item's own play after a refused start does). The posters and the starts are extra CDN downloads on
+  the existing CDN lane, one at a time, with the lane's concurrency (2), jitter (0.2–0.8 s) and rate unchanged; the player's
+  own stream stays off the lane, as before. Cost: about 1 MB of data per video item of every carousel opened, even for items
+  the owner never watches, and one small poster image each (the CDN request R10 had saved). And the starts share the one
+  512 MiB least-recently-used video cache with the videos the owner watched: starts written ahead and never watched are newer than an
+  old watched video, so enough carousels opened (about 27 visits to carousels of 20 video items) push the oldest watched
+  videos out, and those no longer play offline (R16 then says "isn't cached yet" for an item the owner did watch).
+
+R27 is the controller's ruling on R26's review (2026-10-13). It changes the code, with tests that fail without it.
+
+- **R27: a refused video start sends the item's own play to the visit's renewal only for a 403 or 410 (amends R26).** A
+  start refused with a 403 or 410, the answers the player's own error path renews a link on (R19, R9), keeps the link out of
+  the item's play: when the owner settles on the item, it goes to the visit's renewal, as it would have after the player's
+  own 403 or 410, one CDN request sooner. Any other 4xx but 429 (a 404, a 408, ...) is passed quietly by the queue, not asked
+  again by a start in the visit, and changes nothing for the play: the player plays the stored link, and a 404 there renews
+  nothing, as R19 decided. A 429 still stops the queue. Why: R19 sends no request for a video's 404, and a pre-load must not
+  change what a play costs; under R26 a 404 ahead spent the visit's `mediaInfo` on a newly signed link to the same dead
+  object. Cost: none; a 404'd item asks the CDN once more when it plays, as before R26.
+
+Smaller changes from R26's review, none of which raises a rate:
+
+- **I1, a failing cache.** With the disk full (SQLite's error, wrapped by Media3 as a cache error) or a cache that failed to
+  start, `CacheWriter`'s unbounded fallback, through the player's `FLAG_IGNORE_CACHE_ON_ERROR`, downloaded the whole video,
+  cached nothing and answered "written", for every video item of every carousel opened. Now the write's upstream refuses any
+  unbounded request, its stack does not ignore a cache error, and a cache error stops the queue for the visit.
+- **M2, a cancelled write.** A write cancelled part way keeps what it wrote, so it gets the same re-check as a finished one:
+  the bytes go when the item's link was replaced meanwhile or the post left the library.
+- **M4, a video item with no preview frame.** It has no poster: the queue passes it without a renewal and goes on to the
+  starts, and its own load asks nothing. Before, it spent the visit's `mediaInfo` on every visit and its stop ended the
+  starts phase.
+- **M5, a prompt give-way.** Cancelling a write closes its request from the cancelling side, so a write waiting for the CDN's
+  answer stops at once, and the settled item waits for its write 300 ms at most whatever the network does (a body read that
+  stalls inside the platform's stream can outlast the close; it finishes stopping on its own, and the player reads past its
+  lock meanwhile).
+- **M3, the shared cache.** R26's cost now says that starts written ahead share the 512 MiB cache with watched videos and can
+  push the oldest of them out (above).

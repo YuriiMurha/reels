@@ -10,6 +10,7 @@ import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.db.LegacyRequestLogCopy
 import io.github.yuriimurha.reels.data.db.ReelsDatabase
 import io.github.yuriimurha.reels.data.library.LibraryRepository
+import io.github.yuriimurha.reels.data.media.CacheVideoStarts
 import io.github.yuriimurha.reels.data.media.CarouselImageStore
 import io.github.yuriimurha.reels.data.media.CarouselRepository
 import io.github.yuriimurha.reels.data.media.FakeVideoSourceResolver
@@ -20,7 +21,9 @@ import io.github.yuriimurha.reels.data.media.RealVideoSourceResolver
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import io.github.yuriimurha.reels.data.media.VideoCache
 import io.github.yuriimurha.reels.data.media.VideoSourceResolver
+import io.github.yuriimurha.reels.data.media.VideoStarts
 import io.github.yuriimurha.reels.data.media.sampleClipUri
+import io.github.yuriimurha.reels.data.media.videoStartDataSourceFactory
 import io.github.yuriimurha.reels.data.settings.SettingsDocIdStore
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.lab.AdapterLab
@@ -129,6 +132,25 @@ class AppContainer(context: Context) {
     val videoUserAgent: String by lazy { WebSettings.getDefaultUserAgent(context) }
 
     /**
+     * The user agent of every video request, the player's and a carousel's video starts written ahead (R26) alike:
+     * [videoUserAgent] for the real library; null (Media3's own) in Mock mode, which never reaches the network and so never
+     * loads the WebView for it.
+     */
+    val videoRequestUserAgent: String? get() = if (usesFake) null else videoUserAgent
+
+    /**
+     * R26: a carousel's video items' starts, written ahead into [videoCache] under `{pk}_{position}` through the player's own
+     * cookieless stack ([videoStartDataSourceFactory]: [cachedDataSourceFactory] with the same cache and user agent, one try,
+     * never an unbounded request, a cache error not ignored), on the repository's CDN lane. Building it builds neither the cache nor the WebView: both are read at the first write. Mock
+     * mode never writes one (its clip is in the app).
+     */
+    private val videoStarts: VideoStarts = CacheVideoStarts(
+        cache = { videoCache.cache },
+        // The write's own abort (M5): cancelling it closes the request that is out.
+        dataSource = { abort -> videoStartDataSourceFactory(context, videoCache.cache, videoRequestUserAgent, abort).createDataSource() },
+    )
+
+    /**
      * Mock mode plays the bundled clip. The real resolver renews links on the Pacer's interactive lane (the one
      * Conservative Pacer, so a link refresh counts against the same budget as sync) and keeps the bytes in [videoCache].
      */
@@ -166,6 +188,7 @@ class AppContainer(context: Context) {
             sampleClip = if (usesFake) sampleClipUri(context.packageName) else null,
             log = debugLog,
             itemEviction = carouselItemEviction,
+            starts = videoStarts,
         )
     }
 

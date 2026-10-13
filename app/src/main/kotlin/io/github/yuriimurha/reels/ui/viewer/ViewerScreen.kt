@@ -72,6 +72,7 @@ import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.media.VideoSource
 import io.github.yuriimurha.reels.data.media.videoMediaSourceFactory
+import io.github.yuriimurha.reels.data.media.viewerLoadControl
 import io.github.yuriimurha.reels.di.AppContainer
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Permalinks
@@ -234,17 +235,18 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
 
 /**
  * Plays through the video cache (spec 8.3). Mock mode never touches the network, so it does not load the WebView for its
- * user agent; a real library uses the WebView's own, read once per process. A refused link is not retried by the player
- * (R85, `VideoLoadErrorPolicy`): it reaches `onPlayerError` at once.
+ * user agent; a real library uses the WebView's own, read once per process (`videoRequestUserAgent`, which a carousel's
+ * video starts written ahead use too, R26). A refused link is not retried by the player (R85, `VideoLoadErrorPolicy`): it
+ * reaches `onPlayerError` at once. It starts once 1 s is buffered (`viewerLoadControl`, R26).
  */
 @OptIn(UnstableApi::class)
 @Composable
 private fun rememberViewerPlayer(container: AppContainer): ExoPlayer {
     val context = LocalContext.current
     val player = remember {
-        val userAgent = if (container.usesFake) null else container.videoUserAgent
         ExoPlayer.Builder(context)
-            .setMediaSourceFactory(videoMediaSourceFactory(context, container.videoCache.cache, userAgent))
+            .setMediaSourceFactory(videoMediaSourceFactory(context, container.videoCache.cache, container.videoRequestUserAgent))
+            .setLoadControl(viewerLoadControl())
             .build()
             .apply { repeatMode = Player.REPEAT_MODE_ONE }
     }
