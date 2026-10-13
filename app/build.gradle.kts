@@ -24,7 +24,7 @@ android {
         applicationId = "io.github.yuriimurha.reels"
         minSdk = 29
         targetSdk = 36
-        // R21: at least the Room schema version (VersionCodeGuardTest), so a build from before a schema change is refused
+        // R21: at least the Room schema version (SchemaBuildGuardTest), so a build from before a schema change is refused
         // (INSTALL_FAILED_VERSION_DOWNGRADE) instead of installing over the upgraded library and failing at every start.
         versionCode = 2
         versionName = "0.1.0"

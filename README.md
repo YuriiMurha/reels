@@ -825,8 +825,8 @@ adb -d logcat -s InstagramHttp
 3. **Play a video item.** Swipe to an item that is a video. **Look for:** it plays and loops, a tap pauses it, the speaker
    button mutes it (the button shows only while a video item is on screen), and it stops when you swipe to an image item or to
    another post. **Report:** a pass, or what happened.
-4. **Reopen it offline.** After you have viewed some of a carousel's items, turn on airplane mode, leave the viewer and open the
-   same carousel again. **Look for:** the items you viewed show; an image you never viewed, and a video item you never watched
+4. **Reopen it offline.** After you have viewed some of a carousel's items, run one Sync (it re-stores the carousel's items;
+   the images you viewed must survive it), then turn on airplane mode, leave the viewer and open the same carousel again. **Look for:** the items you viewed show; an image you never viewed, and a video item you never watched
    through, say "Offline: this item isn't cached yet" (a video item says it whether its link was still good or had to be
    renewed). **Report:** the message text, and whether the item was an image or a video.
 5. **Check the icon buttons.** **Look for:** at the bottom left an icon (a box with an arrow), at the bottom right a speaker
