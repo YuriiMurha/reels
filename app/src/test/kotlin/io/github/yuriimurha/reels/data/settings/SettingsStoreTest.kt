@@ -2,7 +2,9 @@ package io.github.yuriimurha.reels.data.settings
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.core.FileStorage
+import androidx.datastore.core.InterProcessCoordinator
 import androidx.datastore.core.Serializer
+import androidx.datastore.core.createSingleProcessCoordinator
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.PreferencesFileSerializer
@@ -21,9 +23,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -33,13 +38,17 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /** R54: an unreadable settings file must not silently end an active cooldown. */
 class SettingsStoreTest {
@@ -253,37 +262,223 @@ class SettingsStoreTest {
         assertEquals(false, settings.collectionNamesStale.first())
     }
 
-    /**
-     * A flow that starts while a write lands still sees that write (`TurnTakingDataStore`). DataStore 1.2.1 alone loses it for
-     * good: the flow's first read takes the version the write has just taken but the file from before the write's rename, and
-     * the write's own update, under that same version, is then dropped as not newer. The write is held here between the two
-     * until the flow has had its chance to read (half a second, or its first value, whichever comes first).
-     */
-    @Test
-    fun aFlowThatStartsWhileAWriteLandsSeesThatWrite() = runBlocking {
-        val writing = CompletableDeferred<Unit>()
-        val release = CompletableDeferred<Unit>()
-        val held = object : Serializer<Preferences> by PreferencesFileSerializer {
+    // ---- TurnTakingDataStore: a flow's first read and a write take turns (DataStore 1.2.1, b/431787506) ----
+
+    /** A serializer whose writes wait for [release] between DataStore's version bump and the file's rename. */
+    private fun holdingWrites(writing: CompletableDeferred<Unit>, release: CompletableDeferred<Unit>) =
+        object : Serializer<Preferences> by PreferencesFileSerializer {
             override suspend fun writeTo(t: Preferences, output: OutputStream) {
                 writing.complete(Unit)
                 release.await()
                 PreferencesFileSerializer.writeTo(t, output)
             }
         }
-        val file = File(tmp.root, "settings.preferences_pb")
-        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(held) { file }, scope = scope))
-        assertEquals(false, settings.collectionNamesStale.first())
 
-        val write = launch(Dispatchers.IO) { settings.setCollectionNamesStale(true) }
+    /** A serializer whose reads wait for [release]; with a file on disk, a store's first read reaches it. */
+    private fun holdingReads(reading: CompletableDeferred<Unit>, release: CompletableDeferred<Unit>) =
+        object : Serializer<Preferences> by PreferencesFileSerializer {
+            override suspend fun readFrom(input: InputStream): Preferences {
+                reading.complete(Unit)
+                release.await()
+                return PreferencesFileSerializer.readFrom(input)
+            }
+        }
+
+    private suspend fun seededFile(): File = File(tmp.root, "settings.preferences_pb").also { file ->
+        file.outputStream().use { PreferencesFileSerializer.writeTo(preferencesOf(booleanPreferencesKey("muted") to true), it) }
+    }
+
+    /**
+     * Whether [flowOf] (a fresh collection), started while [write] is held between DataStore's version bump and the file's
+     * rename, shows the written value once the write is done. The write is held until the flow has had its chance to read
+     * (half a second, or its first value, whichever comes first).
+     */
+    private suspend fun <V> seesAWriteThatLandsWhileItStarts(
+        name: String,
+        flowOf: (SettingsStore) -> Flow<V>,
+        write: suspend (SettingsStore) -> Unit,
+        isWritten: (V) -> Boolean,
+    ): Boolean = coroutineScope {
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val file = File(tmp.root, "$name.preferences_pb")
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(holdingWrites(writing, release)) { file }, scope = scope))
+        assertFalse(isWritten(flowOf(settings).first()), "precondition: $name is not written yet")
+
+        val writer = launch(Dispatchers.IO) { write(settings) }
         writing.await()
-        val seen = MutableStateFlow<Boolean?>(null)
-        val flow = launch(Dispatchers.IO) { settings.collectionNamesStale.collect { seen.value = it } }
-        withTimeoutOrNull(500) { seen.first { it != null } }
+        val seen = MutableStateFlow<List<V>>(emptyList())
+        val collector = launch(Dispatchers.IO) { flowOf(settings).collect { value -> seen.update { it + value } } }
+        withTimeoutOrNull(500) { seen.first { it.isNotEmpty() } }
         release.complete(Unit)
-        write.join()
+        writer.join()
+
+        val saw = withTimeoutOrNull(5_000) { seen.first { values -> values.any(isWritten) } } != null
+        collector.cancel()
+        saw
+    }
+
+    /**
+     * A flow that starts while a write lands still sees that write. DataStore 1.2.1 alone loses it for good: the flow's first
+     * read takes the version the write has just taken but the file from before the write's rename, and the write's own update,
+     * under that same version, is then dropped as not newer. TODO.md: once a stable DataStore passes this test with
+     * `SettingsStore` on the raw store, the wrapper can go.
+     */
+    @Test
+    fun aFlowThatStartsWhileAWriteLandsSeesThatWrite() = runBlocking {
+        assertTrue(
+            seesAWriteThatLandsWhileItStarts("names", { it.collectionNamesStale }, { it.setCollectionNamesStale(true) }, { it }),
+            "the flow kept the value from before the write",
+        )
+    }
+
+    /** Every flow of the store is fenced, not only the names flag's: the session's and the mute's too. */
+    @Test
+    fun theSessionAndMuteFlowsSeeAWriteThatLandsWhileTheyStart() = runBlocking {
+        assertTrue(
+            seesAWriteThatLandsWhileItStarts(
+                "session",
+                { it.session },
+                { it.setSession(StoredSession(kind = "valid", handle = "tester", challengeUrl = null)) },
+                { it.kind == "valid" },
+            ),
+            "the session flow kept the value from before the write",
+        )
+        assertTrue(
+            seesAWriteThatLandsWhileItStarts("muted", { it.muted }, { it.setMuted(true) }, { it }),
+            "the mute flow kept the value from before the write",
+        )
+    }
+
+    /**
+     * The fence covers the whole first read, not only a wait for a write already in flight: a write that starts while a flow's
+     * first read is between its cache check and its version read is not lost either. The flow's first read is paused inside
+     * that version read here.
+     */
+    @Test
+    fun aWriteThatStartsDuringAFlowsFirstReadIsSeen() = runBlocking {
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val file = File(tmp.root, "settings.preferences_pb")
+        var coordinator: PausingCoordinator? = null
+        val storage = FileStorage(holdingWrites(writing, release), { f -> PausingCoordinator(f).also { coordinator = it } }) { file }
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(storage, scope = scope))
+        assertEquals(false, settings.collectionNamesStale.first())
+        val pausing = assertNotNull(coordinator)
+
+        pausing.armed.set(true)
+        val seen = MutableStateFlow<Boolean?>(null)
+        val collector = launch(Dispatchers.IO) { settings.collectionNamesStale.collect { seen.value = it } }
+        pausing.entered.await()
+        val writer = launch(Dispatchers.IO) { settings.setCollectionNamesStale(true) }
+        withTimeoutOrNull(500) { writing.await() } // while the first read holds the fence, the write cannot start
+        pausing.resume.complete(Unit)
+        release.complete(Unit)
+        writer.join()
 
         assertEquals(true, withTimeoutOrNull(5_000) { seen.first { it == true } }, "the flow kept the value from before the write")
-        flow.cancel()
+        collector.cancel()
+    }
+
+    /** A coordinator whose next version read after [armed] is set waits for [resume]. */
+    private class PausingCoordinator(file: File) : InterProcessCoordinator {
+        private val inner = createSingleProcessCoordinator(file)
+        val armed = AtomicBoolean(false)
+        val entered = CompletableDeferred<Unit>()
+        val resume = CompletableDeferred<Unit>()
+        override val updateNotifications: Flow<Unit> get() = inner.updateNotifications
+        override suspend fun <T> lock(block: suspend () -> T): T = inner.lock(block)
+        override suspend fun <T> tryLock(block: suspend (Boolean) -> T): T = inner.tryLock(block)
+        override suspend fun getVersion(): Int {
+            if (armed.compareAndSet(true, false)) {
+                entered.complete(Unit)
+                resume.await()
+            }
+            return inner.getVersion()
+        }
+        override suspend fun incrementAndGetVersion(): Int = inner.incrementAndGetVersion()
+    }
+
+    /**
+     * A write whose caller is cancelled while DataStore is still writing keeps the fence until DataStore has finished: a flow
+     * that starts meanwhile sees the write that landed. (The worker stopped, or the screen's scope ended, mid-write.)
+     */
+    @Test
+    fun aFlowThatStartsWhileACancelledWriteLandsSeesThatWrite() = runBlocking {
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val file = File(tmp.root, "settings.preferences_pb")
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(holdingWrites(writing, release)) { file }, scope = scope))
+        assertEquals(false, settings.collectionNamesStale.first())
+
+        val writer = launch(Dispatchers.IO) { settings.setCollectionNamesStale(true) }
+        writing.await()
+        writer.cancel()
+        withTimeoutOrNull(500) { writer.join() } // the cancelled caller waits for DataStore before it gives the fence back
+        val seen = MutableStateFlow<Boolean?>(null)
+        val collector = launch(Dispatchers.IO) { settings.collectionNamesStale.collect { seen.value = it } }
+        withTimeoutOrNull(500) { seen.first { it != null } }
+        release.complete(Unit)
+
+        assertEquals(true, withTimeoutOrNull(5_000) { seen.first { it == true } }, "the flow that started during the cancelled write missed it")
+        assertEquals(true, settings.collectionNamesStale.first(), "the cancelled write landed")
+        collector.cancel()
+    }
+
+    /** A first read that fails gives the fence back, and its caller hears the real error. */
+    @Test
+    fun aFirstReadThatFailsGivesTheFenceBackAndSaysWhy() = runBlocking {
+        val failOnce = AtomicBoolean(true)
+        val flaky = object : Serializer<Preferences> by PreferencesFileSerializer {
+            override suspend fun readFrom(input: InputStream): Preferences {
+                if (failOnce.getAndSet(false)) throw IOException("disk error")
+                return PreferencesFileSerializer.readFrom(input)
+            }
+        }
+        val file = seededFile()
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(flaky) { file }, scope = scope))
+
+        assertFailsWith<IOException> { settings.muted.first() }
+        assertNotNull(withTimeoutOrNull(5_000) { settings.setMuted(false) }, "a failed first read kept the fence")
+        assertEquals(false, withTimeoutOrNull(5_000) { settings.muted.first() })
+    }
+
+    /** A first read whose collector goes away (the screen was left while the file was read) gives the fence back. */
+    @Test
+    fun aFirstReadWhoseCollectorIsCancelledGivesTheFenceBack() = runBlocking {
+        val reading = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val file = seededFile()
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(holdingReads(reading, release)) { file }, scope = scope))
+
+        val collector = launch(Dispatchers.IO) { settings.muted.collect {} }
+        reading.await()
+        collector.cancel()
+        release.complete(Unit)
+        withTimeoutOrNull(2_000) { collector.join() }
+
+        assertNotNull(withTimeoutOrNull(5_000) { settings.setMuted(false) }, "a cancelled first read kept the fence")
+    }
+
+    /**
+     * A transform that reads or writes the store would wait for ever for its own write's fence: both fail at once instead, and
+     * the store keeps working.
+     */
+    @Test
+    fun aTransformThatUsesTheStoreFailsAtOnce() = runBlocking<Unit> {
+        val store = TurnTakingDataStore(PreferenceDataStoreFactory.create(scope = scope) { File(tmp.root, "settings.preferences_pb") })
+
+        val read = withTimeoutOrNull(5_000) { runCatching { store.updateData { store.data.first(); it } } }
+        assertNotNull(read, "a read inside a transform hung")
+        assertTrue(read.exceptionOrNull() is IllegalStateException, "a read inside a transform: ${read.exceptionOrNull()}")
+        assertTrue("inside its own write" in read.exceptionOrNull()?.message.orEmpty())
+
+        val nested = withTimeoutOrNull(5_000) { runCatching { store.updateData { store.updateData { p -> p }; it } } }
+        assertNotNull(nested, "a write inside a transform hung")
+        assertTrue(nested.exceptionOrNull() is IllegalStateException, "a write inside a transform: ${nested.exceptionOrNull()}")
+        assertTrue("inside its own write" in nested.exceptionOrNull()?.message.orEmpty())
+
+        assertNotNull(withTimeoutOrNull(5_000) { store.updateData { it } }, "the store stayed stuck")
     }
 
     /**
@@ -295,15 +490,8 @@ class SettingsStoreTest {
     fun aReadThatBlocksTheThreadOfAWriteInFlightIsNotStuck() = runBlocking {
         val writing = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        val held = object : Serializer<Preferences> by PreferencesFileSerializer {
-            override suspend fun writeTo(t: Preferences, output: OutputStream) {
-                writing.complete(Unit)
-                release.await()
-                PreferencesFileSerializer.writeTo(t, output)
-            }
-        }
         val file = File(tmp.root, "settings.preferences_pb")
-        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(held) { file }, scope = scope))
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(holdingWrites(writing, release)) { file }, scope = scope))
         assertEquals(false, settings.collectionNamesStale.first())
         val caller = Executors.newSingleThreadExecutor { Thread(it).apply { isDaemon = true } }.asCoroutineDispatcher()
         val onCaller = CoroutineScope(caller + Job()) // not this test's children: on a regression they never finish
@@ -324,16 +512,8 @@ class SettingsStoreTest {
     fun aWriteThatBlocksTheThreadOfAFlowsFirstReadIsNotStuck() = runBlocking {
         val reading = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        val held = object : Serializer<Preferences> by PreferencesFileSerializer {
-            override suspend fun readFrom(input: InputStream): Preferences {
-                reading.complete(Unit)
-                release.await()
-                return PreferencesFileSerializer.readFrom(input)
-            }
-        }
-        val file = File(tmp.root, "settings.preferences_pb")
-        file.outputStream().use { PreferencesFileSerializer.writeTo(preferencesOf(booleanPreferencesKey("muted") to true), it) }
-        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(held) { file }, scope = scope))
+        val file = seededFile()
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(holdingReads(reading, release)) { file }, scope = scope))
         val caller = Executors.newSingleThreadExecutor { Thread(it).apply { isDaemon = true } }.asCoroutineDispatcher()
         val onCaller = CoroutineScope(caller + Job()) // not this test's children: on a regression they never finish
 

@@ -407,3 +407,28 @@ migration, tests by mutation, docs), then refuters for its findings, then one fi
 - **Tests.** `./gradlew check --no-build-cache`: 1140 app tests in 92 classes and 382 `:instagram` tests, 0 failures, lint
   with no errors and 16 warnings (none new).
 - **Pacing.** Nothing changes: no request is added, and no rate or concurrency of requests is touched.
+
+## 2026-10-13: the settings fence, the review's fixes
+
+A two-lens review of the fence (concurrency, and tests by mutation: 19 mutants over the 16 classes that use `SettingsStore`)
+confirmed the root cause (upstream: b/431787506, androidx commit 1ef22b8, not in 1.2.1) and found six Minor gaps, all fixed:
+
+- **M1, a cancelled write.** A write whose caller was cancelled while DataStore was still writing gave the fence back at once,
+  so a flow starting then could still miss it. It now waits for DataStore first (a no-op update queues behind the write).
+- **M2, the whole first read is fenced.** A new test pauses a flow's first read inside its version read and starts a write
+  then; a fence that only waited for a write already in flight passed every earlier test.
+- **M3, re-entry.** A transform that reads or writes the store would wait for ever for its own write's fence; it now fails at
+  once with an `IllegalStateException` (a marker in the write's context). No transform does it today.
+- **M4, when the wrapper can go.** No DataStore release note names the fix, so the TODO's trigger is the race tests passing on
+  the raw store with a stable release.
+- **M5 and M6.** A first read that fails, or whose collector is cancelled, gives the fence back, and the read's error reaches its
+  caller (two tests). The session's and the mute's flows are raced like the names flag's, so a flow that reads the raw store
+  fails a test.
+- **Mutation.** In a scratch export, 14 mutants against `SettingsStoreTest` (23 tests): the review's survivors (a barrier-only
+  fence, no `finally` unlock, swallowed read errors, the session flow on the raw store), one per fix above (no wait for a
+  cancelled write, no re-entry check on read or write, no context marker, the mute or names flow on the raw store) and the
+  first round's four (no read fence, no write fence, no I/O for the read, no I/O for the write). All 14 killed, each by its
+  own test.
+- **Tests.** `./gradlew check --no-build-cache`: 1146 app tests in 92 classes and 382 `:instagram` tests, 0 failures, lint
+  with no errors and 16 warnings (none new).
+- **Pacing.** Nothing changes: no request is added, and no rate or concurrency of requests is touched.
