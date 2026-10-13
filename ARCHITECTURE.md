@@ -1478,7 +1478,14 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   "Dispatchers.Main is used concurrently with setting it"), then closes the database, then resets Main. A screen test closes
   its database only after the compose rule has disposed the screen (`closingAfterComposition`), never in an `@After`, where the
   screen's flows still query it. `SyncViewModelTest`, `ViewerViewModelTest`, `NavigationBackTest`, `ViewerScreenCarouselTest`
-  and `SyncScreenRealPacerNoteTest` follow it.
+  and `SyncScreenRealPacerNoteTest` follow it. A screen test that builds a ViewModel ends it the same way before it closes
+  the database (`endViewModelsOnMainLooper`, which idles Robolectric's main looper in place of a test dispatcher). Disposing
+  the screen does not end the ViewModel's scope: `WhileSubscribed` keeps its Room flows running for 5 s, and a query already
+  under way still runs. A database closed under either fails the test with "connection pool has been closed". The five Sync
+  screen classes (`SyncScreenCollectionNamesTest`, `SyncScreenLoginTest`, `SyncScreenRealPacerNoteTest`,
+  `SyncScreenStorageMessageTest`, `DeveloperSectionTest`) do this; the four with an `@After` end the ViewModel there, which
+  leaves the screen collecting only finished `StateFlow`s. In the app the database is a process singleton and is never closed,
+  so a ViewModel cannot outlive it.
 
 ## Wiring
 

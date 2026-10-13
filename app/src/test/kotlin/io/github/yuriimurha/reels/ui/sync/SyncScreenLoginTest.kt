@@ -12,6 +12,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.lifecycle.ViewModel
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
@@ -28,6 +29,7 @@ import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.endViewModelsOnMainLooper
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.ui.login.LoginPurpose
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
@@ -59,6 +61,10 @@ class SyncScreenLoginTest {
 
     private val db = inMemoryDb()
     private val storeScope = CoroutineScope(Dispatchers.IO + Job())
+
+    /** Every ViewModel a test built: its scope outlives the screen, so the teardown ends it before the database closes. */
+    private val viewModels = mutableListOf<ViewModel>()
+
     private val cookies = RecordingCookieStore()
     private val settings by lazy {
         SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
@@ -66,8 +72,10 @@ class SyncScreenLoginTest {
     private var opened: Pair<String?, LoginPurpose>? = null
     private var labOpened = 0
 
+    /** The ViewModel first (see [endViewModelsOnMainLooper]), then the database and the settings file. */
     @After
     fun tearDown() {
+        endViewModelsOnMainLooper(viewModels)
         db.close()
         storeScope.cancel()
     }
@@ -90,6 +98,7 @@ class SyncScreenLoginTest {
             SessionRepository(cookies, probe, pacer, settings),
             requiresSession = false,
         )
+        viewModels += viewModel
         compose.setContent {
             ReelsTheme {
                 SyncScreen(

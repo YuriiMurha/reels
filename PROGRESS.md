@@ -468,3 +468,29 @@ confirmed the root cause (upstream: b/431787506, androidx commit 1ef22b8, not in
 - **Tests.** `./gradlew check --no-build-cache`: 1146 app tests in 92 classes and 382 `:instagram` tests, 0 failures, lint
   with no errors and 16 warnings (none new).
 - **Pacing.** Nothing changes: no request is added, and no rate or concurrency of requests is touched.
+
+## 2026-10-13: the Sync screen tests end their ViewModel before the database closes
+
+- **The failure.** On this branch merged with main, a full `check --rerun-tasks` failed 2 of 1147:
+  `SyncScreenCollectionNamesTest.noNoticeWhileTheNamesAreFresh` and
+  `SyncScreenRealPacerNoteTest.inMockModeTheRealPacersCountIsShownUnderTheSessionStatus`, both with "connection pool has been
+  closed" from a `SyncDao` read (`lastFullSyncAt`, `lastSyncAt`), caused at the test's own `db.close()`.
+- **Cause.** The five Sync screen test classes never ended their `SyncViewModel`, so its Room flows outlived the test. Disposing
+  the screen does not end them: `WhileSubscribed` keeps them for 5 s, and a query already under way still runs. A query in
+  flight when the test closed the database then met the closed pool. (One that starts after the close is harmless: in a probe
+  it simply never ran.) These tests pass in about 30 ms, so the window is the time a first Room read takes; the settings
+  fence's extra I/O hop in the screen's other first reads most likely shifted that timing in the full suite (not proven).
+- **Fix, tests only.** `endViewModelsOnMainLooper` (`testutil/ViewModels.kt`), the screen-test form of `endViewModels`, cancels
+  the ViewModels' scopes and idles Robolectric's main looper until every coroutine has finished. A cancelled coroutine that
+  waits on a query finishes only after it returns, and one whose query has not started never starts it. The five classes
+  (`SyncScreenCollectionNamesTest`, `SyncScreenLoginTest`, `SyncScreenRealPacerNoteTest`, `SyncScreenStorageMessageTest`,
+  `DeveloperSectionTest`) now end their ViewModel, then close the database, then the settings file. The app is not affected:
+  its database is a process singleton and is never closed.
+- **Evidence.** In isolation the failure did not show: 20 forced runs of each failing class with eight CPU burners, all green.
+  In a scratch export where every test query spends 300 ms in SQLite and the teardown idles the looper for 1 s after the
+  close: 11 of 32 tests failed in one run with the old teardown (seven caused at the test's `db.close()`), 0 of 96 in three
+  runs with the new one. After the fix, in the worktree: 20 forced runs of each of the five classes with eight burners, 100
+  class runs, all green.
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 47 of 47 tasks run, 1147 app tests in 92 classes and 382
+  `:instagram` tests, 0 failures, lint with no errors and 16 warnings (none new).
+- **Pacing.** Nothing changes: test code only.
