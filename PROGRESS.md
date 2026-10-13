@@ -377,3 +377,39 @@ migration, tests by mutation, docs), then refuters for its findings, then one fi
   mode only.
 - **Next, the owner's phone.** Unchanged: README section 8, "The viewer update", now including the offline video item (step 4)
   and the install rule of step 1.
+
+## 2026-10-13: pages push instead of the shared axis (R24)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md`, section 6, R24 (amends §3.6).
+
+- **Why.** The owner tried the viewer update on the phone (gesture navigation): the post-to-tile grow and shrink and the
+  gestures are fine, but not the shared-axis X between pages (a 10 % slide with a 300 ms fade). The ask: "just slide, or
+  whatever is used in the real Instagram".
+- **The push.** `Motion.kt`'s page transitions (`pageEnter`, `pageExit`, `pagePopEnter`, `pagePopExit`, renamed from
+  `sharedAxis*`): forward, the new page slides in from the end edge, the whole width, over the page left, which drifts a
+  third of the width towards the start; Back is the exact reverse; 300 ms with `FastOutSlowInEasing`; nothing fades. The back
+  gesture seeks the same slides with linear timing (`gesture = true`), so the page moves with the finger; letting go finishes
+  the slide at that constant pace, a cancel eases it back. The viewer's fade, the shared bounds (R14), the page under the
+  viewer (R15) and no motion at animator scale 0 are unchanged.
+- **Z-order.** No code needed: Navigation 2.10's `NavHost` (read from its bytecode) gives the arriving page the z-index of
+  the page left plus one on a navigate, and minus one on a pop and under the gesture, so the moving page is always on top.
+- **Tests.** `NavigationBackTest`'s page pins now assert the push forward and back (direction, the whole width and a third,
+  over within 24 frames, slowing into its end) and the gesture's linear follow on both pages (positions read unclipped, from
+  `positionInRoot`, as a full-width slide puts them off screen); a new native-graphics test reads the screen's pixels frame by
+  frame to pin the moving page on top and neither page faded, forward, back and under the gesture. `MotionTest` pins the
+  renamed factories, the gesture's two, and the nav host's wiring. `./gradlew check --no-build-cache`: 1138 app tests in 92
+  classes and 382 `:instagram` tests, 0 failures, lint with no errors and 16 warnings (unchanged). `connectedDebugAndroidTest`
+  on the emulator in Mock mode: 54 of 54. Mutation-checked in a scratch export: 17 mutants (each slide's distance or
+  direction, a fade on each slide and on the gesture's alone, an eased gesture, a linear push, a 450 ms push, motion at scale
+  0, the nav host's gesture flag, the page coming back drawn on top), all killed.
+- **Emulator, Mock mode.** Saved to Search and back, measured from screencaps (the animator scale set to 10 for the Back
+  and forward frames, since a screencap takes 0.7 s; 1 for the gesture, which the finger drives). Search came in from the
+  right edge and left the same way, Saved drifting by a third at the same progress in every frame; Saved's tiles were cut
+  exactly at Search's edge in both directions (Search on top); colours matched the pages at rest (no fade). A 6 s swipe from
+  the left edge moved Search with the finger, its edge 50 to 110 px of 1080 behind the fingertip (the screencaps' timing is
+  coarse), and Saved's offset matched the same progress to within a pixel. The scales were restored and the screenshots deleted.
+  The emulator then hung (after six days up, its userspace stopped answering mid-run) and was cold-booted; a "System UI isn't
+  responding" dialog after the boot took the Back key from `SmokeTest` on `main` and on this branch alike until dismissed.
+- **Pacing.** Untouched: UI only.
+- **Safety.** No agent contacted Instagram or touched the owner's phone: the emulator in Mock mode only.
+- **Next, the owner's phone.** README section 8, "The viewer update", step 8, rewritten for the push.

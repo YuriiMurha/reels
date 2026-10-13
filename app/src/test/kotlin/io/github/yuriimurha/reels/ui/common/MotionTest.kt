@@ -56,14 +56,16 @@ class MotionTest {
     }
 
     private fun enters() = mapOf(
-        "sharedAxisEnter" to sharedAxisEnter(context),
-        "sharedAxisPopEnter" to sharedAxisPopEnter(context),
+        "pageEnter" to pageEnter(context),
+        "pagePopEnter" to pagePopEnter(context),
+        "pagePopEnter(gesture)" to pagePopEnter(context, gesture = true),
         "viewerEnter" to viewerEnter(context),
     )
 
     private fun exits() = mapOf(
-        "sharedAxisExit" to sharedAxisExit(context),
-        "sharedAxisPopExit" to sharedAxisPopExit(context),
+        "pageExit" to pageExit(context),
+        "pagePopExit" to pagePopExit(context),
+        "pagePopExit(gesture)" to pagePopExit(context, gesture = true),
         "viewerExit" to viewerExit(context),
     )
 
@@ -123,20 +125,20 @@ class MotionTest {
 
     /**
      * Task 6 minor 4: the nav host uses the transitions above, which [noTransitionWhenAnimationsAreOff] shows are not None while
-     * motion is on. `NavigationBackTest` runs the page slides frame by frame (their direction too); the viewer's fades, which
-     * no semantics can see, and the gesture's slots are pinned here in the source.
+     * motion is on. `NavigationBackTest` runs the page pushes frame by frame (their direction, distance, timing and pixels, and
+     * the gesture's); the viewer's fades, which no semantics can see, and the gesture's slots are pinned here in the source.
      */
     @Test
     fun theNavHostUsesTheseTransitions() {
         val source = KotlinSource.code(File("src/main/kotlin/io/github/yuriimurha/reels/ui/ReelsNavHost.kt").readText())
             .replace(Regex("""\s+"""), " ")
         for (wiring in listOf(
-            "enterTransition = { sharedAxisEnter(context) }",
-            "exitTransition = { if (targetState.isViewer) underViewerExit(context) else sharedAxisExit(context) }",
-            "popEnterTransition = { if (initialState.isViewer) EnterTransition.None else sharedAxisPopEnter(context) }",
-            "popExitTransition = { sharedAxisPopExit(context) }",
-            "predictivePopEnterTransition = { if (initialState.isViewer) EnterTransition.None else sharedAxisPopEnter(context) }",
-            "predictivePopExitTransition = { if (initialState.isViewer) viewerExit(context) else sharedAxisPopExit(context) }",
+            "enterTransition = { pageEnter(context) }",
+            "exitTransition = { if (targetState.isViewer) underViewerExit(context) else pageExit(context) }",
+            "popEnterTransition = { if (initialState.isViewer) EnterTransition.None else pagePopEnter(context) }",
+            "popExitTransition = { pagePopExit(context) }",
+            "predictivePopEnterTransition = { if (initialState.isViewer) EnterTransition.None else pagePopEnter(context, gesture = true) }",
+            "predictivePopExitTransition = { if (initialState.isViewer) viewerExit(context) else pagePopExit(context, gesture = true) }",
             "screen<ViewerRoute>(enterTransition = { viewerEnter(context) }, exitTransition = { viewerExit(context) })",
         )) {
             assertTrue(wiring in source, "ReelsNavHost.kt must have: $wiring")

@@ -852,9 +852,14 @@ adb -d logcat -s InstagramHttp
      fade is over before the picture is ready); every later open grows. **Report:** which build, and whether that first open grew
      or only faded.
 8. **Move between pages with the back swipe.** As step 7, this needs gesture navigation (with 3-button navigation, check only
-   that Back slides the page). From Saved open Search (or Sync) and drag back from the edge. **Look for:** the page slides a
-   little to the side with a fade and follows your finger, letting go early cancels it, and going forward slides the same way.
-   **Report:** a pass, or what looked wrong.
+   that Back slides the page out to the right). Pages now slide as in Instagram, with no fade (changed after your first look
+   on 2026-10-13). From Saved open Search (or Sync). **Look for:** the new page slides in from the right edge, the whole
+   width, over Saved, which shifts a little to the left underneath; nothing fades. Then drag back from the edge slowly,
+   without letting go (if the keyboard is up, the first Back only closes it). **Look for:** the page moves right with your
+   finger, its left edge just behind your fingertip, and Saved slides back in from the left underneath it; the page you are
+   leaving stays on top the whole way. Let go early and it slides back and stays open; go all the way and it slides off to
+   the right. **Report:** a pass, or what looked wrong (does the slide feel too fast or too slow, and should the page
+   underneath darken a little, as in Instagram?).
 
 With animations switched off (Settings, Developer options, Animator duration scale: off), nothing animates: pages and posts
 change at once. Switch it back on afterwards.
