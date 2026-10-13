@@ -373,6 +373,9 @@ class SettingsStoreTest {
         val writer = launch(Dispatchers.IO) { settings.setCollectionNamesStale(true) }
         withTimeoutOrNull(500) { writing.await() } // while the first read holds the fence, the write cannot start
         pausing.resume.complete(Unit)
+        // Let the paused first read finish and emit before the held write may land; otherwise the write can win the race
+        // and the read sees the new file, so a fence that only waits for writes (and reads unlocked) would pass by luck.
+        withTimeoutOrNull(500) { seen.first { it != null } }
         release.complete(Unit)
         writer.join()
 
