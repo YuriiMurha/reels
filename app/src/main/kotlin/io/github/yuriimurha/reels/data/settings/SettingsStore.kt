@@ -35,8 +35,14 @@ data class StoredSession(val kind: String?, val handle: String?, val challengeUr
         "StoredSession(kind=$kind, handle=$handle, challengeUrl=${challengeUrl?.let { REDACTED }})"
 }
 
-/** Small app settings and state that must survive process death (spec 5.4). One instance per process. */
-class SettingsStore(private val store: DataStore<Preferences>) {
+/**
+ * Small app settings and state that must survive process death (spec 5.4). One instance per process. Everything goes through
+ * [TurnTakingDataStore], so a flow that starts while a write lands still sees that write. (The parameter has another name than
+ * [store] on purpose: in the property initializers below, a same-named parameter would win over the property.)
+ */
+class SettingsStore(dataStore: DataStore<Preferences>) {
+    private val store: DataStore<Preferences> = TurnTakingDataStore(dataStore)
+
     val muted: Flow<Boolean> = store.data.map { it[MUTED] ?: false }
 
     suspend fun setMuted(muted: Boolean) {

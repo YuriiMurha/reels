@@ -413,3 +413,84 @@ Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md`, section 6, R24 (am
 - **Pacing.** Untouched: UI only.
 - **Safety.** No agent contacted Instagram or touched the owner's phone: the emulator in Mock mode only.
 - **Next, the owner's phone.** README section 8, "The viewer update", step 8, rewritten for the push.
+
+## 2026-10-13: the 60 s hang in `SyncViewModelTest`, found and fixed in the app
+
+- **Cause.** Not the Sync screen's 1 s ticker, but DataStore 1.2.1. A flow that starts collecting while a write lands can miss
+  that write for good. Its first read, made without the file lock, takes the version the write has already taken but reads
+  the file from before the write's rename. The write's own update, under that same version, is then dropped as not newer
+  (`readDataOrHandleCorruption` tags an unlocked read with the version it read before its `tryLock`; androidx-main now uses
+  the cached version). The flow keeps the old value until the next write of any key. `theNamesNoticeFollowsTheStoredFlag`
+  starts the names flag's flow and writes the flag at once, so now and then the notice never came and `first { }` ran into
+  `runTest`'s 60 s.
+- **Evidence.** The test body repeated in one JVM (a scratch class, never committed), with a thread that dumps the state
+  after 8 s: 5 hangs in 500, and 14 in 500 with ten CPU burners, each with the write finished, a fresh read of the file
+  `true` and the screen without the notice. With each write held 300 ms between its version and its rename and the flag's
+  flow started 100 ms in: 20 hangs in 20; with the flow started after the write instead: 0 in 20.
+- **Fix, in the app.** `SettingsStore` goes through `TurnTakingDataStore`, a mutex held from a flow's start to its first
+  value and around each write, taken and given back on an I/O thread only. The first version held it on the caller's thread
+  and deadlocked `SyncScreenCollectionNamesTest` in the full `check`: its main thread blocks in `runBlocking` on a read
+  while its ViewModel's write, launched from that thread, holds the mutex and must resume there to give it back. In the app,
+  the race could leave a screen on an old setting: a Sync screen opened just as a sync wrote the names flag or the session
+  state kept the old value until the next settings write, or until it was reopened after 5 s.
+- **After.** On the final version: 0 hangs in 3,000 runs of the test body with ten CPU burners, 0 in 50 with the widened
+  window, and `SyncViewModelTest` with `SettingsStoreTest` 20 times in a row with six burners (the first version also: 0 in
+  6,000, and 25 class runs). `SettingsStoreTest` gains three tests (a flow that starts while a write lands sees it; a read,
+  and a write, that block the other's thread are not stuck); they kill all four mutants of the fence (no read fence, no
+  write fence, no I/O for the read, no I/O for the write). `aForgetThatCannotBeWrittenIsSaidOnTheScreen` now waits for its
+  message in real time: its failing write now hops to I/O like every settings write, so it no longer fails inside
+  `advanceUntilIdle`.
+- **Tests.** `./gradlew check --no-build-cache`: 1140 app tests in 92 classes and 382 `:instagram` tests, 0 failures, lint
+  with no errors and 16 warnings (none new).
+- **Pacing.** Nothing changes: no request is added, and no rate or concurrency of requests is touched.
+
+## 2026-10-13: the settings fence, the review's fixes
+
+A two-lens review of the fence (concurrency, and tests by mutation: 19 mutants over the 16 classes that use `SettingsStore`)
+confirmed the root cause (upstream: b/431787506, androidx commit 1ef22b8, not in 1.2.1) and found six Minor gaps, all fixed:
+
+- **M1, a cancelled write.** A write whose caller was cancelled while DataStore was still writing gave the fence back at once,
+  so a flow starting then could still miss it. It now waits for DataStore first (a no-op update queues behind the write).
+- **M2, the whole first read is fenced.** A new test pauses a flow's first read inside its version read and starts a write
+  then; a fence that only waited for a write already in flight passed every earlier test.
+- **M3, re-entry.** A transform that reads or writes the store would wait for ever for its own write's fence; it now fails at
+  once with an `IllegalStateException` (a marker in the write's context). No transform does it today.
+- **M4, when the wrapper can go.** No DataStore release note names the fix, so the TODO's trigger is the race tests passing on
+  the raw store with a stable release.
+- **M5 and M6.** A first read that fails, or whose collector is cancelled, gives the fence back, and the read's error reaches its
+  caller (two tests). The session's and the mute's flows are raced like the names flag's, so a flow that reads the raw store
+  fails a test.
+- **Mutation.** In a scratch export, 14 mutants against `SettingsStoreTest` (23 tests): the review's survivors (a barrier-only
+  fence, no `finally` unlock, swallowed read errors, the session flow on the raw store), one per fix above (no wait for a
+  cancelled write, no re-entry check on read or write, no context marker, the mute or names flow on the raw store) and the
+  first round's four (no read fence, no write fence, no I/O for the read, no I/O for the write). All 14 killed, each by its
+  own test.
+- **Tests.** `./gradlew check --no-build-cache`: 1146 app tests in 92 classes and 382 `:instagram` tests, 0 failures, lint
+  with no errors and 16 warnings (none new).
+- **Pacing.** Nothing changes: no request is added, and no rate or concurrency of requests is touched.
+
+## 2026-10-13: the Sync screen tests end their ViewModel before the database closes
+
+- **The failure.** On this branch merged with main, a full `check --rerun-tasks` failed 2 of 1147:
+  `SyncScreenCollectionNamesTest.noNoticeWhileTheNamesAreFresh` and
+  `SyncScreenRealPacerNoteTest.inMockModeTheRealPacersCountIsShownUnderTheSessionStatus`, both with "connection pool has been
+  closed" from a `SyncDao` read (`lastFullSyncAt`, `lastSyncAt`), caused at the test's own `db.close()`.
+- **Cause.** The five Sync screen test classes never ended their `SyncViewModel`, so its Room flows outlived the test. Disposing
+  the screen does not end them: `WhileSubscribed` keeps them for 5 s, and a query already under way still runs. A query in
+  flight when the test closed the database then met the closed pool. (One that starts after the close is harmless: in a probe
+  it simply never ran.) These tests pass in about 30 ms, so the window is the time a first Room read takes; the settings
+  fence's extra I/O hop in the screen's other first reads most likely shifted that timing in the full suite (not proven).
+- **Fix, tests only.** `endViewModelsOnMainLooper` (`testutil/ViewModels.kt`), the screen-test form of `endViewModels`, cancels
+  the ViewModels' scopes and idles Robolectric's main looper until every coroutine has finished. A cancelled coroutine that
+  waits on a query finishes only after it returns, and one whose query has not started never starts it. The five classes
+  (`SyncScreenCollectionNamesTest`, `SyncScreenLoginTest`, `SyncScreenRealPacerNoteTest`, `SyncScreenStorageMessageTest`,
+  `DeveloperSectionTest`) now end their ViewModel, then close the database, then the settings file. The app is not affected:
+  its database is a process singleton and is never closed.
+- **Evidence.** In isolation the failure did not show: 20 forced runs of each failing class with eight CPU burners, all green.
+  In a scratch export where every test query spends 300 ms in SQLite and the teardown idles the looper for 1 s after the
+  close: 11 of 32 tests failed in one run with the old teardown (seven caused at the test's `db.close()`), 0 of 96 in three
+  runs with the new one. After the fix, in the worktree: 20 forced runs of each of the five classes with eight burners, 100
+  class runs, all green.
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 47 of 47 tasks run, 1147 app tests in 92 classes and 382
+  `:instagram` tests, 0 failures, lint with no errors and 16 warnings (none new).
+- **Pacing.** Nothing changes: test code only.
