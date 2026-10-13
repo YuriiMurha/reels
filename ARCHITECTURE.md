@@ -1276,17 +1276,20 @@ are shown in the viewer on demand.
   - **Opening a carousel downloads up to its other image items ahead (R23)**, one at a time on the CDN lane. Video items are
     not fetched ahead (they stream and are cached as they play, as before). The lane's concurrency and jitter are unchanged,
     and one download ahead at a time leaves its second slot for the item on screen. The queue stops for the rest of the visit
-    on the CDN's first 429, when offline and when a post is gone (P1), so a limited or dead CDN gets one request a visit, not
-    one per item. The cost: CDN downloads for items the owner may never swipe to, at most one request a visit per link (a
-    refused link is never asked again in the visit, R25).
+    on the CDN's first 429, when offline and when a post is gone (P1), so the queue sends a limited or dead CDN one request a
+    visit, not one per item (the item on screen's own load is apart from it, as before R23). The cost: CDN downloads for items
+    the owner may never swipe to, at most one request a visit per refused link (R25: a refused link is never asked again in
+    the visit); a link that met a 429, or offline, may be asked again by the item's own load when the owner gets there.
   - **With old links, a carousel may spend its one `mediaInfo` as it opens (R25).** Stored links age (a Sync never refreshes
     an old post's), so the first picture ahead may be refused. That refusal may spend the visit's one renewal, by the same
     rule, lane and session gates as an item's own load, and the queue goes on with the fresh links; a renewal already spent,
     or one that failed, stops the queue instead. The bound is unchanged: at most one `mediaInfo` a visit, the fill, the
     queue's and the items' own renewals together, also when they are refused at the same moment. The cost: a visit to a
-    carousel with old links may send that request even if the owner never swipes.
-  - **No lane concurrency, jitter, budget or API rate is raised.** R23 adds CDN downloads within the lane and R25 may move the
-    visit's one `mediaInfo` to the post's opening, as stated above. The pinned wiring is in [Wiring](#wiring).
+    carousel with old links that the owner never swipes, which sent no request before R25, now sends that one request.
+  - **No lane concurrency, jitter or budget is raised, but R25 adds Instagram requests.** R23 adds CDN downloads within the
+    lane. R25 adds up to one `mediaInfo` to a visit that sent none before: a carousel with old links that the owner opens and
+    never swipes now sends its one request as it opens. That stays within the unchanged bound of one `mediaInfo` a visit, on
+    the interactive lane, under the 24 h budget and the cooldown. The pinned wiring is in [Wiring](#wiring).
 
 ## Viewer
 

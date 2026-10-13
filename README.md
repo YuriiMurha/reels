@@ -799,10 +799,12 @@ real library (a grid tile reading "1/N"). Steps 5 to 8 also work in Mock mode, w
 **What it sends.** A sync is unchanged and sends nothing new. A visit to a carousel sends at most one
 `GET api/v1/media/<n>/info/` (the interactive lane) in all, and only when its items are not stored yet or a link it needs has
 run out; swiping through the items adds nothing beyond that one. Loading its pictures in the background downloads from the
-image servers, one at a time. A carousel whose stored links are old may send that one request as it opens, before you swipe
-(the first picture loaded ahead is refused, and the renewal serves the rest); one whose links still work sends none. A
-picture that could not load ahead logs `carousel prefetch failed (<reason>)`, and its item loads as before when you swipe to
-it. If a cooldown is running, wait it out first.
+image servers, one at a time. A carousel whose stored links are old sends that one request as it opens, even if you never
+swipe (the first picture loaded ahead is refused, and the renewal serves the rest); before this update such a visit sent
+none. One whose links still work sends none. A picture that could not load ahead logs `carousel prefetch failed (<reason>)`,
+and its item loads as before when you swipe to it; a picture the image servers refused is not asked for again in the visit,
+but one that met "too many requests" or no network is tried again by its item. If a cooldown is running, wait it out
+first.
 
 For the log checks, clear the log, then watch the requests in a second terminal (the start of this section says how):
 

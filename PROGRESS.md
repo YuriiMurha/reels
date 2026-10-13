@@ -542,8 +542,9 @@ controller's ruling on the branch's review.
 - **Pacing.** Opening a carousel downloads up to its other image items ahead, one at a time on the CDN lane; the lane's
   concurrency (2) and jitter (0.2–0.8 s) are unchanged, and one download ahead at a time leaves its second slot for the item
   on screen. The queue stops for the visit on the CDN's first 429 or when offline. A carousel whose stored links are old may
-  spend its visit's one `mediaInfo` as it opens (R25), even if the owner never swipes; the bound stays at most one a visit,
-  the fill, the queue's and the items' own renewals together. A refused link is never asked again in a visit.
+  spend its visit's one `mediaInfo` as it opens (R25), even if the owner never swipes: a request such a visit did not send
+  before. The bound stays at most one a visit, the fill, the queue's and the items' own renewals together. A refused link is
+  never asked again in a visit; one that met a 429 or offline may be asked again by its item's own load.
 - **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, local data and the emulator in Mock
   mode only.
 - **Next, the owner's phone.** README section 8, "The viewer update", step 2: open a carousel, wait a second or two, and the

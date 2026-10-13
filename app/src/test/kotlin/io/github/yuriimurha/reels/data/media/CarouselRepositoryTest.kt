@@ -45,6 +45,7 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -980,6 +981,37 @@ class CarouselRepositoryTest {
         } finally {
             held.complete(Unit)
         }
+    }
+
+    /**
+     * P2's re-read is bounded (RR2). Every download replaces the post's links (a sync storing its rows again and again while the
+     * post is open): the prefetch and the item's own load each read the item once more and then end, two downloads each,
+     * writing nothing of a replaced link and asking Instagram nothing. The waits run in real time, because Room works off the
+     * test's dispatcher and a virtual-time timeout would fire at once.
+     */
+    @Test
+    fun linksReplacedOnEveryDownloadAreReadAgainOnceThenLeft() = runTest {
+        storeOldItems()
+        val version = AtomicInteger()
+        fetcher.answer = { url ->
+            val v = version.incrementAndGet()
+            db.carouselItemDao().replace(pk, rows().map { it.copy(imageUrl = "https://cdn.example.test/v$v/i${it.position}.jpg") })
+            url.toByteArray()
+        }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        val ahead = withContext(Dispatchers.Default) { withTimeout(30_000) { repository.prefetchImage(media, 1, visit) } }
+        val aheadDownloads = fetcher.fetched.size
+        val shown = withContext(Dispatchers.Default) { withTimeout(30_000) { repository.image(media, 1, visit) } }
+        val shownDownloads = fetcher.fetched.size - aheadDownloads
+
+        assertEquals(ImageAhead.Skipped, ahead)
+        assertEquals(2, aheadDownloads, "ahead: the stored link, then the one read again")
+        assertEquals(ItemImage.Failed(CANT_LOAD), shown)
+        assertEquals(2, shownDownloads, "on demand: the stored link, then the one read again")
+        assertNull(images.path(pk, 1), "nothing written: every link was replaced while it downloaded")
+        assertEquals(emptyList(), fake.calls)
     }
 
     /** P2 for the item's own load: its download out across a reshape is not written either; the load takes the new item. */
