@@ -377,3 +377,33 @@ migration, tests by mutation, docs), then refuters for its findings, then one fi
   mode only.
 - **Next, the owner's phone.** Unchanged: README section 8, "The viewer update", now including the offline video item (step 4)
   and the install rule of step 1.
+
+## 2026-10-13: the 60 s hang in `SyncViewModelTest`, found and fixed in the app
+
+- **Cause.** Not the Sync screen's 1 s ticker, but DataStore 1.2.1. A flow that starts collecting while a write lands can miss
+  that write for good. Its first read, made without the file lock, takes the version the write has already taken but reads
+  the file from before the write's rename. The write's own update, under that same version, is then dropped as not newer
+  (`readDataOrHandleCorruption` tags an unlocked read with the version it read before its `tryLock`; androidx-main now uses
+  the cached version). The flow keeps the old value until the next write of any key. `theNamesNoticeFollowsTheStoredFlag`
+  starts the names flag's flow and writes the flag at once, so now and then the notice never came and `first { }` ran into
+  `runTest`'s 60 s.
+- **Evidence.** The test body repeated in one JVM (a scratch class, never committed), with a thread that dumps the state
+  after 8 s: 5 hangs in 500, and 14 in 500 with ten CPU burners, each with the write finished, a fresh read of the file
+  `true` and the screen without the notice. With each write held 300 ms between its version and its rename and the flag's
+  flow started 100 ms in: 20 hangs in 20; with the flow started after the write instead: 0 in 20.
+- **Fix, in the app.** `SettingsStore` goes through `TurnTakingDataStore`, a mutex held from a flow's start to its first
+  value and around each write, taken and given back on an I/O thread only. The first version held it on the caller's thread
+  and deadlocked `SyncScreenCollectionNamesTest` in the full `check`: its main thread blocks in `runBlocking` on a read
+  while its ViewModel's write, launched from that thread, holds the mutex and must resume there to give it back. In the app,
+  the race could leave a screen on an old setting: a Sync screen opened just as a sync wrote the names flag or the session
+  state kept the old value until the next settings write, or until it was reopened after 5 s.
+- **After.** On the final version: 0 hangs in 3,000 runs of the test body with ten CPU burners, 0 in 50 with the widened
+  window, and `SyncViewModelTest` with `SettingsStoreTest` 20 times in a row with six burners (the first version also: 0 in
+  6,000, and 25 class runs). `SettingsStoreTest` gains three tests (a flow that starts while a write lands sees it; a read,
+  and a write, that block the other's thread are not stuck); they kill all four mutants of the fence (no read fence, no
+  write fence, no I/O for the read, no I/O for the write). `aForgetThatCannotBeWrittenIsSaidOnTheScreen` now waits for its
+  message in real time: its failing write now hops to I/O like every settings write, so it no longer fails inside
+  `advanceUntilIdle`.
+- **Tests.** `./gradlew check --no-build-cache`: 1140 app tests in 92 classes and 382 `:instagram` tests, 0 failures, lint
+  with no errors and 16 warnings (none new).
+- **Pacing.** Nothing changes: no request is added, and no rate or concurrency of requests is touched.

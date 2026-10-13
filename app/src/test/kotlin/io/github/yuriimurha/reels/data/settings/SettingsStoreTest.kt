@@ -1,28 +1,44 @@
 package io.github.yuriimurha.reels.data.settings
 
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.FileStorage
+import androidx.datastore.core.Serializer
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.PreferencesFileSerializer
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.preferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import io.github.yuriimurha.reels.instagram.web.WebGraphQl
 import io.github.yuriimurha.reels.sync.StoredLibraryAccount
 import io.github.yuriimurha.reels.sync.pacing.Cooldowns
 import io.github.yuriimurha.reels.sync.pacing.DataStoreCooldownStore
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
+import java.util.concurrent.Executors
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 /** R54: an unreadable settings file must not silently end an active cooldown. */
@@ -235,6 +251,103 @@ class SettingsStoreTest {
 
         settings.setCollectionNamesStale(false)
         assertEquals(false, settings.collectionNamesStale.first())
+    }
+
+    /**
+     * A flow that starts while a write lands still sees that write (`TurnTakingDataStore`). DataStore 1.2.1 alone loses it for
+     * good: the flow's first read takes the version the write has just taken but the file from before the write's rename, and
+     * the write's own update, under that same version, is then dropped as not newer. The write is held here between the two
+     * until the flow has had its chance to read (half a second, or its first value, whichever comes first).
+     */
+    @Test
+    fun aFlowThatStartsWhileAWriteLandsSeesThatWrite() = runBlocking {
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val held = object : Serializer<Preferences> by PreferencesFileSerializer {
+            override suspend fun writeTo(t: Preferences, output: OutputStream) {
+                writing.complete(Unit)
+                release.await()
+                PreferencesFileSerializer.writeTo(t, output)
+            }
+        }
+        val file = File(tmp.root, "settings.preferences_pb")
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(held) { file }, scope = scope))
+        assertEquals(false, settings.collectionNamesStale.first())
+
+        val write = launch(Dispatchers.IO) { settings.setCollectionNamesStale(true) }
+        writing.await()
+        val seen = MutableStateFlow<Boolean?>(null)
+        val flow = launch(Dispatchers.IO) { settings.collectionNamesStale.collect { seen.value = it } }
+        withTimeoutOrNull(500) { seen.first { it != null } }
+        release.complete(Unit)
+        write.join()
+
+        assertEquals(true, withTimeoutOrNull(5_000) { seen.first { it == true } }, "the flow kept the value from before the write")
+        flow.cancel()
+    }
+
+    /**
+     * The fence is never taken or given back on a caller's thread: a write's caller may block that thread waiting for the fence
+     * (a screen test reads with `runBlocking` on the main thread while its ViewModel's write, launched from that thread, holds
+     * it), and a write that had to resume there to give the fence back would wait for ever.
+     */
+    @Test
+    fun aReadThatBlocksTheThreadOfAWriteInFlightIsNotStuck() = runBlocking {
+        val writing = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val held = object : Serializer<Preferences> by PreferencesFileSerializer {
+            override suspend fun writeTo(t: Preferences, output: OutputStream) {
+                writing.complete(Unit)
+                release.await()
+                PreferencesFileSerializer.writeTo(t, output)
+            }
+        }
+        val file = File(tmp.root, "settings.preferences_pb")
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(held) { file }, scope = scope))
+        assertEquals(false, settings.collectionNamesStale.first())
+        val caller = Executors.newSingleThreadExecutor { Thread(it).apply { isDaemon = true } }.asCoroutineDispatcher()
+        val onCaller = CoroutineScope(caller + Job()) // not this test's children: on a regression they never finish
+
+        onCaller.launch { settings.setCollectionNamesStale(true) }
+        writing.await()
+        val read = onCaller.async { runBlocking { settings.collectionNamesStale.first() } }
+        delay(200) // the caller's thread is now blocked in that read
+        release.complete(Unit)
+
+        assertEquals(true, withTimeoutOrNull(5_000) { read.await() }, "the read never returned: the write could not give the fence back")
+        onCaller.cancel()
+        caller.close()
+    }
+
+    /** The same for a flow's first read: it gives the fence back on its own thread, not on its collector's. */
+    @Test
+    fun aWriteThatBlocksTheThreadOfAFlowsFirstReadIsNotStuck() = runBlocking {
+        val reading = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val held = object : Serializer<Preferences> by PreferencesFileSerializer {
+            override suspend fun readFrom(input: InputStream): Preferences {
+                reading.complete(Unit)
+                release.await()
+                return PreferencesFileSerializer.readFrom(input)
+            }
+        }
+        val file = File(tmp.root, "settings.preferences_pb")
+        file.outputStream().use { PreferencesFileSerializer.writeTo(preferencesOf(booleanPreferencesKey("muted") to true), it) }
+        val settings = SettingsStore(PreferenceDataStoreFactory.create(FileStorage(held) { file }, scope = scope))
+        val caller = Executors.newSingleThreadExecutor { Thread(it).apply { isDaemon = true } }.asCoroutineDispatcher()
+        val onCaller = CoroutineScope(caller + Job()) // not this test's children: on a regression they never finish
+
+        val seen = MutableStateFlow<Boolean?>(null)
+        onCaller.launch { settings.collectionNamesStale.collect { seen.value = it } }
+        reading.await()
+        val write = onCaller.async { runBlocking { settings.setCollectionNamesStale(true) } }
+        delay(200) // the collector's thread is now blocked in that write
+        release.complete(Unit)
+
+        assertNotNull(withTimeoutOrNull(5_000) { write.await() }, "the write never returned: the first read could not give the fence back")
+        assertEquals(true, withTimeoutOrNull(5_000) { seen.first { it == true } })
+        onCaller.cancel()
+        caller.close()
     }
 
     @Test
