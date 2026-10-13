@@ -206,7 +206,7 @@ class NavigationBackTest {
         assertOnPicture(pictureOf(tile), media.first(), "start")
         // ...grows through sizes between the tile and the screen...
         assertTrue(media.any { it.width > tile.width + 20f && it.width < root().width - 20f }, "no in-between size: $media")
-        // The grid stays, unmoved, under the viewer while it fades in (no shared-axis slide)...
+        // The grid stays, unmoved, under the viewer while it fades in (the page under the viewer never slides, R15)...
         assertTrue(gridUnder.take(10).all { it == neighbour }, "the grid moved or left under the opening viewer: $gridUnder")
         // ...and the post ends filling the screen, the grid gone from under it.
         assertEquals(root(), media.last())
@@ -229,7 +229,7 @@ class NavigationBackTest {
 
         val shrinking = media.takeWhile { it != null }.filterNotNull()
         val tile = boundsOfTile("m23")
-        // The grid is simply there under the fading viewer (no shared-axis slide), its tile still from the first frame it shows.
+        // The grid is simply there under the fading viewer (it never slides, R15), its tile still from the first frame it shows.
         assertTrue(tileDuring.isNotEmpty() && tileDuring.all { it == tile }, "m23's tile moved while the post shrank into it: $tileDuring")
         assertEquals(root(), shrinking.first())
         assertTrue(shrinking.any { it.width > tile.width + 20f && it.width < root().width - 20f }, "no in-between size: $shrinking")
@@ -441,13 +441,13 @@ class NavigationBackTest {
 
     /**
      * A push's pace, from a page's offsets one frame (16 ms) apart from the start: it is over in about 300 ms (its last move lands
-     * within [PUSH_FRAMES] frames), and it slows into its end, an eased curve: its last three moves add up to less than its
+     * in frame [PUSH_MIN_FRAMES] to [PUSH_FRAMES] - 1, so a shorter or a longer push fails), and it slows into its end, an eased curve: its last three moves add up to less than its
      * fastest one (a linear slide moves alike every frame).
      */
     private fun assertPacedLikeAPush(offsets: List<Float>, what: String) {
         val moves = offsets.zipWithNext { a, b -> abs(b - a) }
         val last = moves.indexOfLast { it > 0.5f }
-        assertTrue(last in 2 until PUSH_FRAMES, "$what still moved $last frames on: $offsets")
+        assertTrue(last in PUSH_MIN_FRAMES until PUSH_FRAMES, "$what's last move was $last frames on, not about 300 ms: $offsets")
         assertTrue(moves.subList(last - 2, last + 1).sum() < moves.max(), "$what did not slow into its end: $offsets")
     }
 
@@ -625,7 +625,11 @@ class NavigationBackTest {
         /** A transition with no animation ends within a few frames; the 300 ms fades and the bounds spring take 20 or more. */
         const val FRAMES_WITHOUT_MOTION = 5
 
-        /** A 300 ms push is over within this many 16 ms frames of its start (19 frames, and the first few to compose the page). */
-        const val PUSH_FRAMES = 24
+        /**
+         * A 300 ms push's last move lands in frames 17 to 18 of its start (16 ms frames, measured). The window
+         * [PUSH_MIN_FRAMES] until [PUSH_FRAMES] fails a 250 ms push (14 to 15) and a 350 ms one (19 to 21).
+         */
+        const val PUSH_MIN_FRAMES = 16
+        const val PUSH_FRAMES = 20
     }
 }
