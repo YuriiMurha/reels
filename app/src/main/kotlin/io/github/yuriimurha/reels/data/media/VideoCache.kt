@@ -103,9 +103,10 @@ class VideoCache(dir: File, databaseProvider: DatabaseProvider, maxBytes: Long =
  * already its default, only refuses a change between http and https. A CDN redirect therefore costs one more request, to
  * the host it names, still without cookies. Unlike thumbnails, the player's video is not on the Pacer's CDN lane.
  *
- * [onUpstream] wraps the network side and nothing else: the player's is the identity, so its retries (R85: a dropped
- * connection, a timeout) open the network again; a video start written ahead (R26, [videoStartDataSourceFactory]) adds
- * [OneTryUpstream].
+ * [onUpstream] wraps the network side and nothing else: the [DefaultHttpDataSource] itself, under [DefaultDataSource] (whose
+ * close forgets the source it opened, so a close from outside that came before the connection would never reach it: N-M2).
+ * The player's is the identity, so its retries (R85: a dropped connection, a timeout) open the network again; a video start
+ * written ahead (R26, [videoStartDataSourceFactory]) adds [OneTryUpstream].
  */
 @UnstableApi
 fun cachedDataSourceFactory(
@@ -117,7 +118,7 @@ fun cachedDataSourceFactory(
     val http = DefaultHttpDataSource.Factory().apply { userAgent?.let(::setUserAgent) }
     return CacheDataSource.Factory()
         .setCache(cache)
-        .setUpstreamDataSourceFactory(onUpstream(DefaultDataSource.Factory(context, http)))
+        .setUpstreamDataSourceFactory(DefaultDataSource.Factory(context, onUpstream(http)))
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 }
 
@@ -145,7 +146,8 @@ class UnboundedStartRefused : IOException("a video start asks for its first byte
 /**
  * R26, M5: the requests of one start write, so that cancelling the write closes the one that is out at once instead of
  * when `CacheWriter` next looks (its only check is between reads, and a read or a response can stall for the connection's
- * 8 s timeouts). [abort] may wait while the platform closes the connection: call it off the main thread.
+ * 8 s timeouts). A request still in its TCP or TLS handshake cannot be cut: it is closed once the handshake is done (N-M2).
+ * [abort] may wait while the platform closes the connection: call it off the main thread.
  */
 @UnstableApi
 class StartWriteAbort {
@@ -175,6 +177,11 @@ class StartWriteAbort {
  * - after the first [open] that fails, every later one fails the same way at once, without reaching the network;
  * - [abort] (a cancelled write) closes the request that is out from the cancelling side, so a call blocked on the response
  *   returns at once, and refuses any later one. A failure after an abort reads as an interruption, never as the CDN's answer.
+ * - An open the abort came during always closes its connection itself once it returns (N-M2): during the TCP or TLS
+ *   handshake the data source has no connection yet for the abort's close to reach, and the platform's blocking connect
+ *   cannot be cut from another thread, so the request still goes out once the handshake is done; it is then closed at once.
+ *
+ * It wraps the HTTP data source itself ([cachedDataSourceFactory]), so its close is the connection's.
  */
 @UnstableApi
 class OneTryUpstream(private val upstream: DataSource) : DataSource by upstream {
@@ -184,7 +191,10 @@ class OneTryUpstream(private val upstream: DataSource) : DataSource by upstream 
     private var aborted = false
     private val lock = Any()
 
-    /** True from [open] until the upstream is closed, by [close] or by [abort]: whichever comes first closes it, once. Guarded by [lock]. */
+    /**
+     * True from [open] until the upstream is closed, by [close] or by [abort]: whichever comes first closes it, once (an
+     * aborted open closes it once more, [closeAfterAbort]). Guarded by [lock].
+     */
     private var openNow = false
 
     override fun open(dataSpec: DataSpec): Long {
@@ -200,11 +210,21 @@ class OneTryUpstream(private val upstream: DataSource) : DataSource by upstream 
             throw failed
         }
         if (aborted) {
-            // The abort came while the request was being made, before there was a connection to close: close it now.
-            if (takeOpen()) runCatching { upstream.close() }
+            // The abort came while the request was being made. Its own close may have come before there was a connection to
+            // close (a handshake), so the connection the open made is closed now, whether or not the abort closed anything.
+            closeAfterAbort()
             throw aborted().also { failure = it }
         }
         return length
+    }
+
+    /**
+     * Closes the upstream after an aborted open that returned, always: closing it again is harmless, missing it leaves a
+     * connection open. (An open that failed closed its own connection, and the caller closes it again.)
+     */
+    private fun closeAfterAbort() {
+        synchronized(lock) { openNow = false }
+        runCatching { upstream.close() }
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int = try {

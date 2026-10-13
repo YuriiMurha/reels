@@ -2,9 +2,14 @@ package io.github.yuriimurha.reels.data.media
 
 import android.content.Context
 import android.net.Uri
+import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.ByteArrayDataSource
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.FileDataSource
+import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -31,6 +36,7 @@ import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
@@ -47,10 +53,13 @@ import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import java.io.File
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -1526,6 +1535,91 @@ class CarouselRepositoryTest {
     }
 
     /**
+     * N-M1: a cancel that lands as a finished write is being checked (the owner settles on the item just then) does not skip
+     * the check: bytes of a link replaced meanwhile are dropped all the same, before the item's play can read them.
+     */
+    @Test
+    fun aStartCancelledAsItsWriteFinishesIsStillChecked() = runTest {
+        storeOldItems()
+        val repository = repository()
+        lateinit var job: Job
+        starts.answer = { _, _ ->
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { NEW_LINK }) })
+            job.cancel() // the settle's cancel, landing after the bytes are in and before they are checked
+            StartWrite.WRITTEN
+        }
+        job = async { repository.preloadVideo(media, 2, CarouselRepository.Visit()) }
+
+        withContext(Dispatchers.Default) { withTimeout(5_000) { job.join() } }
+
+        assertTrue(job.isCancelled)
+        assertEquals(listOf("${pk}_2"), starts.removed.toList(), "the replaced link's bytes dropped all the same")
+    }
+
+    /**
+     * N-M1, the re-review's probe through the repository: the real writer (`CacheWriter`, a real cache) is writing item 2's
+     * start from its old link when the post is reshaped (item 2 is another video now; R20's drop cannot see the write's
+     * uncommitted bytes), and the owner settles on item 2, which cancels the write. Its read is stalled (one the abort cannot
+     * cut, M5), so it outlasts the viewer's 300 ms. The item's source is not handed out until the write has stopped and its
+     * old bytes were dropped: a player opened earlier would read past the write's lock and then, at its next look at the
+     * cache, the old video's bytes it committed late. The player, as the app builds it, then reads none of them.
+     */
+    @Test
+    fun aStartOfAReplacedLinkStillBeingWrittenHoldsTheItemsPlayUntilItIsChecked() = runTest {
+        storeOldItems()
+        val stall = Stall()
+        val repository = repository(starts = stallingWriter(videoOf(OLD_BYTE), stall))
+        val visit = CarouselRepository.Visit()
+        val writing = async { repository.preloadVideo(media, 2, visit) }
+        try {
+            stall.awaitReached()
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { NEW_LINK }) })
+            videoCache.removeCarouselItems(pk) // R20's drop, as a reshape runs it
+            writing.cancel() // the owner settles on item 2: the viewer stops its start
+
+            val play = async { repository.video(media, 2, visit) }
+            withContext(Dispatchers.Default) { delay(600) } // past the viewer's 300 ms
+            assertFalse(play.isCompleted, "the item was handed out while the old link's write could still commit")
+
+            stall.release()
+            val source = withContext(Dispatchers.Default) { withTimeout(10_000) { play.await() } }
+            assertEquals(VideoSource.Play(Uri.parse(NEW_LINK), "${pk}_2"), source)
+            assertTrue(writing.isCancelled)
+            assertEquals(0L, videoCache.cache.getCachedBytes("${pk}_2", 0, Long.MAX_VALUE), "the old video's bytes went first")
+            assertEquals(0, playerReads(source as VideoSource.Play, videoOf(NEW_BYTE)).count { it == OLD_BYTE }, "no old bytes read")
+        } finally {
+            stall.release()
+        }
+    }
+
+    /**
+     * N-M1's other side: a start of the very link the item plays is the same video, so its play is handed out at once while
+     * the write is still stopping (the viewer's 300 ms cap holds), and what that write had written stays.
+     */
+    @Test
+    fun aStartOfTheSameLinkStillBeingWrittenDoesNotHoldThePlay() = runTest {
+        storeOldItems()
+        val stall = Stall()
+        val repository = repository(starts = stallingWriter(videoOf(OLD_BYTE), stall))
+        val visit = CarouselRepository.Visit()
+        val writing = async { repository.preloadVideo(media, 2, visit) }
+        try {
+            stall.awaitReached()
+            writing.cancel()
+
+            val play = async { repository.video(media, 2, visit) }
+            val source = withContext(Dispatchers.Default) { withTimeout(5_000) { play.await() } }
+
+            assertEquals(VideoSource.Play(Uri.parse(OLD_VIDEO), "${pk}_2"), source, "at once, the write still stalled")
+            stall.release()
+            withContext(Dispatchers.Default) { withTimeout(10_000) { writing.join() } }
+            assertTrue(videoCache.cache.getCachedBytes("${pk}_2", 0, Long.MAX_VALUE) > 0, "what it wrote stays: the same video")
+        } finally {
+            stall.release()
+        }
+    }
+
+    /**
      * M4: a video item Instagram sent no preview frame for has no poster. Ahead it is passed (not a stop: the queue goes on to
      * the starts), and its own load fails quietly; neither spends the visit's `mediaInfo`, on any visit. Its start still comes.
      */
@@ -1735,6 +1829,91 @@ class CarouselRepositoryTest {
         }
     }
 
+    /** A video's three megabytes, every byte [value]: two videos told apart in what a player read. */
+    private fun videoOf(value: Byte) = ByteArray(3 shl 20) { value }
+
+    /**
+     * N-M1: the real writer (`CacheWriter`) into this test's video cache, over a local upstream serving [bytes] whose read
+     * stops at 600 KB on [stall]: a stall nothing cuts, as a body read stalled inside the platform's stream (M5).
+     */
+    private fun stallingWriter(bytes: ByteArray, stall: Stall) = CacheVideoStarts({ videoCache.cache }, { _ ->
+        CacheDataSource.Factory().setCache(videoCache.cache).setFlags(0)
+            .setUpstreamDataSourceFactory { StallingSource(bytes, 600 * 1024, stall) }
+            .createDataSource()
+    })
+
+    /**
+     * 900 KB of [source] read as the viewer's player reads it (its flags: past a locked span, from the network), from a CDN
+     * serving [network].
+     */
+    private fun playerReads(source: VideoSource.Play, network: ByteArray): ByteArray {
+        val player = CacheDataSource.Factory().setCache(videoCache.cache).setUpstreamDataSourceFactory { ByteArrayDataSource(network) }
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR).createDataSource()
+        val got = ByteArray(900 * 1024)
+        var read = 0
+        player.open(DataSpec.Builder().setUri(source.uri).setKey(source.cacheKey).build())
+        try {
+            while (read < got.size) {
+                val n = player.read(got, read, minOf(8 * 1024, got.size - read))
+                if (n == C.RESULT_END_OF_INPUT) break
+                read += n
+            }
+        } finally {
+            player.close()
+        }
+        return got.copyOf(read)
+    }
+
+    /** Where a [StallingSource]'s read stops: [awaitReached] once it is there, until [release]. */
+    private class Stall {
+        private val reached = CountDownLatch(1)
+        private val released = CountDownLatch(1)
+
+        /** On the write's thread. */
+        fun hold() {
+            reached.countDown()
+            released.await()
+        }
+
+        suspend fun awaitReached() = withContext(Dispatchers.IO) {
+            check(reached.await(10, TimeUnit.SECONDS)) { "the write never reached its stall" }
+        }
+
+        fun release() = released.countDown()
+    }
+
+    /** [data] from the asked position, 16 KB a read, every read from [stallAt] on held by [stall] until it is released. */
+    private class StallingSource(private val data: ByteArray, private val stallAt: Int, private val stall: Stall) : DataSource {
+        private var position = 0
+        private var end = 0
+        private var uri: Uri? = null
+
+        override fun addTransferListener(transferListener: TransferListener) = Unit
+
+        override fun open(dataSpec: DataSpec): Long {
+            uri = dataSpec.uri
+            position = dataSpec.position.toInt()
+            end = if (dataSpec.length == C.LENGTH_UNSET.toLong()) data.size else position + dataSpec.length.toInt()
+            return (end - position).toLong()
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            if (length == 0) return 0
+            if (position >= end) return C.RESULT_END_OF_INPUT
+            if (position >= stallAt) stall.hold()
+            val n = minOf(length, end - position, 16 * 1024, if (position < stallAt) stallAt - position else Int.MAX_VALUE)
+            System.arraycopy(data, position, buffer, offset, n)
+            position += n
+            return n
+        }
+
+        override fun getUri(): Uri? = uri
+
+        override fun close() {
+            uri = null
+        }
+    }
+
     private class StubFetcher : MediaFetcher {
         val fetched: MutableList<String> = Collections.synchronizedList(mutableListOf())
         var answer: suspend (String) -> ByteArray? = { null }
@@ -1748,6 +1927,11 @@ class CarouselRepositoryTest {
     private companion object {
         const val START = 1_800_000_000_000L
         const val OLD_VIDEO = "https://cdn.example.test/old/v2.mp4?oe=1"
+
+        /** Item 2's link after a reshape or a renewal (N-M1): another video. */
+        const val NEW_LINK = "https://cdn.example.test/new/v2.mp4?oe=1"
+        const val OLD_BYTE: Byte = 0x0A
+        const val NEW_BYTE: Byte = 0x0B
         const val CANT_LOAD = "Can't load this item"
         const val OFFLINE = "Offline: this item isn't cached yet"
         const val GONE = "This item is no longer available on Instagram"

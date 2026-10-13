@@ -623,3 +623,54 @@ the controller's ruling on R26's review. This entry is the branch's own, amended
   emulator in Mock mode only.
 - **Next, the owner's phone.** README section 8, "The viewer update", step 3: open a carousel with a video item, wait a few
   seconds, swipe to it: its preview picture until it starts, never black, and a quick start.
+
+## 2026-10-14: video starts, the re-review's follow-ups (N-M1, N-M2)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, after R26's "Smaller changes": R26's fix round was merged
+with its scoped re-review's two Minors, one docs Minor and two nits open. This fixes them.
+
+- **N-M1, a late write of a replaced link.** With M5's 300 ms cap, a start write that outlasts it commits what it wrote when
+  it stops, after the player has started reading the item's key past the write's lock. When the item's link was replaced
+  while it was written (a reshape, a sync, the renewal), those are another video's bytes, and M2's check that drops them came
+  only after a few more hops: the re-review's probe had a player read 309,248 bytes of the old video in the middle of the new
+  one. Now `CarouselRepository.video` hands out the item's source only once a start of it from another link than the one it
+  plays has stopped and been checked (`Visit.startsOut`), however long that takes (the connection's 8 s timeouts at worst; the
+  item shows its poster meanwhile). A start of the very link played is the same video, so the cap still holds for it. The
+  check of a finished write no longer gives way to a cancel landing as it runs (it would have left those bytes unchecked).
+  Pinned through the repository with the real writer, a real cache and a stall the abort cannot cut: the play is held, the old
+  bytes are gone when it is handed out, and the player, built with the app's flags, reads none of them.
+- **N-M2, a cancel during the handshake.** `OneTryUpstream` wrapped `DefaultDataSource`, whose close forgets the source it
+  opened, and an open the abort came during closed its connection only if the abort had not tried already. A cancel that
+  landed during the TCP or TLS handshake therefore closed nothing, and the connection stayed open with its body. Now
+  `OneTryUpstream` wraps the `DefaultHttpDataSource` itself, and an aborted open always closes its connection once it returns:
+  in the re-review's SOCKS-hold probe the client now hangs up as the answer comes. What cannot be done on this stack: the
+  platform's connect blocks and cannot be cut from another thread (the JVM's `disconnect()` before the connection exists does
+  nothing, and `DefaultHttpDataSource` has the connection only once `connect()` returns, then sends the request at once), so
+  the one bounded request still goes out after a cancel that lands in the handshake, and the write still stops only once the
+  handshake is done and the answer's headers have come (each within the connection's 8 s timeouts). The new test pins the
+  hang-up, one bounded request at most, nothing cached and a stop with the handshake, not the timeouts.
+- **D1, a correction to the R26 entry above.** It says the settled item stops its write first "(300 ms at most), so the player
+  never reads past its lock". That is not what the code guarantees: a write that has not stopped within 300 ms finishes on its
+  own while the player reads past its lock from the network (M5), the same video's bytes at worst twice, and, before N-M1,
+  another video's when the link had changed. The spec's R26 paragraph and ARCHITECTURE's Viewer section now say so, with
+  N-M1's exception.
+- **N2.** ARCHITECTURE said the platform's HTTP stack may resend a request dropped before its answer "once": that is the
+  JVM's (the tests'); Android's, built on OkHttp, may resend it once for each address of the CDN's host it has left to try.
+  Each resend is the same bounded `Range`, as for the player.
+- **N3.** `aStartThatIsSlowToStopHoldsThePlayerUpForAMomentOnly` now checks the cap (the player waits at least about 300 ms
+  and under 1 s, where it allowed anything below 1.5 s and so a 1 s cap) and the order its message states (the next start
+  begins only once the cancelled write has stopped), from the fake's ordered log.
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1248 app tests in 94 classes and 382 `:instagram` tests, 0
+  failures, lint with no errors and the same 16 warnings. New: one `VideoStartsTest` (N-M2, a SOCKS5 proxy on loopback that holds
+  its handshake), three `CarouselRepositoryTest` (N-M1's hold, its other side for the same link, and the check a cancel cannot
+  skip) and one `ViewerViewModelTest` (N-M1 through the viewer); the slow-stop test tightened (N3). Mutation-checked in a
+  scratch export: 23 mutants of the fix and of the fix round's code it touches, 21 killed; 2 survive as equivalent (a start
+  left in `Visit.startsOut` after it is done is never waited on, its job being complete; X45, an upstream registered after
+  the abort, as before). Two more runs took the slow-stop test's other checks out to show its new order check fails on its
+  own. The re-review's probes on the fix: the SOCKS hold now hangs up as the answer comes (1 request, sent after the cancel,
+  cancel and join 1,854 ms for a 2 s handshake); the rest read as before.
+- **Pacing.** Nothing raised: no new request, rate, budget or concurrency. Still one write in flight on the CDN lane, still at
+  most one `mediaInfo` a visit and none from a start. N-M1 only delays handing out an item's source until a write already out
+  has stopped; N-M2 only closes a connection sooner.
+- **Safety.** Nothing contacted Instagram or touched the owner's phone: fakes, MockWebServer, a SOCKS proxy on loopback and
+  local data only.

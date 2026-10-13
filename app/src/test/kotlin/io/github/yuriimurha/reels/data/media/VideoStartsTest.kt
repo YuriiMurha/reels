@@ -36,11 +36,25 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import java.io.BufferedInputStream
+import java.io.DataInputStream
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.ProxySelector
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketAddress
+import java.net.SocketTimeoutException
+import java.net.URI
 import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
 import kotlin.system.measureTimeMillis
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -293,6 +307,40 @@ class VideoStartsTest {
         assertEquals(StartWrite.WRITTEN, withTimeout(10_000) { starts.write("42_2", url, VIDEO_START_BYTES) }, "nothing left locked")
     }
 
+    /**
+     * N-M2: a write cancelled while its connection is still being made (a slow TCP or TLS handshake; here a SOCKS proxy that
+     * holds its handshake for a second stands for one). Nothing cuts the platform's blocking connect, and until it returns the
+     * data source has no connection for the abort to close, so the one bounded request still goes out once the handshake is
+     * done (not pinned either way: it is the platform's). What is pinned: the open then closes that connection itself, so the
+     * client hangs up as soon as the answer comes instead of leaving the connection and its body open, and the write stops
+     * with the handshake, not with the connection's 8 s timeouts.
+     */
+    @Test
+    fun aStartCancelledDuringItsHandshakeClosesItsConnectionOnceTheHandshakeIsDone() = runBlocking {
+        val cdn = SlowHandshakeCdn(handshakeMs = 1_000)
+        val previous = ProxySelector.getDefault()
+        ProxySelector.setDefault(cdn.proxySelector)
+        try {
+            val writing = async(Dispatchers.Default) { starts.write("42_2", Uri.parse("http://127.0.0.1:9/v.mp4?oe=1"), VIDEO_START_BYTES) }
+            withTimeout(10_000) { while (cdn.handshakeStartedAt == 0L) delay(5) }
+            delay(150) // well inside the handshake
+
+            val waited = measureTimeMillis { withTimeout(10_000) { writing.cancelAndJoin() } }
+
+            withTimeout(10_000) { while (cdn.hungUp == null) delay(10) }
+            assertEquals(true, cdn.hungUp, "the client hung up after the answer: the connection was closed, not left open")
+            val hangUpMs = (cdn.hungUpAt - cdn.answeredAt) / 1_000_000
+            assertTrue(hangUpMs < 1_000, "it hung up $hangUpMs ms after the answer, not at once")
+            assertTrue(waited < 3_000, "the write stopped with the handshake, not the connection's timeouts: $waited ms")
+            val ranges = cdn.ranges.toList()
+            assertTrue(ranges.size <= 1 && ranges.all { it == "bytes=0-${MB - 1}" }, "one bounded request at most: $ranges")
+            assertEquals(0L, videoCache.cache.getCachedBytes("42_2", 0, Long.MAX_VALUE))
+        } finally {
+            ProxySelector.setDefault(previous)
+            cdn.close()
+        }
+    }
+
     /** T-I1: the write's blocking `CacheWriter` runs on its io dispatcher, never on the caller's thread (the viewer's main). */
     @Test
     fun theWriteRunsOffTheCallersThread() = runBlocking {
@@ -387,6 +435,109 @@ class VideoStartsTest {
     private class CacheUnusable(private val cache: Cache) : Cache by cache {
         override fun startReadWriteNonBlocking(key: String, position: Long, length: Long): CacheSpan? =
             throw Cache.CacheException("cache not initialized")
+    }
+
+    /**
+     * N-M2: a CDN reached through a SOCKS5 proxy on loopback ([proxySelector]) that holds its handshake for [handshakeMs]: the
+     * time `HttpURLConnection.connect()` spends there stands for a slow TCP or TLS handshake, which `DefaultHttpDataSource`
+     * makes before it has a connection to close. Past the handshake it is the CDN itself: it reads the request, answers 206
+     * headers for the first megabyte at once and sends no body, then watches for 5 s whether the client hangs up.
+     */
+    private class SlowHandshakeCdn(private val handshakeMs: Long) : AutoCloseable {
+        private val listener = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+
+        val proxySelector = object : ProxySelector() {
+            override fun select(uri: URI): List<Proxy> =
+                listOf(Proxy(Proxy.Type.SOCKS, InetSocketAddress(InetAddress.getLoopbackAddress(), listener.localPort)))
+
+            override fun connectFailed(uri: URI, sa: SocketAddress, ioe: IOException) = Unit
+        }
+
+        @Volatile
+        var handshakeStartedAt = 0L
+
+        /** The `Range` of every request that went out. */
+        val ranges: MutableList<String?> = Collections.synchronizedList(mutableListOf())
+
+        @Volatile
+        var answeredAt = 0L
+
+        @Volatile
+        var hungUpAt = 0L
+
+        /** Null until the watch ends: true when the client closed the connection within 5 s of the answer, else false. */
+        @Volatile
+        var hungUp: Boolean? = null
+
+        init {
+            thread(isDaemon = true, name = "slow-handshake-cdn") {
+                while (true) {
+                    val socket = try {
+                        listener.accept()
+                    } catch (e: IOException) {
+                        break
+                    }
+                    thread(isDaemon = true) { runCatching { serve(socket) } }
+                }
+            }
+        }
+
+        private fun serve(socket: Socket) = socket.use { s ->
+            val input = DataInputStream(BufferedInputStream(s.getInputStream()))
+            val output = s.getOutputStream()
+            // SOCKS5: the greeting (no authentication), then the CONNECT, whose answer is held for the handshake's time.
+            check(input.readUnsignedByte() == 5)
+            input.readFully(ByteArray(input.readUnsignedByte()))
+            output.write(byteArrayOf(5, 0))
+            output.flush()
+            repeat(3) { input.readUnsignedByte() }
+            when (input.readUnsignedByte()) {
+                1 -> input.readFully(ByteArray(4))
+                3 -> input.readFully(ByteArray(input.readUnsignedByte()))
+                4 -> input.readFully(ByteArray(16))
+            }
+            input.readUnsignedShort()
+            handshakeStartedAt = System.nanoTime()
+            Thread.sleep(handshakeMs)
+            output.write(byteArrayOf(5, 0, 0, 1, 127, 0, 0, 1, 0, 80))
+            output.flush()
+            // The HTTP request, then the answer's headers at once.
+            var range: String? = null
+            while (true) {
+                val line = readLine(input) ?: return
+                if (line.isEmpty()) break
+                if (line.startsWith("Range:", ignoreCase = true)) range = line.substringAfter(':').trim()
+            }
+            ranges += range
+            output.write(
+                ("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-${MB - 1}/${3 * MB}\r\nContent-Length: $MB\r\n" +
+                    "Content-Type: video/mp4\r\n\r\n").toByteArray(),
+            )
+            output.flush()
+            answeredAt = System.nanoTime()
+            s.soTimeout = 5_000
+            val closed = try {
+                input.read() == -1
+            } catch (e: SocketTimeoutException) {
+                false
+            } catch (e: IOException) {
+                true
+            }
+            if (closed) hungUpAt = System.nanoTime()
+            hungUp = closed
+        }
+
+        private fun readLine(input: InputStream): String? {
+            val line = StringBuilder()
+            while (true) {
+                val c = input.read()
+                if (c == -1) return null
+                if (c == '\n'.code) return line.toString().trimEnd('\r')
+                line.append(c.toChar())
+            }
+        }
+
+        override fun close() = listener.close()
     }
 
     private companion object {

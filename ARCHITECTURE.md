@@ -1095,7 +1095,7 @@ On-demand playback (spec 8). Files: `data/media/VideoSourceResolver.kt`, `RealVi
     length too: tests pin that it is not fully cached).
   - `cachedDataSourceFactory` is what the player reads through: `CacheDataSource` over `DefaultDataSource` (so Mock mode's
     `android.resource` clip still opens) over `DefaultHttpDataSource` with the WebView user agent (read once, only for the
-    real library) and NO cookies: nothing installs a `CookieHandler` and the video path never touches the cookie store or
+    real library) and NO cookies (its `onUpstream` wraps that `DefaultHttpDataSource` itself, the identity for the player): nothing installs a `CookieHandler` and the video path never touches the cookie store or
     the Instagram transport (`instagramTransport`, `WebViewTransport`; pinned by `VideoWiringGuardTest`; `VideoDataSourceTest` runs the stack against MockWebServer: a new
     link under the same pk is served from disk with no second request, and no `Cookie` header is sent).
   - Redirects are followed: `DefaultHttpDataSource` has no switch to refuse them (`setAllowCrossProtocolRedirects(false)`,
@@ -1120,10 +1120,13 @@ On-demand playback (spec 8). Files: `data/media/VideoSourceResolver.kt`, `RealVi
     `videoStartDataSourceFactory`, which is `cachedDataSourceFactory` itself (the same cache, the same cookieless
     `DefaultHttpDataSource`, the container's `videoRequestUserAgent`, which the player uses too) with two differences, both
     because `CacheWriter` opens an UNBOUNDED request (the whole video) whenever its bounded one fails, for any reason:
-    - its upstream is `OneTryUpstream`: an unbounded request is refused outright (`UnboundedStartRefused`), never sent, and
-      after the first failed open every later open of that write fails at once, the same way, so a refused link, a 429, a
-      timeout or a dropped connection is one request (below the data source, the platform's HTTP stack may resend a request
-      dropped before its answer once, the same bounded one, as it may for the player);
+    - its `DefaultHttpDataSource` is wrapped in `OneTryUpstream` (the HTTP data source itself, under `DefaultDataSource`,
+      whose close forgets the source it opened: N-M2): an unbounded request is refused outright (`UnboundedStartRefused`),
+      never sent, and after the first failed open every later open of that write fails at once, the same way, so a refused
+      link, a 429, a timeout or a dropped connection is one request from the write. Below the data source, the platform's
+      HTTP stack may resend a request dropped before its answer on its own: the JVM's (the tests') once; Android's, built on
+      OkHttp, once for each address of the CDN's host it has left to try. Each resend is the same bounded `Range`, and the
+      player's requests get the same;
     - it does not ignore a cache error (no `FLAG_IGNORE_CACHE_ON_ERROR`, which the player keeps): with a full disk (SQLite's
       error, wrapped by Media3 as a cache error) or a cache that failed to start, the player streams past the cache, but a
       start fails, where it used to download the whole video, cache nothing and answer "written" (I1).
@@ -1137,9 +1140,14 @@ On-demand playback (spec 8). Files: `data/media/VideoSourceResolver.kt`, `RealVi
     - Cancelling a write (the owner left the post, or settled on that item) tells `CacheWriter` to stop and closes the
       request that is out from a thread of its own (`StartWriteAbort`, M5), so a write waiting for the CDN's answer stops at
       once rather than at its next read or the connection's 8 s timeout (a body read that stalls inside the platform's
-      stream can outlast the close; the viewer waits for it 300 ms at most, [Viewer](#viewer)). It returns only once the
-      write has stopped: its source closes, what it wrote stays cached and nothing stays locked, so the next write, or the
-      player, goes on from there.
+      stream can outlast the close; the viewer waits for it 300 ms at most, [Viewer](#viewer), but see N-M1 there). A cancel
+      that lands while the connection is still being made (a TCP or TLS handshake) cannot cut it: the platform's connect
+      blocks, and until it returns `DefaultHttpDataSource` has no connection for the abort to close. So the one bounded
+      request still goes out once the handshake is done, and the open then closes its connection itself, at once, whether
+      or not the abort closed anything (N-M2); the write stops once the handshake is done and the answer's headers have come
+      (each within the connection's 8 s timeouts). It
+      returns only once the write has stopped: its source closes, what it wrote stays cached and nothing stays locked, so
+      the next write, or the player, goes on from there.
     - The bytes are only ever the start of a video under its item's key; nothing here decides whether a video is "fully
       cached" (a bounded write records no length), so R78, R9 and R16 read the cache as before.
   - **Eviction:** a FULL reconcile's removed pks go to `MediaEviction` right after their thumbnails are deleted, and Delete
@@ -1274,8 +1282,15 @@ are shown in the viewer on demand.
       renewal or a sync, whose R20 drop may already have run), or the post left the library, the bytes may be another
       slide's: the key is dropped again (`VideoStarts.remove`), the same check as a picture's before its write, made after it
       because `CacheWriter` writes as the bytes come. A write cancelled part way keeps what it wrote, so it is checked too,
-      before the cancellation goes on (M2). A renewal that keeps the shape but renews the link loses a start it could have
-      kept; it only costs that download again.
+      before the cancellation goes on (M2), and a cancel that lands as a finished write is being checked does not skip the
+      check (N-M1). A renewal that keeps the shape but renews the link loses a start it could have kept; it only costs that
+      download again.
+    - **The item's play waits for a start of another link (N-M1).** The start out is kept in `Visit.startsOut` (its
+      position, its link, and a job done once the write has stopped and been checked). `video` hands out a `Play` of the item
+      only once a start of it from another link than the one it plays is done: that write may commit the other link's bytes
+      under the item's key when it stops, which can be after the viewer's 300 ms wait ([Viewer](#viewer)), and a player
+      already reading the key past the write's lock would meet them at its next look at the cache, in the middle of its own
+      video. The check drops them first. A start of the very link played is the same video, so its play is not held.
   - **One download of an item at a time (R23).** `Visit` keeps a lock per item position (`downloadOf`), apart from its request:
     `image` and `prefetchImage` both hold it, so an item asked for while its picture is being fetched ahead waits for that
     download and then serves its file, or, if it stored none, loads as before. Another item's call never waits for it.
@@ -1298,7 +1313,8 @@ are shown in the viewer on demand.
     are cached, as a reel does.
   - **R26, R27 and `video`.** A video item whose link the CDN refused as running out (403, 410) for its start ahead in this
     visit (`Visit.refused`) does not play that link: its cached bytes if they are all there, else the visit's renewal, as
-    above. Any other refusal of a start leaves `video` as it was.
+    above. Any other refusal of a start leaves `video` as it was. And a start of the item from another link, still out, holds
+    the `Play` until it has stopped and been checked (N-M1, above).
   - **Once per visit (R8).** A `CarouselRepository.Visit` holds the visit's one request. The first call that needs it sends it,
     under a mutex, and every later call of the visit uses what it brought. It is spent from the moment it is tried, whatever
     comes of it, a cancelled call included (that call may already have sent it): a visit sends AT MOST ONE `mediaInfo`, the
@@ -1440,12 +1456,16 @@ renewal and the cache are in [Video](#video).
     order, item 0 included, never the settled item, which the player reads, nor one taken before) and calls
     `CarouselRepository.preloadVideo` for each, one at a time: `Stop` ends the queue, anything else goes on. A queue its
     pictures stopped writes no start. The start out is kept (`startOut`): when the owner settles on that very item,
-    `resolveItem` cancels it and waits until the write has stopped (`stopStartOf`) before it asks for the item's source, so
-    the player never meets the write's lock on the cache (it would read past it from the network, the same bytes twice), and
+    `resolveItem` cancels it and waits until the write has stopped (`stopStartOf`) before it asks for the item's source, and
     the queue goes on with the next start once it has. What the write had cached stays (checked, M2), and the player reads it
     first. The wait is 300 ms of real time at most (`START_STOP_WAIT_MS`, M5): the cancel closes the write's request at once
-    in the usual case, and a write that has not stopped by then finishes stopping on its own while the player reads past its
-    lock (at worst the rest of one megabyte twice).
+    in the usual case, so the player does not meet the write's lock. A write that has not stopped by then finishes stopping
+    on its own while the player reads past its lock from the network (at worst the rest of one megabyte twice), and commits
+    what it wrote when it stops, after the player has started. That is the same video's start when the item still has the
+    write's link. When it does not (the post was reshaped, or a sync or the renewal replaced the link while the start was
+    written), the bytes are another video's, so the repository's `video` holds the item's source until the write has stopped
+    and its bytes were dropped (N-M1), however long that takes (the connection's 8 s timeouts at worst); the player meets
+    neither a lock nor those bytes.
 
   The same post settling again in place (the list moved under it) keeps its visit and takes the newer row: a sync may have
   stored its cover since. `CarouselUiState(items, settled, coverOnlyMessage, loading)` is what the pager shows.
@@ -1627,7 +1647,10 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   which renews instead (and says "Can't load this item" when the renewal brings the same link), any other refusal skipped
   with the play left to the player and no `mediaInfo` (R27), a 429, offline and a failing cache stopping, nothing for an
   image item, a reel, Mock mode or a post unsaved, a start written across a link change or an unsave dropped again, finished
-  or cancelled (M2), a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
+  or cancelled (M2), also when the cancel lands as a finished write is being checked (N-M1), the item's play held while a
+  start of another link still being written by the real writer is stalled, and handed out once its bytes are dropped, the
+  player as the app builds it then reading none of them, and not held for a start of the very link it plays (N-M1, the
+  re-review's probe), a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
   poster and a start written by the real writer, R16 still saying offline with only a start cached, every R26 log line
   labelled and naming no link, host or pk, and every path of a visit together sending one `mediaInfo`),
   `CarouselImageStoreTest`, `VideoCacheTest` (`removeCarouselItems`), `MediaEvictionTest` (`eachStep`), `VideoStartsTest`
@@ -1637,7 +1660,8 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   as refused, 429 as limited, 500 and no connection as offline), one request for a timeout and a body cut short, and never
   an unbounded one after a connection dropped before its answer (I1/T-I3), a failing cache (its metadata store, or one that
   never started) answering FAILED with no request for the whole video (I1), a write cancelled while it waits for its answer
-  stopping at once (M5), the blocking write on its IO dispatcher, never the caller's thread (T-I1), the player's own stack
+  stopping at once (M5), one cancelled during its connection's handshake (a SOCKS proxy on loopback holding it) closing that
+  connection once the handshake is done, with one bounded request at most (N-M2), the blocking write on its IO dispatcher, never the caller's thread (T-I1), the player's own stack
   still opening again after a failure (T-I2), a write cancelled mid-way that leaves what came cached, intact and unlocked, and
   a removal of one key alone), `ViewerLoadControlTest` (R26: a streamed video starts at 1 s and goes on after a stall at 2 s,
   read from the load control's own decisions; every other decision Media3's default, the minimum buffer included).
@@ -1664,8 +1688,9 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   writing no start, an expired start passed with its item then playing a renewed link on the visit's one request, another
   refusal leaving the play to the player with no `mediaInfo` (R27), a video item's own load fetching its poster and a poster
   that cannot come saying nothing, a video item with no preview frame still getting its start with no request (M4), the
-  earlier starts nearest first, a start slow to stop holding the player up for about 300 ms only (M5), and every path of a
-  visit sending one `mediaInfo`),
+  earlier starts nearest first, a start slow to stop holding the player up for the 300 ms cap only, the next start coming
+  once it has stopped (M5), a start of a link replaced meanwhile holding the player until it has stopped and been dropped,
+  the item then playing its new link (N-M1), and every path of a visit sending one `mediaInfo`),
   `ViewerScreenCarouselTest` (the real screen over a player the test watches and whose every call is checked for its thread;
   C1's list moves; R16 on screen; R26 end to end in Mock mode: the poster fetched ahead covers the video item until the
   player reports its first frame), `CarouselPagerTest` also pins R26's shutter with a player that raises the first-frame
