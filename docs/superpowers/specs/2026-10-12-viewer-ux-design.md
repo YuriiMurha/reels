@@ -188,10 +188,12 @@ R26 comes from the owner's test of R23 on the phone (2026-10-13). It changes the
      and no `mediaInfo` is ever sent for a start. A start already cached is not fetched. A link the CDN refuses is skipped
      quietly and not asked again in the visit by a start; what the item's own play then does is R27's. The CDN's 429, offline
      or a failing cache stops the queue; leaving the post cancels the write, which leaves the cache consistent. The item the
-     owner settles on stops its write first (what it wrote stays), so the player never reads past the write's lock, waiting
-     300 ms at most. A start written while its link was replaced, or its post unsaved, is dropped again (P2, D3), whether
-     the write finished or was cancelled. Mock mode writes none: its clip is in the app (and a copy of the short clip would
-     make every Mock-mode item read as fully cached).
+     owner settles on stops its write first (what it wrote stays, and the player reads it first), waiting 300 ms at most: a
+     write that has not stopped by then finishes stopping on its own while the player reads past its lock from the network
+     (M5). The one exception is a write whose link the item no longer has (N-M1): its bytes are another video's, so the item
+     waits until it has stopped and been checked. A start written while its link was replaced, or its post unsaved, is
+     dropped again (P2, D3), whether the write finished or was cancelled. Mock mode writes none: its clip is in the app (and
+     a copy of the short clip would make every Mock-mode item read as fully cached).
 
   `CacheWriter` needed one guard: it opens an unbounded request (the whole video) whenever its bounded one fails, which for a
   refused link, a 429, no connection or a failing cache would be a second request, and with the player's
@@ -233,6 +235,23 @@ Smaller changes from R26's review, none of which raises a rate:
 - **M5, a prompt give-way.** Cancelling a write closes its request from the cancelling side, so a write waiting for the CDN's
   answer stops at once, and the settled item waits for its write 300 ms at most whatever the network does (a body read that
   stalls inside the platform's stream can outlast the close; it finishes stopping on its own, and the player reads past its
-  lock meanwhile).
+  lock meanwhile). N-M1 below makes one exception.
 - **M3, the shared cache.** R26's cost now says that starts written ahead share the 512 MiB cache with watched videos and can
   push the oldest of them out (above).
+
+The fix round's re-review (2026-10-14) passed it and left two Minors, fixed after the merge. Neither raises a rate.
+
+- **N-M1, a late write of a replaced link.** With M5's cap, a write that outlasts 300 ms commits what it wrote when it
+  stops, after the player has started. When the item's link was replaced while it was written (a reshape, a sync, the
+  renewal), those are another video's bytes, and M2's check that drops them came later still: a player reading past the
+  write's lock could meet them at its next look at the cache, in the middle of its own video. Now the item's source is
+  handed out only once such a write has stopped and been checked, however long that takes (a write cancelled during its
+  handshake can take the connect and then the answer's headers, each with its 8 s timeout: about 16 s); a write of the very
+  link the item plays is the same video, so the cap still holds for it. The repository keeps the write out until then, not
+  the visit, so this holds when the owner leaves the post and comes back while the write is stopping too, and no other start
+  of that item is written meanwhile. The check of a finished write no longer gives way to a cancel either.
+- **N-M2, a cancel during the handshake.** A write cancelled while its connection was still being made (a TCP or TLS
+  handshake) closed nothing, and its connection stayed open after the request. The abort now wraps the HTTP data source
+  itself, and an open the abort came during closes its connection once it returns. The platform's blocking connect cannot
+  be cut, so the one bounded request still goes out once the handshake is done, and the write still waits for the
+  handshake; it is then closed at once.

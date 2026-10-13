@@ -365,7 +365,10 @@ class ViewerViewModel(
          * is closed at once, M5), and this returns once the write has (what it wrote stays cached, and was checked, M2), so
          * the player finds the cache free. Never more than [START_STOP_WAIT_MS] of real time, whatever the network does: a
          * write that has not stopped by then finishes stopping on its own, and the player reads past its lock (the same bytes
-         * from the network, at worst the rest of one megabyte). Any other page's write goes on.
+         * from the network, at worst the rest of one megabyte). Any other page's write goes on. The one exception is the
+         * repository's: when the item's link changed while its start was written (a reshape, a sync, the renewal), the bytes
+         * are another video's, and [CarouselRepository.video] hands out the item only once that write has stopped and been
+         * checked, however long it takes (N-M1).
          */
         suspend fun stopStartOf(page: Int) {
             val start = startOut?.takeIf { it.first == page }?.second ?: return
@@ -427,7 +430,7 @@ class ViewerViewModel(
     }
 
     private companion object {
-        /** M5: the longest the settled video item waits for its start written ahead to stop, in real time. */
+        /** M5: the longest the settled video item waits for its start written ahead to stop, in real time (N-M1 aside). */
         const val START_STOP_WAIT_MS = 300L
 
         /** The items with a picture to show: an image item's image, and a video item's poster until its first frame (R26). */

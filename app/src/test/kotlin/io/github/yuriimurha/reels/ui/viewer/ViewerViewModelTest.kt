@@ -1272,8 +1272,8 @@ class ViewerViewModelTest {
 
     /**
      * M5: a start that does not stop at once (here 3 s, as a connection that stalls might) holds the player up for no more
-     * than a moment: the item gets the player within about 300 ms, before the write has stopped, and the queue still takes
-     * the next start only once it has.
+     * than a moment: the item gets the player after the 300 ms cap (`START_STOP_WAIT_MS`), before the write has stopped, and
+     * the queue still takes the next start only once it has.
      */
     @Test
     fun aStartThatIsSlowToStopHoldsThePlayerUpForAMomentOnly() = runTest {
@@ -1296,10 +1296,57 @@ class ViewerViewModelTest {
             viewModel.onItemSettled(pk, 2)
             val waited = measureTimeMillis { settleItem(player, item(2), played = start(2)) }
 
-            assertTrue(waited < 1_500, "the player waited $waited ms for a write that would not stop")
+            // The cap, 300 ms of real time, and some slack for the test's own hops: neither no wait nor a longer cap.
+            assertTrue(waited in 250 until 1_000, "the player waited $waited ms for a write that would not stop, not the 300 ms cap")
             assertTrue("gave way:${start(2)}" !in player.events, "the player did not wait for the write to stop: ${player.events}")
             eventually { while (starts.written.size < videosAhead.size) delay(10) }
-            assertEquals(listOf(start(2)), starts.cancelled.toList(), "the next start came only once that write had stopped")
+            assertEquals(listOf(start(2)), starts.cancelled.toList())
+            val log = starts.log.toList()
+            val next = "write:${start(videosAhead[1])}"
+            assertTrue(log.indexOf("stopped:${start(2)}") in 0 until log.indexOf(next), "the next start came only once that write had stopped: $log")
+        } finally {
+            starts.releaseAll()
+            job.cancel()
+        }
+    }
+
+    /**
+     * N-M1: the item's link was replaced while its start was written (a reshape, a sync, the renewal), so the write's bytes
+     * are another video's. The 300 ms cap does not apply then: the player gets the item only once the write has stopped
+     * (here after 1 s) and its bytes were dropped, and it plays the new link.
+     */
+    @Test
+    fun aStartOfALinkReplacedMeanwhileHoldsThePlayerUntilItHasStoppedAndBeenDropped() = runTest {
+        storeCarousel()
+        val cdn = Cdn()
+        val starts = Starts(cdn).apply {
+            hold(start(2))
+            stopTakesMs = 1_000
+        }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        starts.onCancelled = { player.events += "gave way:$it" }
+        starts.onRemoved = { player.events += "dropped:$it" }
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val job = following(viewModel, player, resolved)
+        val replaced = "https://cdn.example.test/new/v2.mp4?oe=1"
+        try {
+            runCurrent()
+            settle(player, resolved, item(0))
+            eventually { while (start(2) !in starts.written) delay(10) }
+            val stored = db.carouselItemDao().items(pk)
+            db.carouselItemDao().replace(pk, stored.map { if (it.position == 2) it.copy(videoUrl = replaced) else it })
+
+            viewModel.onItemSettled(pk, 2)
+            val waited = measureTimeMillis { settleItem(player, item(2), played = start(2)) }
+
+            assertTrue(waited >= 950, "the player waited $waited ms, not until the write had stopped")
+            val events = player.events.toList()
+            val set = events.indexOf("set:${start(2)}")
+            assertTrue(events.indexOf("gave way:${start(2)}") in 0 until set, "the write stopped first: $events")
+            assertTrue(events.indexOf("dropped:${start(2)}") in 0 until set, "and its bytes were dropped first: $events")
+            assertEquals(Uri.parse(replaced), player.uris.last(), "the item plays its new link")
+            assertEquals(emptyList(), mediaInfoCalls)
         } finally {
             starts.releaseAll()
             job.cancel()
@@ -2319,6 +2366,12 @@ class ViewerViewModelTest {
         /** Told the key of every write that is cancelled, once it has stopped. */
         var onCancelled: (String) -> Unit = {}
 
+        /** Told every key the repository drops (P2, D3, M2). */
+        var onRemoved: (String) -> Unit = {}
+
+        /** In order: every write as it begins ("write:key"), and every cancelled one once it has stopped ("stopped:key"). */
+        val log: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
         /** How long a cancelled write takes to stop, in real time on an IO thread (as `CacheWriter` stops at its next read). */
         var stopTakesMs = 0L
         private val gates = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
@@ -2337,6 +2390,7 @@ class ViewerViewModelTest {
         override suspend fun write(key: String, uri: Uri, bytes: Long): StartWrite {
             if (picturesBeforeFirstStart == null) picturesBeforeFirstStart = cdn.fetched.size
             written += key
+            log += "write:$key"
             cdn.mostOut.accumulateAndGet(cdn.out.incrementAndGet(), ::maxOf)
             try {
                 gates[key]?.await()
@@ -2345,6 +2399,7 @@ class ViewerViewModelTest {
                 withContext(NonCancellable) {
                     if (stopTakesMs > 0) withContext(Dispatchers.IO) { Thread.sleep(stopTakesMs) }
                     cancelled += key
+                    log += "stopped:$key"
                     onCancelled(key)
                 }
                 throw e
@@ -2354,7 +2409,7 @@ class ViewerViewModelTest {
             return answer(key)
         }
 
-        override fun remove(key: String) = Unit
+        override fun remove(key: String) = onRemoved(key)
     }
 
     private class CountingClient : InstagramClient {
