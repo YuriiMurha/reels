@@ -140,13 +140,14 @@ class AppContainer(context: Context) {
 
     /**
      * R26: a carousel's video items' starts, written ahead into [videoCache] under `{pk}_{position}` through the player's own
-     * cookieless stack ([videoStartDataSourceFactory]: [cachedDataSourceFactory] with the same cache and user agent), on the
-     * repository's CDN lane. Building it builds neither the cache nor the WebView: both are read at the first write. Mock
+     * cookieless stack ([videoStartDataSourceFactory]: [cachedDataSourceFactory] with the same cache and user agent, one try,
+     * never an unbounded request, a cache error not ignored), on the repository's CDN lane. Building it builds neither the cache nor the WebView: both are read at the first write. Mock
      * mode never writes one (its clip is in the app).
      */
     private val videoStarts: VideoStarts = CacheVideoStarts(
         cache = { videoCache.cache },
-        dataSource = { videoStartDataSourceFactory(context, videoCache.cache, videoRequestUserAgent).createDataSource() },
+        // The write's own abort (M5): cancelling it closes the request that is out.
+        dataSource = { abort -> videoStartDataSourceFactory(context, videoCache.cache, videoRequestUserAgent, abort).createDataSource() },
     )
 
     /**

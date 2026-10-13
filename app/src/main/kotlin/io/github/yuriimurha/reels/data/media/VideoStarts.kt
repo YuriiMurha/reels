@@ -27,7 +27,13 @@ enum class StartWrite {
     /** They were there already: nothing was fetched. */
     CACHED,
 
-    /** The CDN refused the link (a 4xx other than 429): it will not play as it is. */
+    /**
+     * The CDN refused the link as one that ran out or was revoked (403, 410): the same answer the player renews a link on
+     * (R19, R27), so the item's own play goes to the visit's renewal instead of asking it again.
+     */
+    EXPIRED,
+
+    /** Another 4xx but 429 (a 404, a 408, ...): passed quietly; the item's own play is the player's, as before R26 (R27). */
     REFUSED,
 
     /** The CDN said 429. */
@@ -35,6 +41,9 @@ enum class StartWrite {
 
     /** No connection, a timeout, a 5xx or any other failure to fetch. */
     OFFLINE,
+
+    /** The video cache failed (a full disk, a cache that could not start), or the write would have asked for the whole video: stop (I1). */
+    FAILED,
 }
 
 /**
@@ -47,8 +56,9 @@ interface VideoStarts {
     fun isCached(key: String, bytes: Long): Boolean
 
     /**
-     * Writes the first [bytes] of [uri] under [key]: one request, never a second for the same write. Cancellable: it returns
-     * (or throws) only once the write has stopped, leaving what it wrote cached and nothing locked.
+     * Writes the first [bytes] of [uri] under [key]: one bounded request, never a second for the same write, and never one
+     * for the whole video. Cancellable: the request that is out is closed at once (M5), and it returns (or throws) only once
+     * the write has stopped, leaving what it wrote cached and nothing locked.
      */
     suspend fun write(key: String, uri: Uri, bytes: Long): StartWrite
 
@@ -69,13 +79,15 @@ interface VideoStarts {
 
 /**
  * [VideoStarts] over the viewer's video cache with Media3's `CacheWriter`, through [dataSource]: the player's own cookieless
- * stack ([videoStartDataSourceFactory]), whose upstream tries each write once ([OneTryUpstream]). The request is bounded: it
- * asks for the first [bytes] only (fewer when the video is known to be shorter), and what is cached already is not asked for.
+ * stack ([videoStartDataSourceFactory]), whose upstream tries each write once and never unbounded ([OneTryUpstream]), given
+ * the write's [StartWriteAbort]. The request is bounded: it asks for the first [bytes] only (fewer when the video is known
+ * to be shorter), and what is cached already is not asked for. `CacheWriter` blocks: it runs on [io], never the caller's
+ * thread (the viewer's queue calls from the main thread).
  */
 @UnstableApi
 class CacheVideoStarts(
     private val cache: () -> Cache,
-    private val dataSource: () -> CacheDataSource,
+    private val dataSource: (abort: StartWriteAbort) -> CacheDataSource,
     private val io: CoroutineDispatcher = Dispatchers.IO,
 ) : VideoStarts {
     override fun isCached(key: String, bytes: Long): Boolean = lengthToWrite(key, bytes) == null
@@ -83,17 +95,20 @@ class CacheVideoStarts(
     override suspend fun write(key: String, uri: Uri, bytes: Long): StartWrite {
         val length = withContext(io) { lengthToWrite(key, bytes) } ?: return StartWrite.CACHED
         val spec = DataSpec.Builder().setUri(uri).setKey(key).setPosition(0).setLength(length).build()
-        val writer = CacheWriter(withContext(io) { dataSource() }, spec, null, null)
+        val abort = StartWriteAbort()
+        val writer = CacheWriter(withContext(io) { dataSource(abort) }, spec, null, null)
         return try {
             coroutineScope {
                 val writing = async(io) { writer.cache() }
                 try {
                     writing.await()
                 } catch (e: CancellationException) {
-                    // CacheWriter stops only when told, at its next read: its source then closes, what it wrote stays cached,
-                    // and nothing stays locked. This scope returns once it has stopped, so a caller that waits for the
-                    // cancelled write finds the cache free for the player.
+                    // CacheWriter stops only when told, and looks only between reads; the abort closes the request that is
+                    // out, so a read or a response that stalls returns now (M5). Its source then closes, what it wrote stays
+                    // cached, and nothing stays locked. This scope returns once it has stopped. The abort runs on its own
+                    // thread: closing a connection can wait on the platform, and the caller may be the main thread.
                     writer.cancel()
+                    Thread({ abort.abort() }, "video-start-abort").apply { isDaemon = true }.start()
                     throw e
                 }
             }
@@ -118,11 +133,13 @@ class CacheVideoStarts(
     }
 
     private fun IOException.asStartWrite(): StartWrite {
-        val status = generateSequence<Throwable>(this) { it.cause }.take(MAX_CAUSE_DEPTH)
-            .filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
+        val causes = generateSequence<Throwable>(this) { it.cause }.take(MAX_CAUSE_DEPTH).toList()
+        val status = causes.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
         return when {
+            status == 403 || status == 410 -> StartWrite.EXPIRED
             status == 429 -> StartWrite.LIMITED
             status != null && status in 400..499 -> StartWrite.REFUSED
+            causes.any { it is Cache.CacheException || it is UnboundedStartRefused } -> StartWrite.FAILED
             else -> StartWrite.OFFLINE
         }
     }

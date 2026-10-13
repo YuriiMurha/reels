@@ -13,6 +13,7 @@ import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -134,11 +135,18 @@ class CarouselRepository(
         internal fun downloadOf(position: Int): Mutex = downloads.computeIfAbsent(position) { Mutex() }
 
         /**
-         * R25, R26: the links the CDN refused in this visit, pictures and video starts alike. None is requested again in it, by
-         * the queue or by the item's own load: a refused picture goes to the visit's renewal, a video item whose start was
-         * refused plays only a renewed link.
+         * R25, R26: the links the CDN refused in this visit: pictures (403, 404, 410: `MediaFetcher` does not tell them apart),
+         * and video starts refused as running out (403, 410, R27). None is requested again in it, by the queue or by the item's
+         * own load: a refused picture goes to the visit's renewal, a video item whose start was refused plays only a renewed link.
          */
         internal val refused: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+        /**
+         * R27: video links a start ahead was refused with a 4xx that is not a link running out (a 404, a 408, ...). No start
+         * asks them again in the visit, but the item's own play is the player's, as before R26 (R19: a video's 404 renews
+         * nothing). A 403 or 410 goes into [refused] instead.
+         */
+        internal val startsRefused: MutableSet<String> = ConcurrentHashMap.newKeySet()
     }
 
     /** Stored items; when none, one paced `mediaInfo` fills them (once a [visit]). Not a carousel: [ItemsResult.CoverOnly] (null). */
@@ -193,10 +201,12 @@ class CarouselRepository(
      *
      * Pacing: it never asks Instagram anything. Only a link [video] would play as it is (more than 10 minutes left) is used: a
      * stale one, or one with no link, is skipped, never renewed. A start already cached costs nothing, and neither does Mock
-     * mode, whose clip is local. A link the CDN refuses is skipped quietly and never requested again in the visit, by this or
-     * by the item's own play ([video] renews it instead). The CDN's 429, offline and a post gone stop the queue (P1).
-     * Bytes written for a link that was replaced meanwhile, or for a post that left the library, are dropped again (P2, D3).
-     * Throws only [CancellationException]; cancelled, it returns once the write has stopped, its bytes so far kept.
+     * mode, whose clip is local. A link the CDN refuses is skipped quietly and never requested again in the visit by a
+     * start; refused as running out (403, 410), the item's own play does not ask it again either ([video] renews it instead,
+     * as it would after the player's own 403 or 410), while any other 4xx leaves the play to the player, as before (R27,
+     * R19). The CDN's 429, offline, a failing cache (I1) and a post gone stop the queue (P1). Bytes written for a link that
+     * was replaced meanwhile, or for a post that left the library, are dropped again (P2, D3), also when the write is
+     * cancelled (M2). Throws only [CancellationException]; cancelled, it returns once the write has stopped and been checked.
      */
     suspend fun preloadVideo(media: MediaEntity, position: Int, visit: Visit): StartAhead = try {
         loadStart(media, position, visit)
@@ -271,6 +281,9 @@ class CarouselRepository(
             is Renewal.Failed -> return ItemImage.Failed(renewal.message)
             is Renewal.Items -> renewal.items.at(position) ?: return ItemImage.Failed(CANT_LOAD)
         }
+        // M4: a video item Instagram sent no preview frame for has no poster to fetch, and none a renewal would bring: nothing
+        // is asked (a poster never spends the visit's request on a link that is not there).
+        if (item.type == MediaType.VIDEO && item.imageUrl.isEmpty()) return ItemImage.Failed(CANT_LOAD)
         val first = download(pk, position, item.imageUrl, visit)
         // P2: the post's items were replaced while it downloaded (a renewal, a sync): the item as stored now loads instead.
         if (first == Download.Replaced && again) return loadImageNow(media, position, visit, again = false)
@@ -304,6 +317,8 @@ class CarouselRepository(
         // The item as stored now, read under the lock (P2). None stored, none at this position (past the last item), or one
         // of the other type: nothing is asked.
         val item = storedItem(pk, position)?.takeIf { it.type == type } ?: return ImageAhead.Skipped
+        // M4: a video item with no preview frame has no poster: passed, with no renewal and no stop (its start still comes).
+        if (type == MediaType.VIDEO && item.imageUrl.isEmpty()) return ImageAhead.Skipped
         // As for download's own check after the bytes: a post deleted or unsaved gets no download at all.
         if (!isLive(pk)) return ImageAhead.Stop
         val what = if (type == MediaType.VIDEO) POSTER_LOG else PREFETCH_LOG
@@ -323,34 +338,52 @@ class CarouselRepository(
         val item = storedItem(pk, position)?.takeIf { it.type == MediaType.VIDEO } ?: return StartAhead.Skipped
         // Only a link the item would play as it is: a stale one (or none) is never renewed for a start ahead, and one the CDN
         // refused in this visit is not asked again.
-        val url = item.videoUrl?.takeIf { !item.videoLinkNeedsRefresh(now()) && it !in visit.refused } ?: return StartAhead.Skipped
+        val url = item.videoUrl?.takeIf { !item.videoLinkNeedsRefresh(now()) && it !in visit.refused && it !in visit.startsRefused }
+            ?: return StartAhead.Skipped
         val key = "${pk}_$position"
         if (withContext(ioDispatcher) { starts.isCached(key, VIDEO_START_BYTES) }) return StartAhead.Cached
         // D3: a post deleted or unsaved gets no request.
         if (!isLive(pk)) return StartAhead.Stop
-        val written = pacer.cdn { starts.write(key, url.toUri(), VIDEO_START_BYTES) }
+        val written = try {
+            pacer.cdn { starts.write(key, url.toUri(), VIDEO_START_BYTES) }
+        } catch (e: CancellationException) {
+            // M2: a cancelled write keeps what it wrote. Checked as a finished one is, before the cancellation goes on.
+            withContext(NonCancellable) { dropIfReplaced(pk, position, url, key) }
+            throw e
+        }
         // P2, D3: the post's items were replaced while this was written (a renewal or a sync, whose R20 drop may already have
         // run), or the post left the library: bytes written (all, or some before the connection dropped) may be another
         // slide's, so they go again.
-        val dropped = (written == StartWrite.WRITTEN || written == StartWrite.OFFLINE) && !startStillStored(pk, position, url)
-        if (dropped) {
-            withContext(ioDispatcher) { starts.remove(key) }
-            log?.invoke("$START_LOG dropped (link replaced)")
-        }
+        val dropped = (written == StartWrite.WRITTEN || written == StartWrite.OFFLINE) && dropIfReplaced(pk, position, url, key)
         return when (written) {
             StartWrite.WRITTEN, StartWrite.CACHED -> when {
                 !dropped -> StartAhead.Cached
                 isLive(pk) -> StartAhead.Skipped
                 else -> StartAhead.Stop
             }
-            StartWrite.REFUSED -> {
+            StartWrite.EXPIRED -> {
+                // R27: the answer the player renews a link on; the item's own play goes to the visit's renewal instead.
                 visit.refused += url
+                log?.invoke("$START_LOG failed (expired)")
+                StartAhead.Skipped
+            }
+            StartWrite.REFUSED -> {
+                visit.startsRefused += url
                 log?.invoke("$START_LOG failed (refused)")
                 StartAhead.Skipped
             }
             StartWrite.LIMITED -> StartAhead.Stop.also { log?.invoke("$START_LOG failed (cdn limit)") }
             StartWrite.OFFLINE -> StartAhead.Stop.also { log?.invoke("$START_LOG failed (offline)") }
+            StartWrite.FAILED -> StartAhead.Stop.also { log?.invoke("$START_LOG failed (cache)") }
         }
+    }
+
+    /** P2, D3, M2: drops what is cached under [key] when the item no longer stores [url] or the post left. True when it did. */
+    private suspend fun dropIfReplaced(pk: String, position: Int, url: String, key: String): Boolean {
+        if (startStillStored(pk, position, url)) return false
+        withContext(ioDispatcher) { starts.remove(key) }
+        log?.invoke("$START_LOG dropped (link replaced)")
+        return true
     }
 
     /** True while the post [pk] is live and its item at [position] is still the video of [url]. */
@@ -388,7 +421,8 @@ class CarouselRepository(
         if (item.type != MediaType.VIDEO) return VideoSource.Unavailable(CANT_LOAD)
         // R3: Mock mode plays the bundled clip; the fake library's links name nothing a player can open.
         sampleClip?.let { return VideoSource.Play(it, key) }
-        // R26: the CDN refused this very link when the item's start was written ahead in this visit; it is not asked again.
+        // R26, R27: the CDN refused this very link as running out (403, 410) when the item's start was written ahead in this
+        // visit, as it would have refused the player: it is not asked again, the visit's renewal is (as after the player's own).
         val refusedAhead = item.videoUrl?.let { it in visit.refused } == true
         if (!forceRefresh) {
             if (!refusedAhead && !item.videoLinkNeedsRefresh(now())) return VideoSource.Play(checkNotNull(item.videoUrl).toUri(), key)

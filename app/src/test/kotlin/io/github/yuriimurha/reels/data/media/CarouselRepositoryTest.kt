@@ -1421,14 +1421,14 @@ class CarouselRepositoryTest {
     }
 
     /**
-     * A link the CDN refuses is skipped quietly (no renewal) and never asked again in the visit: not by another start ahead,
-     * and not by the item's own play, which goes straight to the visit's one renewal and plays the new link. A new visit may
-     * ask again.
+     * A link the CDN refuses as running out (403, 410) is skipped quietly (no renewal) and never asked again in the visit: not
+     * by another start ahead, and not by the item's own play, which goes straight to the visit's one renewal (as it would
+     * after the player's own 403 or 410, R27) and plays the new link. A new visit may ask again.
      */
     @Test
-    fun aRefusedStartIsSkippedAndNeverAskedAgainInTheVisit() = runTest {
+    fun anExpiredStartIsSkippedAndNeverAskedAgainInTheVisit() = runTest {
         storeOldItems()
-        starts.answer = { _, _ -> StartWrite.REFUSED }
+        starts.answer = { _, _ -> StartWrite.EXPIRED }
         val repository = repository()
         val visit = CarouselRepository.Visit()
 
@@ -1445,11 +1445,11 @@ class CarouselRepositoryTest {
         assertEquals(2, starts.writes.size, "a new visit asks again")
     }
 
-    /** The item's own play after a refused start, when the visit's renewal brings the same link back: nothing to play. */
+    /** The item's own play after an expired start, when the visit's renewal brings the same link back: nothing to play. */
     @Test
-    fun aRefusedStartWhoseRenewalBringsTheSameLinkCannotLoad() = runTest {
+    fun anExpiredStartWhoseRenewalBringsTheSameLinkCannotLoad() = runTest {
         storeOldItems()
-        starts.answer = { _, _ -> StartWrite.REFUSED }
+        starts.answer = { _, _ -> StartWrite.EXPIRED }
         replyWithFirstThree { items -> items.map { if (it.position == 2) it.copy(videoUrl = OLD_VIDEO) else it } }
         val repository = repository()
         val visit = CarouselRepository.Visit()
@@ -1457,6 +1457,152 @@ class CarouselRepositoryTest {
 
         assertEquals(VideoSource.Unavailable(CANT_LOAD), repository.video(media, 2, visit))
         assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    /**
+     * R27: a start refused with any other 4xx (a 404, a 408) is passed quietly and not asked again by a start in the visit,
+     * but it changes nothing for the item's own play: the player plays the stored link, as before R26, and a 404 there renews
+     * nothing (R19). A pre-load never changes what a play costs.
+     */
+    @Test
+    fun aStartRefusedOtherwiseIsPassedAndLeavesThePlayToThePlayer() = runTest {
+        storeOldItems()
+        starts.answer = { _, _ -> StartWrite.REFUSED }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, visit))
+        assertEquals(StartAhead.Skipped, repository.preloadVideo(media, 2, visit))
+        assertEquals(1, starts.writes.size, "not asked again by a start in the visit")
+
+        assertEquals(VideoSource.Play(Uri.parse(OLD_VIDEO), "${pk}_2"), repository.video(media, 2, visit), "the stored link, as the player always had")
+        assertEquals(emptyList(), fake.calls, "no mediaInfo")
+    }
+
+    /** I1: a start the cache failed (a full disk, a cache that could not start) stops the queue, with no request to Instagram. */
+    @Test
+    fun aFailingCacheStopsTheQueue() = runTest {
+        storeOldItems()
+        starts.answer = { _, _ -> StartWrite.FAILED }
+
+        assertEquals(StartAhead.Stop, repository().preloadVideo(media, 2, CarouselRepository.Visit()))
+
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * M2: a start write cancelled part way (the owner left the post, or settled on the item) keeps what it wrote, so it is
+     * checked as a finished one is: kept when the item still has that link, dropped when the link was replaced while it was
+     * written (R20's drop may already have run) or the post left the library. The cancellation still reaches the caller.
+     */
+    @Test
+    fun aCancelledStartIsCheckedAsAFinishedOneIs() = runTest {
+        storeOldItems()
+        val repository = repository()
+        suspend fun cancelledWhile(during: suspend () -> Unit) {
+            val writing = CompletableDeferred<Unit>()
+            starts.answer = { _, _ ->
+                during()
+                writing.complete(Unit)
+                awaitCancellation()
+            }
+            val job = async { repository.preloadVideo(media, 2, CarouselRepository.Visit()) }
+            withContext(Dispatchers.Default) { withTimeout(5_000) { writing.await() } }
+            job.cancel()
+            withContext(Dispatchers.Default) { withTimeout(5_000) { job.join() } }
+            assertTrue(job.isCancelled)
+        }
+
+        cancelledWhile { }
+        assertEquals(emptyList(), starts.removed.toList(), "the item's own start, kept")
+
+        cancelledWhile { db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { "https://cdn.example.test/new/v2.mp4?oe=1" }) }) }
+        assertEquals(listOf("${pk}_2"), starts.removed.toList(), "a replaced link's bytes dropped")
+
+        storeOldItems()
+        cancelledWhile { db.mediaDao().markRemoved(listOf(pk), START) }
+        assertEquals(listOf("${pk}_2", "${pk}_2"), starts.removed.toList(), "an unsaved post's bytes dropped")
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * M4: a video item Instagram sent no preview frame for has no poster. Ahead it is passed (not a stop: the queue goes on to
+     * the starts), and its own load fails quietly; neither spends the visit's `mediaInfo`, on any visit. Its start still comes.
+     */
+    @Test
+    fun aVideoItemWithNoPosterLinkAsksNothingForAPoster() = runTest {
+        storeOldItems()
+        db.carouselItemDao().replace(pk, rows().map { if (it.position == 2) it.copy(imageUrl = "") else it })
+        fetcher.answer = { url -> url.toByteArray() }
+        val repository = repository()
+
+        for (visit in listOf(CarouselRepository.Visit(), CarouselRepository.Visit())) {
+            assertEquals(ImageAhead.Skipped, repository.prefetchPoster(media, 2, visit))
+            assertEquals(ItemImage.Failed(CANT_LOAD), repository.image(media, 2, visit))
+            assertEquals(StartAhead.Cached, repository.preloadVideo(media, 2, visit), "its start still comes")
+        }
+
+        assertEquals(emptyList(), fake.calls, "no mediaInfo for a poster that is not there")
+        assertEquals(emptyList(), fetcher.fetched)
+    }
+
+    /** The whole start is what counts as cached: a start the player had begun (a few hundred kilobytes) is topped up. */
+    @Test
+    fun aPartlyCachedStartIsToppedUp() = runTest {
+        storeOldItems()
+        val asked = mutableListOf<Long>()
+        val partly = object : VideoStarts by starts {
+            override fun isCached(key: String, bytes: Long): Boolean = (bytes <= 300L * 1024).also { asked += bytes }
+        }
+
+        repository(starts = partly).preloadVideo(media, 2, CarouselRepository.Visit())
+
+        assertEquals(listOf(VIDEO_START_BYTES), asked, "the whole start is what is checked")
+        assertEquals(listOf("${pk}_2 $OLD_VIDEO ${1 shl 20}"), starts.writes.toList(), "and the rest of it is written")
+    }
+
+    /** R26's debug lines say what happened, in the words README section 8 gives, and never name a link, a host or a pk. */
+    @Test
+    fun thePosterAndStartLinesAreLabelledAndNameNoLinkOrPk() = runTest {
+        val lines = Collections.synchronizedList(mutableListOf<String>())
+        storeOldItems()
+        sessionReady = false // the renewal a refused poster asks for is not sent
+        fetcher.answer = { null }
+        repository(log = { lines += it }).prefetchPoster(media, 2, CarouselRepository.Visit())
+        for (answer in listOf(StartWrite.EXPIRED, StartWrite.REFUSED, StartWrite.LIMITED, StartWrite.OFFLINE, StartWrite.FAILED)) {
+            starts.answer = { _, _ -> answer }
+            repository(log = { lines += it }).preloadVideo(media, 2, CarouselRepository.Visit())
+        }
+        starts.answer = { _, _ ->
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { "https://cdn.example.test/new/v2.mp4?oe=1" }) })
+            StartWrite.WRITTEN
+        }
+        repository(log = { lines += it }).preloadVideo(media, 2, CarouselRepository.Visit())
+
+        for (kind in listOf(
+            "carousel poster failed (refused)", "carousel start failed (expired)", "carousel start failed (refused)",
+            "carousel start failed (cdn limit)", "carousel start failed (offline)", "carousel start failed (cache)",
+            "carousel start dropped (link replaced)",
+        )) assertTrue(lines.any { it.startsWith(kind) }, "a line '$kind...': $lines")
+        val links = listOf("://", "cdn.", "example", "fake", ".jpg", ".mp4")
+        assertTrue(lines.none { line -> pk in line || links.any { it in line } }, "no link, host or pk: $lines")
+    }
+
+    /**
+     * N2, R16 with a start written ahead: a long video whose first megabyte only is cached (by the real writer) is not "all
+     * cached", so offline it still says "Offline: this item isn't cached yet".
+     */
+    @Test
+    fun offlineWithOnlyItsStartCachedSaysOffline() = runTest {
+        storeOldItems()
+        val source = File(tmp.root, "v2.mp4").apply { writeBytes(ByteArray(3 shl 20) { (it % 251).toByte() }) }
+        val writer = CacheVideoStarts({ videoCache.cache }, { _ ->
+            CacheDataSource.Factory().setCache(videoCache.cache).setUpstreamDataSourceFactory(FileDataSource.Factory()).createDataSource()
+        })
+        assertEquals(StartWrite.WRITTEN, writer.write("${pk}_2", Uri.fromFile(source), VIDEO_START_BYTES))
+        assertTrue(writer.isCached("${pk}_2", VIDEO_START_BYTES), "precondition: the start is there")
+
+        assertEquals(VideoSource.Unavailable(OFFLINE), repository(starts = writer).unreachable(media, 2))
     }
 
     /** P1: the CDN's 429 and offline stop the queue, with no request to Instagram. */
@@ -1526,7 +1672,7 @@ class CarouselRepositoryTest {
         storeOldItems()
         fetcher.answer = { url -> url.toByteArray() }
         val source = File(tmp.root, "v2.mp4").apply { writeBytes(ByteArray(3_000) { it.toByte() }) }
-        val writer = CacheVideoStarts({ videoCache.cache }, {
+        val writer = CacheVideoStarts({ videoCache.cache }, { _ ->
             CacheDataSource.Factory().setCache(videoCache.cache).setUpstreamDataSourceFactory(FileDataSource.Factory()).createDataSource()
         })
         assertEquals(StartWrite.WRITTEN, writer.write("${pk}_2", Uri.fromFile(source), 3_000L))
@@ -1550,7 +1696,7 @@ class CarouselRepositoryTest {
     fun everyPathOfAVisitTogetherSendsOneMediaInfo() = runTest {
         storeOldItems()
         fetcher.answer = { null }
-        starts.answer = { _, _ -> StartWrite.REFUSED }
+        starts.answer = { _, _ -> StartWrite.EXPIRED }
         val repository = repository()
         val visit = CarouselRepository.Visit()
 

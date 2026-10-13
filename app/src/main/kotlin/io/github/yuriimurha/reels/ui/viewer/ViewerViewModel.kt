@@ -20,11 +20,11 @@ import io.github.yuriimurha.reels.data.media.videoLinkNeedsRefresh
 import io.github.yuriimurha.reels.data.settings.SettingsStore
 import io.github.yuriimurha.reels.instagram.MediaType
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -34,6 +34,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.cancellation.CancellationException
 
 /** The settled post's carousel visit, for the post [pk]: what its [CarouselPager] shows. */
@@ -359,11 +361,16 @@ class ViewerViewModel(
         }
 
         /**
-         * R26: the owner settled on the video item at [page]: a start of it still being written ahead stops now, and this
-         * returns once the write has (what it wrote stays cached), so the player finds the cache free. Any other page's goes on.
+         * R26: the owner settled on the video item at [page]: a start of it still being written ahead stops now (its request
+         * is closed at once, M5), and this returns once the write has (what it wrote stays cached, and was checked, M2), so
+         * the player finds the cache free. Never more than [START_STOP_WAIT_MS] of real time, whatever the network does: a
+         * write that has not stopped by then finishes stopping on its own, and the player reads past its lock (the same bytes
+         * from the network, at worst the rest of one megabyte). Any other page's write goes on.
          */
         suspend fun stopStartOf(page: Int) {
-            startOut?.takeIf { it.first == page }?.second?.cancelAndJoin()
+            val start = startOut?.takeIf { it.first == page }?.second ?: return
+            start.cancel()
+            withContext(Dispatchers.Default) { withTimeoutOrNull(START_STOP_WAIT_MS) { start.join() } }
         }
 
         fun end() = job.cancel()
@@ -420,6 +427,9 @@ class ViewerViewModel(
     }
 
     private companion object {
+        /** M5: the longest the settled video item waits for its start written ahead to stop, in real time. */
+        const val START_STOP_WAIT_MS = 300L
+
         /** The items with a picture to show: an image item's image, and a video item's poster until its first frame (R26). */
         val PICTURED = setOf(MediaType.IMAGE, MediaType.VIDEO)
 

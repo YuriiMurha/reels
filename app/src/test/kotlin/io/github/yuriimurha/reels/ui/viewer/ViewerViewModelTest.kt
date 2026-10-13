@@ -83,6 +83,7 @@ import java.io.IOException
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.system.measureTimeMillis
 import kotlin.random.Random
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -1243,7 +1244,7 @@ class ViewerViewModelTest {
         val cdn = Cdn()
         val starts = Starts(cdn).apply {
             hold(start(2))
-            stopTakesMs = 300 // a write stops only at its next read: the player must wait for that, not just for the cancel
+            stopTakesMs = 100 // a write stops only at its next read: the player must wait for that, not just for the cancel
         }
         val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
         val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
@@ -1263,6 +1264,42 @@ class ViewerViewModelTest {
             eventually { while (starts.written.size < videosAhead.size) delay(10) }
             assertEquals(videosAhead.map(::start), starts.written.toList(), "and the queue went on")
             assertEquals(listOf(start(2)), starts.cancelled.toList())
+        } finally {
+            starts.releaseAll()
+            job.cancel()
+        }
+    }
+
+    /**
+     * M5: a start that does not stop at once (here 3 s, as a connection that stalls might) holds the player up for no more
+     * than a moment: the item gets the player within about 300 ms, before the write has stopped, and the queue still takes
+     * the next start only once it has.
+     */
+    @Test
+    fun aStartThatIsSlowToStopHoldsThePlayerUpForAMomentOnly() = runTest {
+        storeCarousel()
+        val cdn = Cdn()
+        val starts = Starts(cdn).apply {
+            hold(start(2))
+            stopTakesMs = 3_000
+        }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        starts.onCancelled = { player.events += "gave way:$it" }
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val job = following(viewModel, player, resolved)
+        try {
+            runCurrent()
+            settle(player, resolved, item(0))
+            eventually { while (start(2) !in starts.written) delay(10) }
+
+            viewModel.onItemSettled(pk, 2)
+            val waited = measureTimeMillis { settleItem(player, item(2), played = start(2)) }
+
+            assertTrue(waited < 1_500, "the player waited $waited ms for a write that would not stop")
+            assertTrue("gave way:${start(2)}" !in player.events, "the player did not wait for the write to stop: ${player.events}")
+            eventually { while (starts.written.size < videosAhead.size) delay(10) }
+            assertEquals(listOf(start(2)), starts.cancelled.toList(), "the next start came only once that write had stopped")
         } finally {
             starts.releaseAll()
             job.cancel()
@@ -1357,15 +1394,16 @@ class ViewerViewModelTest {
     }
 
     /**
-     * A start the CDN refuses is passed quietly and the queue goes on; nothing is renewed for it. When the owner then settles
-     * on that item, it does not ask the refused link again: its own play takes the visit's one renewal and plays the new link.
-     * Settling on it again in the visit asks nothing more, and the queue never writes it again.
+     * A start the CDN refuses as running out (403, 410) is passed quietly and the queue goes on; nothing is renewed for it.
+     * When the owner then settles on that item, it does not ask the refused link again: its own play takes the visit's one
+     * renewal (R27: as after the player's own 403 or 410) and plays the new link. Settling on it again in the visit asks
+     * nothing more, and the queue never writes it again.
      */
     @Test
-    fun aRefusedStartIsPassedAndItsItemPlaysARenewedLinkWithTheVisitsOneRequest() = runTest {
+    fun anExpiredStartIsPassedAndItsItemPlaysARenewedLinkWithTheVisitsOneRequest() = runTest {
         storeCarousel()
         val cdn = Cdn()
-        val starts = Starts(cdn) { key -> if (key == start(2)) StartWrite.REFUSED else StartWrite.WRITTEN }
+        val starts = Starts(cdn) { key -> if (key == start(2)) StartWrite.EXPIRED else StartWrite.WRITTEN }
         val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
         val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
         val resolved = MutableStateFlow(emptyList<SettledPage>())
@@ -1390,6 +1428,84 @@ class ViewerViewModelTest {
             assertEquals(videosAhead.size, starts.written.size, "the refused start was never written again")
         } finally {
             job.cancel()
+        }
+    }
+
+    /**
+     * R27: a start refused with another 4xx (a 404) is passed, and the item's own play is the player's: its stored link, no
+     * renewal. A pre-load never changes what a play costs.
+     */
+    @Test
+    fun aStartRefusedOtherwiseLeavesThePlayToThePlayer() = runTest {
+        storeCarousel()
+        val cdn = Cdn()
+        val starts = Starts(cdn) { key -> if (key == start(2)) StartWrite.REFUSED else StartWrite.WRITTEN }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
+        val resolved = MutableStateFlow(emptyList<SettledPage>())
+        val job = following(viewModel, player, resolved)
+        try {
+            runCurrent()
+            settle(player, resolved, item(0))
+            eventually { while (starts.written.size < videosAhead.size) delay(10) }
+
+            viewModel.onItemSettled(pk, 2)
+            settleItem(player, item(2), played = start(2))
+
+            assertEquals(Uri.parse("https://cdn.example.test/old/v2.mp4?oe=1"), player.uris.last(), "the stored link")
+            assertEquals(emptyList(), mediaInfoCalls, "no mediaInfo")
+        } finally {
+            job.cancel()
+        }
+    }
+
+    /**
+     * M4: a video item with no preview frame has no poster: the queue passes it without a renewal and goes on, so the video
+     * starts are still written, and the visit sends no `mediaInfo`.
+     */
+    @Test
+    fun aVideoItemWithNoPosterLinkStillGetsItsStartAndSpendsNoRequest() = runTest {
+        storeCarousel()
+        db.carouselItemDao().replace(pk, db.carouselItemDao().items(pk).map { if (it.position == 2) it.copy(imageUrl = "") else it })
+        val cdn = Cdn()
+        val starts = Starts(cdn)
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+
+        viewModel.onSettled(carousel)
+
+        eventually { while (starts.written.size < videosAhead.size) delay(10) }
+        assertEquals(videosAhead.map(::start), starts.written.toList())
+        assertEquals(emptyList(), mediaInfoCalls)
+        assertTrue(cdn.fetched.none { it.endsWith("-2") || it == old(2) }, "no poster asked for item 2: ${cdn.fetched}")
+    }
+
+    /** The earlier video items' starts come nearest first, as the earlier pictures do. */
+    @Test
+    fun earlierStartsComeNearestFirst() = runTest {
+        db.mediaDao().upsert(listOf(carousel))
+        db.carouselItemDao().replace(
+            pk,
+            listOf(MediaType.IMAGE, MediaType.VIDEO, MediaType.VIDEO, MediaType.VIDEO, MediaType.IMAGE).mapIndexed { position, type ->
+                CarouselItemEntity(
+                    pk, position, type, 1080, 1350, old(position),
+                    if (type == MediaType.VIDEO) "https://cdn.example.test/old/v$position.mp4?oe=1" else null,
+                    if (type == MediaType.VIDEO) fresh else null,
+                )
+            },
+        )
+        val cdn = Cdn().apply { hold(old(1)) }
+        val starts = Starts(cdn)
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) }
+            viewModel.onItemSettled(pk, 4)
+            cdn.release(old(1))
+
+            eventually { while (starts.written.size < 3) delay(10) }
+            assertEquals(listOf(start(3), start(2), start(1)), starts.written.toList(), "nearest first")
+        } finally {
+            cdn.releaseAll()
         }
     }
 
@@ -1430,7 +1546,7 @@ class ViewerViewModelTest {
     fun everyPathOfAVisitSendsOneMediaInfo() = runTest {
         storeCarousel()
         val cdn = Cdn { url -> if (url.startsWith("fake://")) byteArrayOf(1, 2, 3) else null } // only renewed links load
-        val starts = Starts(cdn) { StartWrite.REFUSED }
+        val starts = Starts(cdn) { StartWrite.EXPIRED }
         val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn, starts = starts))
         val player = PlayerHooks(MutableStateFlow(SettledPage(0, null)))
         val resolved = MutableStateFlow(emptyList<SettledPage>())

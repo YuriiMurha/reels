@@ -154,7 +154,7 @@ Smaller changes, none of which raises a rate:
 
 - **§3.2, the settle gate (final review, C1).** A settle is reported only when the list's row at the settled index and the pager's laid-out key there agree (a placeholder row always settles). A sync adding or removing a post above the viewed one changes the list at once while the pager re-keys in its next measure; the viewer then reset the carousel to item 1 and handed the player the post that slid in. Now the move arrives as the same post at its new index, which keeps its visit.
 - **§3.3, the removed-post guard (final review, D3).** The repository treats a post that a sync marked removed as gone too: it writes no image file for it (the reconcile's eviction has already run) and sends no request for it.
-- **§3.3, what renews a link.** An image item has no stored expiry, so it is renewed when the CDN refuses its link (a 403, 404 or 410) or it has none; a video item when its stored link is missing, names no expiry, or has 10 minutes or less left, or the player is refused with a 403 or 410. A 429 from the CDN renews nothing.
+- **§3.3, what renews a link.** An image item has no stored expiry, so it is renewed when the CDN refuses its link (a 403, 404 or 410) or it has none; a video item when its stored link is missing, names no expiry, or has 10 minutes or less left, or the player is refused with a 403 or 410, or (R26, R27) its start written ahead was refused with a 403 or 410. A 429 from the CDN renews nothing, and neither does a 404 for a video item.
 - **§3.3, new copy.** "Can't load this item right now: <reason>", where the reason is the Pacer's own, when the Pacer refuses (a cooldown or the 24 h budget).
 - **§3.2, the viewer's state.** The carousel pager's state is hoisted to the page, to put the dots above the overlay, and is seeded with the visit's item so a rotation does not flip to item 0. `CarouselUiState` has a `loading` flag for the small loading mark. The public `ViewerScreen` delegates to an `internal` overload that takes the player, for tests only.
 - **§3.6, the viewer's player effects** now run on `Dispatchers.Main.immediate` (`onMainThread`): Media3 requires the main thread, and a test's dispatcher once woke an effect on a Room thread. A test pins it with a player that checks its thread on every call.
@@ -185,21 +185,54 @@ R26 comes from the owner's test of R23 on the phone (2026-10-13). It changes the
      video item but the settled one into the video cache under `{pk}_{position}`, with Media3's `CacheWriter` and a bounded
      request, through the player's own cookieless stack, in the queue's order, one write at a time inside `pacer.cdn { }`.
      Only a link the item would play as it is (more than 10 minutes left) is used: a stale one is skipped and never renewed,
-     and no `mediaInfo` is ever sent for a start. A start already cached is not fetched. A refused link is skipped quietly and
-     not asked again in the visit, by the queue or by the item's own play, which goes to the visit's one renewal instead; the
-     CDN's 429 or offline stops the queue; leaving the post cancels the write, which leaves the cache consistent. The item the
-     owner settles on stops its write first (what it wrote stays), so the player never reads past the write's lock. A start
-     written while its link was replaced, or its post unsaved, is dropped again (P2, D3). Mock mode writes none: its clip is
-     in the app (and a copy of the short clip would make every Mock-mode item read as fully cached).
+     and no `mediaInfo` is ever sent for a start. A start already cached is not fetched. A link the CDN refuses is skipped
+     quietly and not asked again in the visit by a start; what the item's own play then does is R27's. The CDN's 429, offline
+     or a failing cache stops the queue; leaving the post cancels the write, which leaves the cache consistent. The item the
+     owner settles on stops its write first (what it wrote stays), so the player never reads past the write's lock, waiting
+     300 ms at most. A start written while its link was replaced, or its post unsaved, is dropped again (P2, D3), whether
+     the write finished or was cancelled. Mock mode writes none: its clip is in the app (and a copy of the short clip would
+     make every Mock-mode item read as fully cached).
 
-  Two details the code needed. `CacheWriter` opens an unbounded request when its bounded one fails, which for a refused link,
-  a 429 or no connection is a second request; the write's upstream allows one try (`OneTryUpstream`). And a refused start
-  sends the item's own play to the visit's renewal for a 404 too, where a player's own 404 renews nothing (R19): it saves a
-  request to a link the CDN refused, inside the same bound.
+  `CacheWriter` needed one guard: it opens an unbounded request (the whole video) whenever its bounded one fails, which for a
+  refused link, a 429, no connection or a failing cache would be a second request, and with the player's
+  `FLAG_IGNORE_CACHE_ON_ERROR` a download of the whole video that caches nothing. The write's upstream allows one try and
+  refuses an unbounded request outright (`OneTryUpstream`), and the write's stack does not ignore a cache error.
 
-  Pacing: no new Instagram request and no new request type; still at most one `mediaInfo` a visit, every path together (a
-  refused poster may spend it by R25's rule, a start never). The posters and the starts are extra CDN downloads on the
-  existing CDN lane, one at a time, with the lane's concurrency (2), jitter (0.2–0.8 s) and rate unchanged; the player's own
-  stream stays off the lane, as before. Cost: about 1 MB of data per video item of every carousel opened, even for items the
-  owner never watches, and one small poster image each (the CDN request R10 had saved); the cache's 512 MB bound evicts the
-  starts as it evicts watched videos.
+  Pacing: no request to Instagram that the visit would not already allow, and none from a pre-load itself; no new request
+  type; still at most one `mediaInfo` a visit, every path together (a refused poster may spend it by R25's rule, a start
+  never; R27 says when an item's own play after a refused start does). The posters and the starts are extra CDN downloads on
+  the existing CDN lane, one at a time, with the lane's concurrency (2), jitter (0.2–0.8 s) and rate unchanged; the player's
+  own stream stays off the lane, as before. Cost: about 1 MB of data per video item of every carousel opened, even for items
+  the owner never watches, and one small poster image each (the CDN request R10 had saved). And the starts share the one
+  512 MiB least-recently-used video cache with the videos the owner watched: starts written ahead and never watched are newer than an
+  old watched video, so enough carousels opened (about 27 visits to carousels of 20 video items) push the oldest watched
+  videos out, and those no longer play offline (R16 then says "isn't cached yet" for an item the owner did watch).
+
+R27 is the controller's ruling on R26's review (2026-10-13). It changes the code, with tests that fail without it.
+
+- **R27: a refused video start sends the item's own play to the visit's renewal only for a 403 or 410 (amends R26).** A
+  start refused with a 403 or 410, the answers the player's own error path renews a link on (R19, R9), keeps the link out of
+  the item's play: when the owner settles on the item, it goes to the visit's renewal, as it would have after the player's
+  own 403 or 410, one CDN request sooner. Any other 4xx but 429 (a 404, a 408, ...) is passed quietly by the queue, not asked
+  again by a start in the visit, and changes nothing for the play: the player plays the stored link, and a 404 there renews
+  nothing, as R19 decided. A 429 still stops the queue. Why: R19 sends no request for a video's 404, and a pre-load must not
+  change what a play costs; under R26 a 404 ahead spent the visit's `mediaInfo` on a newly signed link to the same dead
+  object. Cost: none; a 404'd item asks the CDN once more when it plays, as before R26.
+
+Smaller changes from R26's review, none of which raises a rate:
+
+- **I1, a failing cache.** With the disk full (SQLite's error, wrapped by Media3 as a cache error) or a cache that failed to
+  start, `CacheWriter`'s unbounded fallback, through the player's `FLAG_IGNORE_CACHE_ON_ERROR`, downloaded the whole video,
+  cached nothing and answered "written", for every video item of every carousel opened. Now the write's upstream refuses any
+  unbounded request, its stack does not ignore a cache error, and a cache error stops the queue for the visit.
+- **M2, a cancelled write.** A write cancelled part way keeps what it wrote, so it gets the same re-check as a finished one:
+  the bytes go when the item's link was replaced meanwhile or the post left the library.
+- **M4, a video item with no preview frame.** It has no poster: the queue passes it without a renewal and goes on to the
+  starts, and its own load asks nothing. Before, it spent the visit's `mediaInfo` on every visit and its stop ended the
+  starts phase.
+- **M5, a prompt give-way.** Cancelling a write closes its request from the cancelling side, so a write waiting for the CDN's
+  answer stops at once, and the settled item waits for its write 300 ms at most whatever the network does (a body read that
+  stalls inside the platform's stream can outlast the close; it finishes stopping on its own, and the player reads past its
+  lock meanwhile).
+- **M3, the shared cache.** R26's cost now says that starts written ahead share the 512 MiB cache with watched videos and can
+  push the oldest of them out (above).

@@ -803,15 +803,20 @@ real library (a grid tile reading "1/N"). Steps 5 to 8 also work in Mock mode, w
 `GET api/v1/media/<n>/info/` (the interactive lane) in all, and only when its items are not stored yet or a link it needs has
 run out; swiping through the items adds nothing beyond that one. Loading its pictures in the background downloads from the
 image servers, one at a time, and that now includes each video item's preview picture and then the first megabyte of each
-video item (about 1 MB of data per video item of every carousel you open, even ones you never watch); loading a video ahead
-never asks Instagram anything. A carousel whose stored links are old sends that one request as it opens, even if you never
+video item (about 1 MB of data per video item of every carousel you open, even ones you never watch, and never more than
+that megabyte); loading a video ahead never asks Instagram anything. Those starts share the phone's 512 MB video cache with
+the videos you watched, so after many carousels opened the oldest watched videos can be pushed out and no longer play
+offline. A carousel whose stored links are old sends that one request as it opens, even if you never
 swipe (the first picture loaded ahead is refused, and the renewal serves the rest); before this update such a visit sent
 none. One whose links still work sends none. A picture that could not load ahead logs `carousel prefetch failed (<reason>)`
 (`carousel poster failed (<reason>)` for a video item's preview picture, `carousel start failed (<reason>)` for a video's
 start), and its item loads as before when you swipe to it; a picture the image servers refused is not asked for again in the visit,
-but one that met "too many requests" or no network is tried again by its item. A video whose start the servers refused is not
-asked again either: when you reach it, it asks for a new address (that same one request). If a cooldown is running, wait it
-out first.
+but one that met "too many requests" or no network is tried again by its item. A video whose start the servers refused as
+expired (`carousel start failed (expired)`) is not asked again either: when you reach it, it asks for a new address, the same
+one request a video refused while playing would cost. Any other refusal (`carousel start failed (refused)`, a missing file)
+changes nothing when you reach the item: it plays as it did before this update, with no request to Instagram. A video item
+with no preview picture simply shows none. If the phone's storage is full, loading ahead stops (`carousel start failed
+(cache)`). If a cooldown is running, wait it out first.
 
 For the log checks, clear the log, then watch the requests in a second terminal (the start of this section says how):
 

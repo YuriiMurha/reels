@@ -43,7 +43,8 @@ tests, which load only local servers. What is still unconfirmed needs the owner'
   §6), each fix with a test, and R23 (2026-10-13) fetches an open carousel's other pictures ahead, one at a time, on the CDN
   lane; R25, from its review, lets a refused link ahead spend the visit's one renewal; R26 (2026-10-13, after the owner found
   carousel videos still slow to start on the phone) shows a video item's poster until its first frame and writes the first
-  megabyte of each video item ahead, after the pictures, on the same queue. Its database is version 2, and
+  megabyte of each video item ahead, after the pictures, on the same queue; R27, from its review, keeps a start refused with
+  anything but a 403 or 410 from changing what the item's play costs. Its database is version 2, and
   `versionCode` follows it (R21): a build from before it is refused instead of installed. Still unconfirmed, on the owner's phone (README section 8, "The viewer update"):
   - that a real carousel's `carousel_media` reads as parsed (one more of the M3 shape candidates, pinned by a synthetic
     fixture only), that its images load and its video items play, and that an expired link is renewed by the one
@@ -1117,16 +1118,28 @@ On-demand playback (spec 8). Files: `data/media/VideoSourceResolver.kt`, `RealVi
     of a carousel's video item into this cache under the item's own key, `{pk}_{position}`, with Media3's `CacheWriter`, so
     the player starts from disk ([Carousels](#carousels) says which items and when). It reads through
     `videoStartDataSourceFactory`, which is `cachedDataSourceFactory` itself (the same cache, the same cookieless
-    `DefaultHttpDataSource`, the container's `videoRequestUserAgent`, which the player uses too) with one addition,
-    `OneTryUpstream`: `CacheWriter` asks again, unbounded, whenever its bounded request fails, which for a refused link, a 429
-    or no connection would be a second request; after the first failed open, every later open of that write fails at once.
+    `DefaultHttpDataSource`, the container's `videoRequestUserAgent`, which the player uses too) with two differences, both
+    because `CacheWriter` opens an UNBOUNDED request (the whole video) whenever its bounded one fails, for any reason:
+    - its upstream is `OneTryUpstream`: an unbounded request is refused outright (`UnboundedStartRefused`), never sent, and
+      after the first failed open every later open of that write fails at once, the same way, so a refused link, a 429, a
+      timeout or a dropped connection is one request (below the data source, the platform's HTTP stack may resend a request
+      dropped before its answer once, the same bounded one, as it may for the player);
+    - it does not ignore a cache error (no `FLAG_IGNORE_CACHE_ON_ERROR`, which the player keeps): with a full disk (SQLite's
+      error, wrapped by Media3 as a cache error) or a cache that failed to start, the player streams past the cache, but a
+      start fails, where it used to download the whole video, cache nothing and answer "written" (I1).
+    - `CacheWriter` blocks: it runs on the writer's IO dispatcher, never the caller's thread (the viewer's queue is on the main
+      thread).
     - The request is bounded (`Range: bytes=0-1048575`, or up to the video's end when its length is known and shorter), and
       what is cached already is not asked for: a start that is all there costs nothing, and one the player had begun is
       completed from where it stopped.
-    - The answer is `WRITTEN`, `CACHED`, `REFUSED` (a 4xx other than 429), `LIMITED` (429) or `OFFLINE` (anything else).
-    - Cancelling a write (the owner left the post, or settled on that item) tells `CacheWriter` to stop at its next read and
-      returns only once it has: its source closes, what it wrote stays cached and nothing stays locked, so the next write, or
-      the player, goes on from there.
+    - The answer is `WRITTEN`, `CACHED`, `EXPIRED` (403 or 410: the link ran out or was revoked), `REFUSED` (any other 4xx but
+      429), `LIMITED` (429), `FAILED` (a cache error, or the unbounded fallback refused) or `OFFLINE` (anything else).
+    - Cancelling a write (the owner left the post, or settled on that item) tells `CacheWriter` to stop and closes the
+      request that is out from a thread of its own (`StartWriteAbort`, M5), so a write waiting for the CDN's answer stops at
+      once rather than at its next read or the connection's 8 s timeout (a body read that stalls inside the platform's
+      stream can outlast the close; the viewer waits for it 300 ms at most, [Viewer](#viewer)). It returns only once the
+      write has stopped: its source closes, what it wrote stays cached and nothing stays locked, so the next write, or the
+      player, goes on from there.
     - The bytes are only ever the start of a video under its item's key; nothing here decides whether a video is "fully
       cached" (a bounded write records no length), so R78, R9 and R16 read the cache as before.
   - **Eviction:** a FULL reconcile's removed pks go to `MediaEviction` right after their thumbnails are deleted, and Delete
@@ -1163,9 +1176,11 @@ On-demand playback (spec 8). Files: `data/media/VideoSourceResolver.kt`, `RealVi
   2 s minimum gap and counted in the 24 h budget; a fresh link, a cached video and Mock mode send nothing. The player
   retries no HTTP error status (R85), which only removes CDN requests. A carousel's video items add no request type and no
   lane: they stream through the same cookieless, unpaced video stack, and any renewal they need is the carousel visit's one
-  `mediaInfo` ([Carousels](#carousels)). R26 adds CDN downloads, never an Instagram request: an open carousel's video items'
-  posters and the first megabyte of each of them, one at a time on the Pacer's CDN lane ([Carousels](#carousels)); the
-  player's 1 s start buffer was Media3's default already.
+  `mediaInfo` ([Carousels](#carousels)). R26 adds CDN downloads and no request to Instagram that a visit would not already
+  allow (none from a pre-load itself): an open carousel's video items' posters and the first megabyte of each of them, one at
+  a time on the Pacer's CDN lane ([Carousels](#carousels)); the player's 1 s start buffer was Media3's default already. The
+  starts share this cache's 512 MiB with watched videos, and, being newer, can push the oldest watched ones out (M3: about 27
+  visits to carousels of 20 video items fill it), which then no longer play offline.
 
 ## Carousels
 
@@ -1234,6 +1249,9 @@ are shown in the viewer on demand.
     media), the same per-item lock, R25's renewal, P1's stops, P2's re-read and D3's guard; it logs "carousel poster failed
     (<reason>)". Only an item stored as a video: `prefetchImage` passes a video item and `prefetchPoster` an image item, so a
     page the pager shows as one type never gets the other type's picture after a reshape. Item 0 gets none (the cover).
+    A video item Instagram sent no preview frame for (an empty `imageUrl`) has no poster: `Skipped`, with no renewal and no
+    stop, and its own load (`image`) fails quietly without asking (M4); before, it spent the visit's `mediaInfo` on every
+    visit and its stop ended the starts.
   - `preloadVideo(media, position, visit)` (R26): the first `VIDEO_START_BYTES` of a VIDEO item, written into the video cache
     under `{pk}_{position}` through `VideoStarts` ([Video](#video)), inside `pacer.cdn { }`. It answers a `StartAhead`:
     `Cached` (written, or there already), `Skipped` (go on) or `Stop` (nothing more ahead in this visit).
@@ -1242,17 +1260,21 @@ are shown in the viewer on demand.
     - **Nothing fetched for what is there.** A start whose bytes are cached already is `Cached` before the lane is even
       waited for. Mock mode's clip is in the app, so Mock mode writes no start (`Skipped`): the clip is short enough that a
       copy would make every Mock-mode item read as fully cached, which would change R16's message there.
-    - **A refused link** (`REFUSED`) is `Skipped` quietly and goes into `Visit.refused`: no start ahead asks it again in the
-      visit, and neither does the item's own play: `video` then plays its cached bytes if they are all there, else only a
-      link the visit's renewal brings (the same rule as a player's 403, so a renewal that brings the same link back says
-      "Can't load this item"). That sends the item's own play to the visit's one renewal for a 404 too, where a player's own
-      404 renews nothing (R19's split): it saves the second request to a link the CDN refused, inside the same bound.
-    - **The CDN's 429 and offline** stop the queue (`Stop`, P1), as for pictures; a post marked removed gets no request
-      (`Stop`, D3).
-    - **P2 and D3 after the write.** When the item's stored link changed while its start was written (a renewal or a sync,
-      whose R20 drop may already have run), or the post left the library, the bytes may be another slide's: the key is
-      dropped again (`VideoStarts.remove`), the same check as a picture's before its write, made after it because
-      `CacheWriter` writes as the bytes come. A renewal that keeps the shape but renews the link loses a start it could have
+    - **A link refused as running out** (`EXPIRED`: a 403 or 410, the answers the player renews a link on) is `Skipped`
+      quietly and goes into `Visit.refused`: no start ahead asks it again in the visit, and neither does the item's own play:
+      `video` then plays its cached bytes if they are all there, else only a link the visit's renewal brings (the same rule
+      as after a player's 403, so a renewal that brings the same link back says "Can't load this item"). It costs no more than
+      the player's own 403 would have, one CDN request sooner (R27).
+    - **A link refused otherwise** (`REFUSED`: a 404, a 408, any 4xx but 429) is `Skipped` quietly and goes into
+      `Visit.startsRefused`: no start asks it again in the visit, but the item's own play is the player's, as before R26 (R27,
+      keeping R19: a video's 404 renews nothing, so a pre-load never makes a play cost a `mediaInfo`).
+    - **The CDN's 429, offline and a failing cache** (`FAILED`, I1) stop the queue (`Stop`, P1), as for pictures; a post marked
+      removed gets no request (`Stop`, D3).
+    - **P2 and D3 after the write, finished or cancelled.** When the item's stored link changed while its start was written (a
+      renewal or a sync, whose R20 drop may already have run), or the post left the library, the bytes may be another
+      slide's: the key is dropped again (`VideoStarts.remove`), the same check as a picture's before its write, made after it
+      because `CacheWriter` writes as the bytes come. A write cancelled part way keeps what it wrote, so it is checked too,
+      before the cancellation goes on (M2). A renewal that keeps the shape but renews the link loses a start it could have
       kept; it only costs that download again.
   - **One download of an item at a time (R23).** `Visit` keeps a lock per item position (`downloadOf`), apart from its request:
     `image` and `prefetchImage` both hold it, so an item asked for while its picture is being fetched ahead waits for that
@@ -1274,8 +1296,9 @@ are shown in the viewer on demand.
     limit, gone, anything else). That is the reel resolver's own table, so there is one rule for "may cached bytes play" across
     reels and items. The cost: an item whose renewal got `NEEDS_ATTENTION` or `RATE_LIMITED` says unavailable even if its bytes
     are cached, as a reel does.
-  - **R26 and `video`.** A video item whose link the CDN refused for its start ahead in this visit (`Visit.refused`) does
-    not play that link: its cached bytes if they are all there, else the visit's renewal, as above.
+  - **R26, R27 and `video`.** A video item whose link the CDN refused as running out (403, 410) for its start ahead in this
+    visit (`Visit.refused`) does not play that link: its cached bytes if they are all there, else the visit's renewal, as
+    above. Any other refusal of a start leaves `video` as it was.
   - **Once per visit (R8).** A `CarouselRepository.Visit` holds the visit's one request. The first call that needs it sends it,
     under a mutex, and every later call of the visit uses what it brought. It is spent from the moment it is tried, whatever
     comes of it, a cancelled call included (that call may already have sent it): a visit sends AT MOST ONE `mediaInfo`, the
@@ -1350,15 +1373,20 @@ are shown in the viewer on demand.
     lane. R25 adds up to one `mediaInfo` to a visit that sent none before: a carousel with old links that the owner opens and
     never swipes now sends its one request as it opens. That stays within the unchanged bound of one `mediaInfo` a visit, on
     the interactive lane, under the 24 h budget and the cooldown. The pinned wiring is in [Wiring](#wiring).
-  - **Opening a carousel also fetches its video items' posters and starts (R26), and sends Instagram nothing more.** On the
-    same queue, still one download at a time on the CDN lane with its concurrency (2) and jitter (0.2–0.8 s) unchanged: first
-    each video item's poster, with the pictures and in their order (one small image each, a CDN request R10 had saved), then,
-    once no picture is left, the first megabyte of each video item but the one on screen, in the same order. A start asks
-    Instagram nothing: a stale link is skipped, never renewed, and a refused one is skipped. A poster is a picture, so a
-    refused poster link may spend the visit's one renewal by R25's rule. The bound stays one `mediaInfo` a visit, every path
-    together. The cost is data: about 1 MB per video item of every carousel opened, for items the owner may never watch, plus
-    one poster each; a 429 or offline stops it for the visit. The player's 1 s start buffer was Media3's default already, so
-    it changes no request.
+  - **Opening a carousel also fetches its video items' posters and starts (R26), and sends Instagram no request the visit
+    would not already allow, none from a pre-load itself.** On the same queue, still one download at a time on the CDN lane
+    with its concurrency (2) and jitter (0.2–0.8 s) unchanged: first each video item's poster, with the pictures and in their
+    order (one small image each, a CDN request R10 had saved), then, once no picture is left, the first megabyte of each video
+    item but the one on screen, in the same order. A start asks Instagram nothing: a stale link is skipped, never renewed, and
+    a refused one is skipped; a start refused with a 403 or 410 sends its item's own play to the renewal that play would have
+    asked for after the player's own 403 or 410, and any other refusal changes nothing for the play (R27). A poster is a
+    picture, so a refused poster link may spend the visit's one renewal by R25's rule; a poster with no link never does (M4).
+    The bound stays one `mediaInfo` a visit, every path together. The cost is data: about 1 MB per video item of every
+    carousel opened, for items the owner may never watch, plus one poster each; a 429, offline or a failing cache stops it
+    for the visit, and a start never downloads more than its megabyte, never the whole video (I1). The starts also take
+    space in the 512 MiB video cache, which they share with watched videos: being newer, they can push the oldest watched
+    videos out, which then no longer play offline (M3, [Video](#video)). The player's 1 s start buffer was Media3's default
+    already, so it changes no request.
 
 ## Viewer
 
@@ -1414,7 +1442,10 @@ renewal and the cache are in [Video](#video).
     pictures stopped writes no start. The start out is kept (`startOut`): when the owner settles on that very item,
     `resolveItem` cancels it and waits until the write has stopped (`stopStartOf`) before it asks for the item's source, so
     the player never meets the write's lock on the cache (it would read past it from the network, the same bytes twice), and
-    the queue goes on with the next start. What the write had cached stays, and the player reads it first.
+    the queue goes on with the next start once it has. What the write had cached stays (checked, M2), and the player reads it
+    first. The wait is 300 ms of real time at most (`START_STOP_WAIT_MS`, M5): the cancel closes the write's request at once
+    in the usual case, and a write that has not stopped by then finishes stopping on its own while the player reads past its
+    lock (at worst the rest of one megabyte twice).
 
   The same post settling again in place (the list moved under it) keeps its visit and takes the newer row: a sync may have
   stored its cover since. `CarouselUiState(items, settled, coverOnlyMessage, loading)` is what the pager shows.
@@ -1448,8 +1479,9 @@ renewal and the cache are in [Video](#video).
   - **Starts (R26).** The first megabyte of each video item is in the video cache before the owner swipes to it, and the
     player starts once 1 s is buffered ([Video](#video)).
   - The cost: a few CDN downloads for items never viewed, about 1 MB per video item, and a poster each.
-- **A refused video item.** A video item whose start the CDN refused ahead (R26) does not play that link: its own resolve
-  goes to the visit's renewal ([Carousels](#carousels)). A 403 or 410 from the player renews the link once per item per visit (`recoverItem`), after
+- **A refused video item.** A video item whose start the CDN refused ahead with a 403 or 410 (R26, R27) does not play that
+  link: its own resolve goes to the visit's renewal ([Carousels](#carousels)); any other refusal ahead leaves the item to the
+  player, as below. A 403 or 410 from the player renews the link once per item per visit (`recoverItem`), after
   cancelling another post's prefetch (R79), through `CarouselRepository.video(..., forceRefresh = true)` on the visit's own
   `Visit`, which sends nothing when the visit's request is spent; the item then says "Can't load this item". A player error
   that is no connection or a timeout (`isNetworkError`: Media3's connection-failed and connection-timeout codes) renews
@@ -1590,18 +1622,25 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   download ahead or on demand out across a reshape writes the new item, never the old shape's; R26's `prefetchPoster`: the
   CDN lane into the item's own file, which the item's own load serves, only a stored video item past the cover, R25's renewal,
   P1's and D3's stops, P2's re-read; R26's `preloadVideo`: the item's key, the size and the CDN lane, nothing for a start
-  cached already (not even the lane's wait), a stale or missing link skipped with no `mediaInfo`, a refused link skipped and
-  not asked again in the visit, by a start or by the item's own play, which renews instead (and says "Can't load this item"
-  when the renewal brings the same link), a 429 and offline stopping, nothing for an image item, a reel, Mock mode or a post
-  unsaved, a start written across a link change or an unsave dropped again, R20's drop taking a poster and a start written by
-  the real writer, and every path of a visit together sending one `mediaInfo`),
+  cached already (not even the lane's wait) and a partly cached one topped up, a stale or missing link skipped with no
+  `mediaInfo`, an expired link (403, 410) skipped and not asked again in the visit, by a start or by the item's own play,
+  which renews instead (and says "Can't load this item" when the renewal brings the same link), any other refusal skipped
+  with the play left to the player and no `mediaInfo` (R27), a 429, offline and a failing cache stopping, nothing for an
+  image item, a reel, Mock mode or a post unsaved, a start written across a link change or an unsave dropped again, finished
+  or cancelled (M2), a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
+  poster and a start written by the real writer, R16 still saying offline with only a start cached, every R26 log line
+  labelled and naming no link, host or pk, and every path of a visit together sending one `mediaInfo`),
   `CarouselImageStoreTest`, `VideoCacheTest` (`removeCarouselItems`), `MediaEvictionTest` (`eachStep`), `VideoStartsTest`
   (R26's writer over MockWebServer and a real cache: one bounded, cookieless request with the player's user agent for exactly
   the first megabyte under the item's key, nothing fetched when it is cached (also a short video watched in full), only the
-  rest of a start the player had begun, one request whatever the CDN refuses (403, 404, 410 read as refused, 429 as limited,
-  500 and no connection as offline), a write cancelled mid-way that leaves what came cached, intact and unlocked, and a
-  removal of one key alone), `ViewerLoadControlTest` (R26: a streamed video starts at 1 s and goes on after a stall at 2 s,
-  read from the load control's own decisions; every other decision Media3's default).
+  rest of a start the player had begun, one request whatever the CDN refuses (403 and 410 read as expired, 404, 408 and 400
+  as refused, 429 as limited, 500 and no connection as offline), one request for a timeout and a body cut short, and never
+  an unbounded one after a connection dropped before its answer (I1/T-I3), a failing cache (its metadata store, or one that
+  never started) answering FAILED with no request for the whole video (I1), a write cancelled while it waits for its answer
+  stopping at once (M5), the blocking write on its IO dispatcher, never the caller's thread (T-I1), the player's own stack
+  still opening again after a failure (T-I2), a write cancelled mid-way that leaves what came cached, intact and unlocked, and
+  a removal of one key alone), `ViewerLoadControlTest` (R26: a streamed video starts at 1 s and goes on after a stall at 2 s,
+  read from the load control's own decisions; every other decision Media3's default, the minimum buffer included).
 - **Wiring** (source and runtime pins). `BackendWiringGuardTest` (the carousel request's gates in both modes, anchored at both
   ends, the folders, the construction sites, the eviction, R20's shared drop and Delete library wiring),
   `InstagramTransportWiringTest` (a Mock mode carousel visit never builds the transport or moves the real budget, nor does a
@@ -1609,7 +1648,8 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   `VideoWiringGuardTest` (one `ContentFrame`, no cookie jar, the resolver's gate; R26: the one player built with
   `viewerLoadControl()`, whose streaming durations are the two constants and whose local ones stay Media3's, and the video
   starts written through `videoStartDataSourceFactory`, which is `cachedDataSourceFactory` with the player's cache and user
-  agent plus `OneTryUpstream`).
+  agent plus `OneTryUpstream` with the write's own abort, and no ignoring a cache error; Mock mode's video requests use no
+  WebView user agent).
 - **Viewer.** `CarouselPagerTest` (also: a held drag reports no settle, the bright dot follows the item, an item without its
   image is not the cover, every picture is fitted), `ViewerPlaybackTest` (the unit, in order, with a fake player; the C1 gate's
   placeholder rule; the main-thread effects), `ViewerViewModelTest` (the visit, R8 and R11, the refresh once per item, R16, the
@@ -1621,14 +1661,17 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   R26: every picture and poster first, then every video start, in order and one at a time across both, following the
   settled item and passing it, a start the owner settles on stopping before the player is handed the item and the queue
   going on, leaving the post cancelling the start out, a 429 or offline start stopping the queue, a queue its pictures stopped
-  writing no start, a refused start passed with its item then playing a renewed link on the visit's one request, a video
-  item's own load fetching its poster and a poster that cannot come saying nothing, and every path of a visit sending one
-  `mediaInfo`),
+  writing no start, an expired start passed with its item then playing a renewed link on the visit's one request, another
+  refusal leaving the play to the player with no `mediaInfo` (R27), a video item's own load fetching its poster and a poster
+  that cannot come saying nothing, a video item with no preview frame still getting its start with no request (M4), the
+  earlier starts nearest first, a start slow to stop holding the player up for about 300 ms only (M5), and every path of a
+  visit sending one `mediaInfo`),
   `ViewerScreenCarouselTest` (the real screen over a player the test watches and whose every call is checked for its thread;
   C1's list moves; R16 on screen; R26 end to end in Mock mode: the poster fetched ahead covers the video item until the
   player reports its first frame), `CarouselPagerTest` also pins R26's shutter with a player that raises the first-frame
   event when told: a video item's poster until its first frame, the next video item's own poster until its own first frame
-  (never the item before's), the poster kept under a failure, and an image item's picture never tagged a poster,
+  (never the item before's), the poster kept under a failure, an image item's picture never tagged a poster, a single
+  surface mid-swipe between two video items, and a video item 0's cover as its shutter,
   `ViewerOverlayTest` (the icon buttons: labels, tooltips, which button when, no text button left), `ViewerPageTest`, `AppIconGuardTest` (the layers, the safe zone, no stroke, no activity icon, each glyph's own outline,
   the helper drawing the glyph it is given, the notice and its licence terms, the notice kept, no extended icon library).
 - **Motion.** `MotionTest` (the transitions, scale 0, an unset scale, the nav host's use of every factory, the shared key, a
@@ -1696,8 +1739,9 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
     cookieless CDN client, or the fake placeholder fetcher), `carouselImages`, `backend.pacer` (whose CDN lane carries the image
     downloads and R26's video starts), `isVideoCached = { key -> videoCache.isFullyCached(key) }`, `sampleClip` (Mock mode's
     bundled clip, else null), `log = debugLog`, `itemEviction = carouselItemEviction` and `starts = videoStarts`.
-  - `videoStarts` (R26) is a `CacheVideoStarts` over `videoCache.cache` whose data source is
-    `videoStartDataSourceFactory(context, videoCache.cache, videoRequestUserAgent)`: the player's own stack. Building it builds
+  - `videoStarts` (R26) is a `CacheVideoStarts` over `videoCache.cache` whose data source, for each write, is
+    `videoStartDataSourceFactory(context, videoCache.cache, videoRequestUserAgent, abort)`: the player's own stack with the
+    write's one-try upstream and its abort (M5). Building it builds
     neither the cache nor the WebView (both are read at the first write), and Mock mode never writes. `videoRequestUserAgent`
     is the WebView's user agent for the real library and null in Mock mode; the player's media source factory reads the same.
   - `carouselItemEviction` (R20) is `MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { carouselImages.deleteFor(it) })`:
@@ -1960,7 +2004,7 @@ Mock mode switch.
 | Instagram access | Private web endpoints, isolated in the `:instagram` JVM module | No official API exposes saved items, and the endpoints change without notice. |
 | API transport | Every API call is a same-origin `fetch()` in a hidden instagram.com WebView page (`WebViewTransport`); the OkHttp client stays only for the cookieless CDN and as the JVM-test transport | OkHttp's first two requests got HTTP 429, and copying headers cannot copy Chromium's TLS and HTTP/2 fingerprint. The page's cookies, client hints and Sec-Fetch headers are the browser's own. |
 | Video | Streamed on demand with per-item link refresh; LRU cache keyed by media `pk` | Gigabytes saved, and no bulk-download pattern. |
-| Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore` (and, while a post is open, its other pictures one at a time ahead of the swipe, R23, its video items' posters among them, then the first megabyte of each video item, R26), video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). Swiping on the phone showed each new picture's download as a black placeholder, so an open post fetches its pictures ahead (R23): CDN downloads one at a time, stopped by a 429 or offline, and with old links the visit's one renewal (R25). Video items still started dark and late, so they get a poster until their first frame and their first megabyte ahead, on the same queue and never with a request to Instagram (R26). |
+| Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore` (and, while a post is open, its other pictures one at a time ahead of the swipe, R23, its video items' posters among them, then the first megabyte of each video item, R26), video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). Swiping on the phone showed each new picture's download as a black placeholder, so an open post fetches its pictures ahead (R23): CDN downloads one at a time, stopped by a 429 or offline, and with old links the visit's one renewal (R25). Video items still started dark and late, so they get a poster until their first frame and their first megabyte ahead, on the same queue and never with a request to Instagram of their own (R26, R27). |
 | Motion | A post grows from and shrinks back into its grid tile (shared bounds, scale-to-bounds, key `media-<pk>`); every other page pushes, sliding in over the last, with no fade (R24); predictive back; nothing animates when the animator duration scale is 0 | `sharedElement` zoomed visibly on the emulator and cut a playing video to the cover (R14); Navigation 2.10's own predictive transitions scale the page out, so the NavHost names its own (R15); the owner did not like the shared axis's short slide and fade on the phone and asked for Instagram's slide (R24). |
 | Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds (an older item newly added to a collection included) | Detecting removals needs a full walk, so it stays an explicit, paced action. |
 | Collection names | The website's own GraphQL query, sent by the hidden page; when its doc id goes stale a second, desktop-mode hidden page learns the current one from the site (at most once per 24 h); the last names are kept when that fails | The website answers the first design's collections-list call with a 404. A query id changes with every site deploy, and the owner wants the names to keep working with no computer: no rebuild, no reinstall. |

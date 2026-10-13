@@ -455,6 +455,42 @@ class CarouselPagerTest {
         compose.onAllNodesWithTag(VIDEO_SURFACE_TAG).assertCountEquals(0)
     }
 
+    /**
+     * Each poster is its own because only the settled video item gets the player: mid-swipe between two video items, both
+     * pages are on screen, and only one draws the surface (two frames on one player would let one item's first frame lower
+     * both shutters).
+     */
+    @Test
+    fun midSwipeOnlyTheSettledVideoItemHasASurface() = withPlayer { player ->
+        state = CarouselUiState(items = withPosters, settled = 1)
+        showPager(player = player)
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(CAROUSEL_PAGER_TAG).performTouchInput {
+            down(center)
+            moveBy(Offset(-width * 0.2f, 0f))
+            moveBy(Offset(-width * 0.2f, 0f))
+        }
+        compose.waitForIdle()
+
+        assertTrue(displayed(carouselPosterTag(2)), "precondition: item 2 is on screen too")
+        compose.onAllNodesWithTag(VIDEO_SURFACE_TAG).assertCountEquals(1)
+    }
+
+    /** A video item 0 has no poster of its own: the post's cover covers its surface until the first frame. */
+    @Test
+    fun aVideoItemZeroShowsTheCoverUntilItsFirstFrame() = withPlayer { player ->
+        state = CarouselUiState(items = listOf(CarouselItemUi(0, MediaType.VIDEO), CarouselItemUi(1, MediaType.IMAGE)), settled = 0)
+        showPager(player = player)
+        compose.onNodeWithTag(VIDEO_SURFACE_TAG).assertIsDisplayed()
+        assertTrue(displayed(CAROUSEL_COVER_TAG), "the cover covers the surface")
+
+        compose.runOnIdle { player.renderFirstFrame() }
+
+        compose.waitForIdle()
+        assertTrue(!displayed(CAROUSEL_COVER_TAG), "the first frame: the cover goes")
+    }
+
     /** An image item's picture keeps the image tag: only a video item's is a poster. */
     @Test
     fun anImageItemsPictureIsNoPoster() {

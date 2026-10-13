@@ -551,9 +551,10 @@ controller's ruling on the branch's review.
   next item's picture should be there as it slides in; a carousel with old links may log its one `GET api/v1/media/<n>/info/`
   as it opens.
 
-## 2026-10-13: a carousel's video items start sooner (R26)
+## 2026-10-13: a carousel's video items start sooner (R26, R27)
 
-Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, R26 (it reverses R10's "video items have no poster").
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, R26 (it reverses R10's "video items have no poster") and R27,
+the controller's ruling on R26's review. This entry is the branch's own, amended with its review's fixes before the merge (R18).
 
 - **Why.** On the phone (2026-10-13) a carousel's pictures were there as they slid in (R23), but its video items were still
   slow: a video item began to stream only when it settled, and the screen stayed black until the first frame, because R10
@@ -574,24 +575,50 @@ Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, R26 (it revers
     into the video cache under `{pk}_{position}` (`CarouselRepository.preloadVideo`, `CacheVideoStarts` with Media3's
     `CacheWriter` and a bounded request), through the player's own cookieless stack, one at a time inside `pacer.cdn { }`. Only
     a link the item would play as it is: a stale one is skipped, never renewed, and no `mediaInfo` is sent for a start. A
-    cached start fetches nothing; a refused link is skipped and not asked again in the visit, by the queue or by the item's own
-    play (which goes to the visit's renewal); the CDN's 429 or offline stops the queue; leaving the post cancels the write and
-    leaves the cache consistent; the item the owner settles on stops its write first, so the player never reads past its lock;
-    a start written across a link change or an unsave is dropped again. Mock mode writes none (its clip is in the app).
-  - Two things the code needed: `CacheWriter` asks again, unbounded, when its bounded request fails, which would send a refused
-    link, a 429 or no connection a second request, so the write's upstream allows one try (`OneTryUpstream`); and the item's
-    own play after a refused start renews for a 404 too, where a player's own 404 renews nothing (R19).
-- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1222 app tests in 94 classes and 382 `:instagram` tests, 0 failures, lint with no errors and 16 warnings (none new). `connectedDebugAndroidTest` on the emulator in Mock mode: 54 of 54. New: `VideoStartsTest` (the writer over MockWebServer and a real cache) and `ViewerLoadControlTest`, and R26 tests in `CarouselRepositoryTest`, `ViewerViewModelTest`, `CarouselPagerTest` (a player that raises the first-frame event), `ViewerScreenCarouselTest` (end to end in Mock mode) and `VideoWiringGuardTest`. Mutation-checked in a scratch export of the branch: 53 mutants, all killed (the load control, the one-try upstream, the writer's cancel, cache check, length and answers, every poster and start rule in the repository, the queue's order, stops and give-way, the shutter and the wiring). Three were left out as equivalent or unpinnable: the writer's `ensureActive` after a cancelled write (a cancelled caller's answer is never read), the start's own type check (an image item has no video link, so it is skipped anyway), and the real library's user agent value, which the guard pins by name only, as the player's was before.
+    cached start fetches nothing; a refused link is skipped and not asked again in the visit by a start, and a 403 or 410 ahead
+    sends the item's own play to the visit's renewal (R27); the CDN's 429, offline or a failing cache stops the queue; leaving
+    the post cancels the write and leaves the cache consistent; the item the owner settles on stops its write first (300 ms
+    at most), so the player never reads past its lock; a start written across a link change or an unsave is dropped again,
+    finished or cancelled. Mock mode writes none (its clip is in the app).
+  - `CacheWriter` asks again, unbounded (the whole video), whenever its bounded request fails, so the write's upstream allows
+    one try and refuses an unbounded request outright (`OneTryUpstream`), and the write's stack does not ignore a cache error.
+- **The review's fixes (two adversarial reviews, pacing and tests lenses).**
+  - **I1 (Important).** A failing cache (a full disk, or a cache that failed to start) turned each start into an unbounded
+    download of the whole video that cached nothing and answered "written": the player's `FLAG_IGNORE_CACHE_ON_ERROR` let
+    `CacheWriter`'s fallback stream past the cache, and the one-try rule only remembered a failed network open. Now the write's
+    upstream refuses any unbounded request, its stack keeps cache errors, and a cache error is `FAILED`, which stops the
+    queue. Pinned with the reviewer's two failing-cache probes.
+  - **R27 (the controller's ruling, M1).** Only a 403 or 410 ahead sends the item's own play to the visit's renewal, as the
+    player's own error path would; any other 4xx is passed and leaves the play to the player (R19: a video's 404 renews
+    nothing), so a pre-load never changes what a play costs. "No new Instagram request" in the docs is now "no request the
+    visit would not already allow, and none from a pre-load itself".
+  - **M2.** A write cancelled part way skipped the link re-check, so an old slide's partial start could stay under a reshaped
+    position: it is now checked as a finished one is.
+  - **M4.** A video item with no preview frame spent the visit's `mediaInfo` on every visit for a poster that does not exist,
+    and its stop ended the starts: now it is passed with no renewal, and its own load asks nothing.
+  - **M5.** The settled item waited for its write until `CacheWriter`'s next read, up to the connection's 8 s timeouts. Now a
+    cancel closes the write's request from a thread of its own (a wait for the CDN's answer ends at once), and the viewer
+    waits 300 ms at most whatever the network does. On the JVM a body read stalled inside the platform's stream outlasts the
+    close (it waits on the stream's lock); the bound covers that case.
+  - **M3 (docs).** Starts share the 512 MiB video cache with watched videos and can push the oldest out: recorded as a cost.
+  - **The tests lens.** Pinned: the write off the caller's thread (T-I1), the one-try rule in the start stack only, the
+    player's own retries intact (T-I2), one request for a timeout and a body cut short and never an unbounded one after a
+    drop (T-I3), and the Minors: the whole start checked as cached, R26's log lines, the earlier starts nearest first, one
+    surface mid-swipe, a video item 0's cover as its shutter, the minimum buffer, Mock mode's user agent, and R16 with only a
+    start cached.
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1243 app tests in 94 classes and 382 `:instagram` tests, 0 failures, lint with no errors and 16 warnings (none new). `connectedDebugAndroidTest` on the emulator in Mock mode: 54 of 54. New: `VideoStartsTest` (the writer over MockWebServer and a real cache, failing-cache decorators included) and `ViewerLoadControlTest`, and R26/R27 tests in `CarouselRepositoryTest`, `ViewerViewModelTest`, `CarouselPagerTest` (a player that raises the first-frame event), `ViewerScreenCarouselTest` (end to end in Mock mode) and `VideoWiringGuardTest`. Mutation-checked in scratch exports of the branch: R26's 53 mutants, then the fix round's 34 (I1, R27, M2, M4, M5, T-I1 to T-I3, the Minors, and the one-try rule re-anchored), 87 in all, every one killed. Left out as equivalent or unpinnable: the writer's `ensureActive` after a cancelled write (a cancelled caller's answer is never read), the start's own type check (an image item has no video link, so it is skipped anyway), and the write stack's `setFlags(0)` behind the unbounded refusal (with the refusal in place, a cache error ends the write either way; a source guard pins it). One finding of the tests lens is met differently: T-I3's "one request per write" holds for timeouts and bodies cut short, but a connection dropped before its answer may be resent once, bounded, by the platform's HTTP stack (the JVM's does; it is below the data source, the player's too), so that test pins "never an unbounded request" instead.
 - **Changed tests.** R10's "no poster" was in seven `ViewerViewModelTest` tests: `ahead` (the pages whose picture the queue
   fetches) now counts the video items' posters, so `openingACarouselFetchesItsOtherPicturesAheadOneAtATimeInOrder`,
   `imagesDownloadOnDemandOnceAVisitAndItemZeroUsesTheCover` and `aSpentRenewalStopsThePicturesFetchedAhead` expect the posters
   where they expected none, three more take their lists from `ahead`, and `aPageTheRenewalMadeAVideoIsPassedOnceAndTheQueueGoesOn`
   waits for the image pages only (`imagesAhead`), as before. Each still fails without the rule it pinned.
-- **Pacing.** No new Instagram request and no new request type: still at most one `mediaInfo` a visit, every path together
-  (a refused poster may spend it by R25's rule; a start never asks). The posters and the starts are extra CDN downloads on the
-  existing CDN lane, one at a time, with its concurrency (2), jitter (0.2–0.8 s) and rate unchanged; the player's stream stays
-  off the lane. The cost: about 1 MB of data per video item of every carousel opened, even for items never watched, and one
-  small poster image each.
+- **Pacing.** No request to Instagram that the visit would not already allow, none from a pre-load itself, and no new
+  request type: still at most one `mediaInfo` a visit, every path together (a refused poster may spend it by R25's rule; a
+  start never asks; a 403 or 410 ahead only moves the renewal the item's play would have asked for anyway, R27). The posters
+  and the starts are extra CDN downloads on the existing CDN lane, one at a time, with its concurrency (2), jitter
+  (0.2–0.8 s) and rate unchanged; the player's stream stays off the lane; a start is one bounded request, never the whole
+  video. The cost: about 1 MB of data per video item of every carousel opened, even for items never watched, and one small
+  poster image each; and the starts share the 512 MiB video cache with watched videos, pushing the oldest out over time.
 - **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, MockWebServer, local data and the
   emulator in Mock mode only.
 - **Next, the owner's phone.** README section 8, "The viewer update", step 3: open a carousel with a video item, wait a few

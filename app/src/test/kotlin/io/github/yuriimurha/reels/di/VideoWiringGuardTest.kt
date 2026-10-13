@@ -126,6 +126,14 @@ class VideoWiringGuardTest {
         assertTrue("videoCache.cache" in starts, "over the one video cache: $starts")
         val stack = callArguments(starts, "videoStartDataSourceFactory(").single()
         assertTrue("videoRequestUserAgent" in stack && "videoCache.cache" in stack, "with the player's cache and user agent: $stack")
+        // M5: each write's own abort reaches its upstream, or cancelling a write could not close its request.
+        assertTrue(Regex("""dataSource\s*=\s*\{\s*abort\s*->""").containsMatchIn(starts), "the write's abort is taken: $starts")
+        assertTrue(Regex(""",\s*abort\s*$""").containsMatchIn(stack.trim()), "and handed to the stack: $stack")
+        // N1: Mock mode never loads the WebView for a user agent, for the player or a start.
+        assertTrue(
+            Regex("""val videoRequestUserAgent: String\? get\(\) = if \(usesFake\) null else videoUserAgent""").containsMatchIn(container),
+            "Mock mode's video requests use no WebView user agent",
+        )
         assertTrue(
             "container.videoRequestUserAgent" in callArguments(main("ui/viewer/ViewerScreen.kt"), "videoMediaSourceFactory(").single(),
             "the player reads the same user agent",
@@ -133,7 +141,12 @@ class VideoWiringGuardTest {
 
         val factory = Regex("""fun videoStartDataSourceFactory\([^)]*\)[^=]*=([^\n]*\n){1,3}""").find(main("data/media/VideoCache.kt"))?.value
         assertTrue(factory != null, "videoStartDataSourceFactory must be defined in VideoCache.kt")
-        assertTrue(Regex("""cachedDataSourceFactory\(\s*context\s*,\s*cache\s*,\s*userAgent\s*,\s*onUpstream\s*=\s*OneTryUpstream::Factory\s*\)""").containsMatchIn(factory), "the player's stack plus one try: $factory")
+        assertTrue(
+            Regex("""cachedDataSourceFactory\(\s*context\s*,\s*cache\s*,\s*userAgent\s*,\s*onUpstream\s*=\s*\{\s*OneTryUpstream\.Factory\(\s*it\s*,\s*abort\s*\)\s*}\s*\)""").containsMatchIn(factory),
+            "the player's stack plus one try: $factory",
+        )
+        // I1: a cache error fails the start; the player's FLAG_IGNORE_CACHE_ON_ERROR would stream past a failing cache.
+        assertTrue(Regex("""\)\s*\.setFlags\(0\)""").containsMatchIn(factory), "no ignoring a cache error: $factory")
     }
 
     /**

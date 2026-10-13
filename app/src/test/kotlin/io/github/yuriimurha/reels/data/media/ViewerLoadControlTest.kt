@@ -76,6 +76,17 @@ class ViewerLoadControlTest {
         assertEquals(defaults.getBackBufferDurationUs(playerId), viewer.getBackBufferDurationUs(playerId))
     }
 
+    /**
+     * The minimum buffer is Media3's too: once loading has paused at the maximum, it resumes only below the minimum, whichever
+     * way the buffered duration moves (the sweep above only rises).
+     */
+    @Test
+    fun theMinimumBufferIsMedia3s() {
+        for (ms in listOf(0L, 60_000L, 40_000L, 30_000L, 20_000L, 30_000L, 49_000L, 51_000L, 49_999L)) {
+            assertEquals(defaults.shouldContinueLoading(at(STREAMED, ms)), viewer.shouldContinueLoading(at(STREAMED, ms)), "at $ms ms")
+        }
+    }
+
     private companion object {
         const val STREAMED = "https://cdn.example.test/v.mp4?oe=1"
         const val LOCAL = "android.resource://io.github.yuriimurha.reels/raw/sample_clip"
