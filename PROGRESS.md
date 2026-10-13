@@ -377,3 +377,37 @@ migration, tests by mutation, docs), then refuters for its findings, then one fi
   mode only.
 - **Next, the owner's phone.** Unchanged: README section 8, "The viewer update", now including the offline video item (step 4)
   and the install rule of step 1.
+
+## 2026-10-13: an open carousel fetches its other pictures ahead (R23)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6, R23 (it amends R10's "no prefetch of items").
+
+- **Why.** On the phone, swiping through a carousel showed a black placeholder on every item: an item's picture downloaded
+  only once the item settled, after the CDN lane's 200–800 ms jitter. The owner approved fetching the next item's picture
+  ahead, then, having tried the viewer on the phone again, asked to load the whole carousel.
+- **What.** `CarouselRepository.prefetchImage` downloads one item's picture from its stored link through the same fetcher, CDN
+  lane and store as the on-demand `image`, and nothing else: no fill, no renewal, no `mediaInfo`, the visit's one request
+  untouched; any failure is a quiet null. A per-item lock in the `Visit` makes an item's own load wait for its download
+  ahead instead of fetching it twice. The viewer's carousel visit runs one queue in the post's scope: once the items are
+  known, every image item but the cover, one download at a time, the items after the settled one in order, then those before
+  it, the nearest first. An item settle reorders what is left without restarting it or cancelling the download that is out;
+  leaving the post cancels it. Video items are not fetched ahead. A picture that does not come is skipped without a word, and
+  its item loads as before when it settles.
+- **CURSOR held on the phone.** Run 6 of 2026-10-11, a Sync (QUICK), ended DONE and stored 41 of the owner's collections with
+  no "Collection N" placeholder; the names query asks for 12 a page, so every page from the second on was asked for with the
+  page before's `page_info.end_cursor` as `after`. Ticked in `TODO.md`; STALE stays assumed.
+- **Tests.** `./gradlew check --no-build-cache`: 1151 app tests in 92 classes (14 new) and 382 `:instagram` tests, 0 failures,
+  lint with no errors and 16 warnings (none new). `connectedDebugAndroidTest` on the emulator in Mock mode: 54 of 54 (the first
+  run failed once in `SmokeTest.t3`, a `PixelCopy` screenshot timeout on the grid before the viewer opens; the rerun passed).
+  Five `ViewerViewModelTest` tests that expected an exact list of downloads now allow for the queue's; each still fails
+  without the rule it pinned before. Mutation-checked in a scratch export: 31 mutants, 29 killed; the 2 that survive are
+  equivalent (the queue's own skip of item 0 and of video items, which `prefetchImage`'s guards repeat; mutants of those
+  guards are killed).
+- **Pacing.** Opening a carousel downloads up to its other image items ahead, one at a time on the CDN lane, with no Instagram
+  API request. The lane's concurrency (2) and jitter (0.2–0.8 s) are unchanged, and one download ahead at a time leaves its
+  second slot for the item on screen. The cost: a few CDN downloads, at most one a visit per image item not on the phone yet,
+  for items the owner may never swipe to.
+- **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, local data and the emulator in Mock
+  mode only.
+- **Next, the owner's phone.** README section 8, "The viewer update", step 2: open a carousel, wait a second or two, and the
+  next item's picture should be there as it slides in.

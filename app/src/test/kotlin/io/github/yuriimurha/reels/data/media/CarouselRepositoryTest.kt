@@ -31,11 +31,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -47,6 +49,7 @@ import kotlin.random.Random
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -290,8 +293,15 @@ class CarouselRepositoryTest {
         repository(log = { lines += it }).image(media, 0, CarouselRepository.Visit()) // refused, renewed, refused again
         fetcher.answer = { throw java.io.IOException("offline") }
         repository(log = { lines += it }).image(media, 1, CarouselRepository.Visit()) // offline
+        fetcher.answer = { null }
+        repository(log = { lines += it }).prefetchImage(media, 1, CarouselRepository.Visit()) // R23: refused ahead
 
-        for (kind in listOf("carousel fill:", "carousel renew:", "carousel image failed (refused)", "carousel image failed (offline)")) {
+        for (
+            kind in listOf(
+                "carousel fill:", "carousel renew:", "carousel image failed (refused)", "carousel image failed (offline)",
+                "carousel prefetch failed (refused)",
+            )
+        ) {
             assertTrue(lines.any { it.startsWith(kind) }, "a line '$kind...': $lines")
         }
         val links = listOf("://", "cdn", "example", "fake", ".jpg", ".mp4")
@@ -405,6 +415,10 @@ class CarouselRepositoryTest {
         val renewing = CompletableDeferred<Unit>()
         onReply = { renewing.complete(Unit); awaitCancellation() }
         assertEquals(UNSET, cancelOnceStarted(renewing) { repository.video(media, 2, CarouselRepository.Visit()) }, "video")
+
+        val prefetching = CompletableDeferred<Unit>()
+        fetcher.answer = { prefetching.complete(Unit); awaitCancellation() }
+        assertEquals(UNSET, cancelOnceStarted(prefetching) { repository.prefetchImage(media, 1, CarouselRepository.Visit()) }, "prefetch")
 
         db.carouselItemDao().deleteFor(pk)
         val filling = CompletableDeferred<Unit>()
@@ -604,6 +618,151 @@ class CarouselRepositoryTest {
         assertEquals(listOf("mediaInfo:$pk"), fake.calls)
         assertEquals(listOf(newImage(1)), fetcher.fetched)
         assertEquals(post.carouselCount, rows().size)
+    }
+
+    // --- R23: an image fetched ahead ---
+
+    /**
+     * A prefetch downloads the item's stored link through the CDN lane (its jitter passes first), stores it as [image] would, and
+     * asks Instagram nothing. The item's later on-demand load serves that file without a download.
+     */
+    @Test
+    fun aPrefetchDownloadsTheImageThroughTheCdnLaneAndTheLaterLoadServesIt() = runTest {
+        storeOldItems()
+        var calledAt: Long? = null
+        fetcher.answer = { url -> calledAt = testScheduler.currentTime; url.toByteArray() }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        val before = testScheduler.currentTime
+
+        val path = repository.prefetchImage(media, 1, visit)
+
+        assertEquals(images.path(pk, 1), path)
+        assertContentEquals(oldImage(1).toByteArray(), File(path!!).readBytes())
+        val waited = checkNotNull(calledAt) - before
+        assertTrue(waited in PacingPolicy.Conservative.cdnJitterMs, "the fetch waited $waited ms: not the CDN lane's jitter")
+        assertEquals(ItemImage.File(path), repository.image(media, 1, visit))
+        assertEquals(listOf(oldImage(1)), fetcher.fetched, "one download")
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /** Nothing ahead for item 0 (the cover, R10), a video item, a page past the last item, or one whose file is stored already. */
+    @Test
+    fun aPrefetchFetchesNothingForTheCoverAVideoItemOrPastTheLastItem() = runTest {
+        storeOldItems()
+        fetcher.answer = { url -> url.toByteArray() }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        for (position in listOf(0, 2, 3, -1)) assertNull(repository.prefetchImage(media, position, visit), "item $position")
+        val stored = images.write(pk, 1, byteArrayOf(7))
+        assertEquals(stored, repository.prefetchImage(media, 1, visit), "a stored file is served, not downloaded again")
+
+        assertEquals(emptyList(), fetcher.fetched)
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /** No prefetch for a post that is not a carousel, unsaved, gone, or whose items are not stored: it never fills or asks. */
+    @Test
+    fun aPrefetchFetchesNothingForAPostOutOfTheLibraryNotACarouselOrWithoutItems() = runTest {
+        fetcher.answer = { url -> url.toByteArray() }
+        val repository = repository()
+        storePost()
+        assertNull(repository.prefetchImage(media, 1, CarouselRepository.Visit()), "no stored items: never the fill")
+
+        storeOldItems()
+        for (type in listOf(MediaType.REEL, MediaType.VIDEO, MediaType.IMAGE)) {
+            assertNull(repository.prefetchImage(mediaEntity(pk, type), 1, CarouselRepository.Visit()), "$type")
+        }
+        db.mediaDao().markRemoved(listOf(pk), START)
+        assertNull(repository.prefetchImage(media, 1, CarouselRepository.Visit()), "unsaved by a sync")
+        db.mediaDao().deleteAll()
+        assertNull(repository.prefetchImage(media, 1, CarouselRepository.Visit()), "deleted")
+
+        assertEquals(emptyList(), fetcher.fetched)
+        assertEquals(emptyList(), fake.calls)
+    }
+
+    /**
+     * Every failure ahead is quiet (null), sends no `mediaInfo` and leaves the visit's one request alone: refused (as for a 403),
+     * offline, the CDN's 429, no link, an unsafe key. The item's own load afterwards still renews the post's links.
+     */
+    @Test
+    fun aFailedPrefetchIsQuietAndLeavesTheVisitsRequest() = runTest {
+        storeOldItems()
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        fetcher.answer = { null }
+        assertNull(repository.prefetchImage(media, 1, visit), "refused")
+        fetcher.answer = { throw java.io.IOException("no route") }
+        assertNull(repository.prefetchImage(media, 1, visit), "offline")
+        fetcher.answer = { throw CdnRateLimited() }
+        assertNull(repository.prefetchImage(media, 1, visit), "cdn limit")
+        db.carouselItemDao().replace(pk, rows().map { if (it.position == 1) it.copy(imageUrl = "") else it })
+        assertNull(repository.prefetchImage(media, 1, visit), "no link")
+        val unsafe = mediaEntity("12-34", MediaType.CAROUSEL)
+        db.mediaDao().upsert(listOf(unsafe))
+        db.carouselItemDao().replace(unsafe.pk, listOf(CarouselItemEntity(unsafe.pk, 1, MediaType.IMAGE, 1, 1, oldImage(1), null, null)))
+        assertNull(repository.prefetchImage(unsafe, 1, visit), "an unsafe key")
+        assertEquals(emptyList(), fake.calls, "no request for any of them")
+        assertNull(images.path(pk, 1))
+
+        fetcher.answer = { url -> if (url.startsWith("fake://")) url.toByteArray() else null }
+        assertIs<ItemImage.File>(repository.image(media, 1, visit), "the item's own load renews and loads")
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls, "the visit's one request was still there")
+    }
+
+    /**
+     * The item's prefetch is out: its on-demand load waits for it instead of downloading the item a second time, then serves the
+     * file it stored. (Only the first download of the link is held, so a second one would finish on its own, at once.)
+     */
+    @Test
+    fun anImageWaitsForItsPrefetchInsteadOfDownloadingTwice() = runTest {
+        storeOldItems()
+        val held = CompletableDeferred<Unit>()
+        fetcher.answer = { url -> if (fetcher.fetched.size == 1) held.await(); url.toByteArray() }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        try {
+            val ahead = async { repository.prefetchImage(media, 1, visit) }
+            withContext(Dispatchers.Default) { withTimeout(5_000) { while (fetcher.fetched.isEmpty()) delay(10) } }
+            val shown = async { repository.image(media, 1, visit) }
+            // Room and the store run on real threads, the lane's jitter in virtual time: a load that did not wait is done by now.
+            withContext(Dispatchers.Default) { withTimeoutOrNull(500) { while (!shown.isCompleted) delay(10) } }
+            assertTrue(!shown.isCompleted, "the on-demand load waits while the item's prefetch is out")
+
+            held.complete(Unit)
+
+            val path = assertNotNull(ahead.await())
+            assertEquals(ItemImage.File(path), shown.await())
+            assertEquals(listOf(oldImage(1)), fetcher.fetched, "one download")
+        } finally {
+            held.complete(Unit)
+        }
+    }
+
+    /** Another item's on-demand load does not wait for a prefetch that is out: the download lock is the item's, not the visit's. */
+    @Test
+    fun anotherItemDoesNotWaitForAPrefetch() = runTest {
+        storeOldItems()
+        val held = CompletableDeferred<Unit>()
+        fetcher.answer = { url -> if (url == oldImage(1)) held.await(); url.toByteArray() }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        try {
+            val ahead = async { repository.prefetchImage(media, 1, visit) }
+            withContext(Dispatchers.Default) { withTimeout(5_000) { while (fetcher.fetched.isEmpty()) delay(10) } }
+            val shown = async { repository.image(media, 0, visit) }
+
+            assertIs<ItemImage.File>(withContext(Dispatchers.Default) { withTimeout(5_000) { shown.await() } }, "item 0 loaded meanwhile")
+
+            held.complete(Unit)
+            assertNotNull(ahead.await())
+        } finally {
+            held.complete(Unit)
+        }
     }
 
     // --- videos ---

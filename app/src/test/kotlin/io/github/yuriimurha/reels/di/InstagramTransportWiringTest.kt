@@ -187,6 +187,35 @@ class InstagramTransportWiringTest {
         assertFalse(container.instagramTransportCreated, "a Mock mode carousel visit built the transport")
     }
 
+    /**
+     * R23 in Mock mode: a picture fetched ahead comes from the fake fetcher on the fake backend's own CDN lane, as an on-demand
+     * one does: the placeholder is stored, nothing more goes to the fake client, the real budget does not move and the transport
+     * is never built.
+     */
+    @Test
+    fun aMockModePrefetchStoresTheFakeFetchersPlaceholderAndAsksNothing() = runBlocking {
+        val container = container(useFake = true)
+        val fake = container.backend.client as FakeInstagramClient
+        val post = fake.library.allSaved().first { it.type == MediaType.CAROUSEL && (it.carouselCount ?: 0) >= 3 }
+        val media = MediaEntity(
+            pk = post.pk, code = post.code, type = post.type, author = post.author, caption = post.caption, takenAt = 0,
+            width = post.width, height = post.height, carouselCount = post.carouselCount, thumbPath = null, thumbUrl = post.thumbnailUrl,
+            videoUrl = null, videoUrlExpiresAt = null, collectionNames = "", firstSeenAt = 0, lastSeenAt = 0, removedAt = null,
+        )
+        container.db.mediaDao().upsert(listOf(media))
+        val realRequestsBefore = container.instagramPacer.status().requestsLast24h
+        val visit = CarouselRepository.Visit()
+        assertIs<ItemsResult.Items>(container.carouselRepository.items(media, visit))
+
+        val path = container.carouselRepository.prefetchImage(media, 1, visit)
+
+        assertTrue(path != null && File(path).length() > 0, "the fake fetcher's placeholder was stored: $path")
+        assertEquals(ItemImage.File(path), container.carouselRepository.image(media, 1, visit), "and the item's own load serves it")
+        assertEquals(listOf("mediaInfo:${post.pk}"), fake.calls, "only the fill went to the fake client")
+        assertEquals(realRequestsBefore, container.instagramPacer.status().requestsLast24h, "the real budget did not move")
+        assertFalse(container.instagramTransportCreated, "a Mock mode prefetch built the transport")
+    }
+
     /** Turns the main looper (so work posted to the main thread runs) until [condition] holds or [timeoutMs] passes. */
     private fun idleTheMainLooperUntil(timeoutMs: Long, condition: () -> Boolean): Boolean {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000

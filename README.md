@@ -502,9 +502,12 @@ A carousel post keeps all its items, and the viewer shows them on demand, as it 
 - **What a sync stores.** The addresses of every item, taken from the saved-feed replies the sync already downloads: a sync
   sends no extra request for them and downloads no carousel image or video. A Sync stops at the first post it already has, so a
   carousel saved before this update gets its items from a Full sync, or on its first open (below).
-- **On open.** The first item shows at once (it is the picture already in the grid). The other images download when you swipe
-  to them, from Instagram's image servers, with no cookies and at the thumbnails' pace, and are kept on the phone, so an item
-  you have seen shows with no network. A video item streams like a reel and is cached under the post's id and its position.
+- **On open.** The first item shows at once (it is the picture already in the grid). The post's other pictures then load in
+  the background, one at a time, starting with the item after the one on screen (a swipe moves the next item to the front),
+  from Instagram's image servers, with no cookies and at the thumbnails' pace, so a picture is usually ready by the time you
+  swipe to it. They are kept on the phone, so an item that loaded shows with no network. Loading them ahead sends Instagram
+  itself nothing. A video item is not loaded ahead: it streams like a reel when you reach it and is cached under the post's id
+  and its position.
 - **At most one request a visit.** If the post has no stored items, or a link has run out (an image the server refuses, a
   video link with 10 minutes or less left, a video the player is refused), the app asks Instagram once for the post: the same
   `GET api/v1/media/<n>/info/` as a reel's link renewal, on the interactive lane, counted in the 600 per 24 hours. The answer
@@ -793,7 +796,10 @@ real library (a grid tile reading "1/N"). Steps 5 to 8 also work in Mock mode, w
 
 **What it sends.** A sync is unchanged and sends nothing new. A visit to a carousel sends at most one
 `GET api/v1/media/<n>/info/` (the interactive lane) in all, and only when its items are not stored yet or a link it needs has
-run out; swiping through the items adds nothing beyond that one. If a cooldown is running, wait it out first.
+run out; swiping through the items adds nothing beyond that one. Loading its pictures in the background downloads only from
+the image servers, one at a time, and adds no `GET api/...` line to the log (a picture that could not load that way logs
+`carousel prefetch failed (<reason>)`, and its item loads as before when you swipe to it). If a cooldown is running, wait it
+out first.
 
 For the log checks, clear the log, then watch the requests in a second terminal (the start of this section says how):
 
@@ -820,8 +826,11 @@ adb -d logcat -s InstagramHttp
 2. **Swipe a carousel.** Open a post whose tile reads "1/N" and swipe left and right. **Look for:** its first picture at once; a
    counter at the top end ("1/5") and small dots at the bottom centre; each swipe left shows the next item, and the counter and
    the dots follow ("2/5"); a swipe up or down moves to the next post, never to the next item; leaving the post and coming back
-   starts it at the first item again. In the log: at most one `GET api/v1/media/<n>/info/` for the whole visit (none if its items
-   were already stored and no link had run out). **Report:** a pass, the counter you saw, and the request lines.
+   starts it at the first item again. Opening a carousel loads its pictures in the background, so wait a second or two before
+   the first swipe: after the first item, the next item's picture should usually be there as it slides in, not a black page
+   that fills in after the swipe (a video item still starts dark). In the log: at most one `GET api/v1/media/<n>/info/` for
+   the whole visit (none if its items were already stored and no link had run out). **Report:** a pass, the counter you saw,
+   whether the pictures were there as you swiped, and the request lines.
 3. **Play a video item.** Swipe to an item that is a video. **Look for:** it plays and loops, a tap pauses it, the speaker
    button mutes it (the button shows only while a video item is on screen), and it stops when you swipe to an image item or to
    another post. **Report:** a pass, or what happened.
