@@ -234,6 +234,14 @@ class SyncViewModelTest {
         assertEquals(0, probe.calls, "it sends nothing")
     }
 
+    /** The Developer section's message, waited for in real time (a settings write hops to an I/O thread); null after 3 s. */
+    private suspend fun developerMessageOf(viewModel: SyncViewModel): String? = withContext(Dispatchers.Default) {
+        withTimeoutOrNull(3_000) {
+            while (viewModel.developerMessage.value == null) delay(10)
+            viewModel.developerMessage.value
+        }
+    }
+
     /** Waits, in real time (DataStore writes on a thread of its own), until [condition] holds. */
     private suspend fun awaitStored(condition: suspend () -> Boolean) = withContext(Dispatchers.IO) {
         withTimeout(10_000) { while (!condition()) delay(10) }
@@ -264,7 +272,7 @@ class SyncViewModelTest {
         viewModel.forgetQueryId()
         advanceUntilIdle()
 
-        assertEquals("Couldn't forget the collections query id", viewModel.developerMessage.value)
+        assertEquals("Couldn't forget the collections query id", developerMessageOf(viewModel))
         assertFalse(settings.collectionsForceRepair())
 
         storageFailure = null
@@ -628,7 +636,8 @@ class SyncViewModelTest {
      * Waits (in real time, off the virtual clock) until the stored session reads LoggedOut. It re-reads the stored value
      * instead of waiting for an emission: a collector that subscribes while the logout's DataStore write lands can miss
      * that one update and then wait for ever (seen here as a 5 s timeout while the stored value already was LoggedOut,
-     * about one run in ten with the old `first { ... }`).
+     * about one run in ten with the old `first { ... }`). That loss is DataStore 1.2.1's, and `SettingsStore` now prevents it
+     * (`TurnTakingDataStore`); re-reading stays as the plainer wait.
      */
     private suspend fun awaitLoggedOut() {
         withContext(Dispatchers.Default) {
@@ -841,9 +850,10 @@ class SyncViewModelTest {
 
     /**
      * The screen's state right now. `ui` is collected only for this instant, never across a wait for real I/O: while it is
-     * collected, its 1 s ticker spins the test's virtual clock flat out, and a DataStore update that lands meanwhile on an
-     * I/O thread can go unseen (the test then hangs; seen as an `UncompletedCoroutinesError`, about one run in ten on a cold
-     * JVM). So the stored session is awaited through [SyncViewModel.sessionState], which has no ticker, and `ui` is read after.
+     * collected, its 1 s ticker spins the test's virtual clock flat out. So the stored session is awaited through
+     * [SyncViewModel.sessionState], which has no ticker, and `ui` is read after. (The hangs once blamed on that ticker, a
+     * DataStore update going unseen, were most likely a settings flow starting while a write landed, which DataStore 1.2.1
+     * loses and `SettingsStore` now prevents: `TurnTakingDataStore`.)
      */
     private fun TestScope.screen(viewModel: SyncViewModel): SyncUiState {
         val open = launch { viewModel.ui.collect {} }

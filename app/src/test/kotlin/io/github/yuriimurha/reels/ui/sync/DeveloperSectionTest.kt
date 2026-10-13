@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.lifecycle.ViewModel
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.SyncMode
@@ -34,6 +35,7 @@ import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.endViewModelsOnMainLooper
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import kotlinx.coroutines.CoroutineScope
@@ -63,8 +65,13 @@ class DeveloperSectionTest {
     private val db = inMemoryDb()
     private val storeScope = CoroutineScope(Dispatchers.IO + Job())
 
+    /** Every ViewModel a test built: its scope outlives the screen, so the teardown ends it before the database closes. */
+    private val viewModels = mutableListOf<ViewModel>()
+
+    /** The ViewModel first (see [endViewModelsOnMainLooper]), then the database and the settings file. */
     @After
     fun tearDown() {
+        endViewModelsOnMainLooper(viewModels)
         db.close()
         storeScope.cancel()
     }
@@ -194,6 +201,7 @@ class DeveloperSectionTest {
             requiresSession = false,
             mockSwitch = MockModeSwitch(usesFake, choice, cancelSync = {}) { restarts += choice.useFake },
         )
+        viewModels += viewModel
         compose.setContent {
             ReelsTheme { SyncScreen(onBack = {}, onOpenLogin = { _, _ -> }, onOpenLab = {}, viewModel = viewModel) }
         }

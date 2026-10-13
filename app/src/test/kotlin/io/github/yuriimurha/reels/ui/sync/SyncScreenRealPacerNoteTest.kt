@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.lifecycle.ViewModel
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
@@ -19,6 +20,7 @@ import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
 import io.github.yuriimurha.reels.testutil.closingAfterComposition
+import io.github.yuriimurha.reels.testutil.endViewModelsOnMainLooper
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import kotlinx.coroutines.CoroutineScope
@@ -43,10 +45,12 @@ class SyncScreenRealPacerNoteTest {
 
     /**
      * The database and the settings file go only once the compose rule has disposed the screen: closed in an `@After`, they
-     * were closed under the screen's still-running flows (the "pool closed" flake).
+     * were closed under the screen's still-running flows (the "pool closed" flake). And only once the ViewModel has been
+     * ended and waited for: its scope outlives the screen (see [endViewModelsOnMainLooper]).
      */
     @get:Rule
     val rules = closingAfterComposition(compose) {
+        endViewModelsOnMainLooper(viewModels)
         db.close()
         storeScope.cancel()
     }
@@ -56,6 +60,10 @@ class SyncScreenRealPacerNoteTest {
 
     private val db = inMemoryDb()
     private val storeScope = CoroutineScope(Dispatchers.IO + Job())
+
+    /** Every ViewModel a test built: its scope outlives the screen, so the teardown ends it before the database closes. */
+    private val viewModels = mutableListOf<ViewModel>()
+
     private val settings by lazy {
         SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
     }
@@ -88,6 +96,7 @@ class SyncScreenRealPacerNoteTest {
             requiresSession = !mockMode,
             realPacer = real.takeIf { mockMode },
         )
+        viewModels += viewModel
         compose.setContent {
             ReelsTheme {
                 SyncScreen(onBack = {}, onOpenLogin = { _, _ -> }, onOpenLab = {}, viewModel = viewModel)
