@@ -7,9 +7,12 @@ import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -44,7 +47,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -53,7 +58,8 @@ import kotlin.test.assertTrue
  * Opening a post and going back (spec 2026-10-12 §3.6): the post grows from its tile, and shrinks back into the tile of the post
  * the viewer is on, which the grid brings into view; with the system's animations off, nothing moves. The real [ReelsNavHost]
  * over a real (file-backed) Room database, starting on a grid. The transitions are read from the viewer's media box
- * ([POST_MEDIA_TAG]), which the shared element lays out at its animated bounds, frame by frame on a paused clock.
+ * ([POST_MEDIA_TAG]), which the shared element lays out at its animated bounds, frame by frame on a paused clock. The page
+ * pushes between Home and Search (R24) are read the same way from the pages' own nodes, and from the screen's pixels.
  */
 @RunWith(AndroidJUnit4::class)
 class NavigationBackTest {
@@ -68,6 +74,8 @@ class NavigationBackTest {
     private lateinit var navController: NavHostController
     private lateinit var back: OnBackPressedDispatcher
     private val source = MediaSource.Collection(ALL_SAVED_ID)
+    private val homeTitle = hasText("Saved")
+    private val searchField = hasTestTag("searchField")
 
     @Before
     fun setUp() {
@@ -304,9 +312,8 @@ class NavigationBackTest {
         assertEquals(boundsOfTile("m23"), tile)
     }
 
-    /** The back gesture between pages seeks the shared-axis X reverse: the page slides towards the end, unscaled. */
-    @Test
-    fun theBackGestureSlidesAPageOut() {
+    /** The real nav host from Home, as the app opens. */
+    private fun showHome() {
         compose.setContent {
             navController = rememberNavController()
             back = LocalOnBackPressedDispatcherOwner.current!!.onBackPressedDispatcher
@@ -317,20 +324,34 @@ class NavigationBackTest {
             }
         }
         compose.waitForIdle()
+        awaitUntil("Home") { xOf(homeTitle) != null }
+    }
+
+    /**
+     * R24: the back gesture between pages seeks the push's reverse, linearly, so the page follows the finger: the page closed
+     * slides towards the end by as much of its width as the gesture's progress, unscaled, while the previous page comes back
+     * from a third of the width towards the start by the same share.
+     */
+    @Test
+    fun theBackGestureSlidesAPageOutWithTheFinger() {
+        showHome()
+        val homeAt = xOf(homeTitle)!!
         compose.runOnUiThread { navController.navigate(SearchRoute) }
         compose.waitForIdle()
-        val field = hasTestTag("searchField")
-        val before = compose.onNode(field).fetchSemanticsNode().boundsInRoot
+        val searchAt = xOf(searchField)!!
+        val size = compose.onNode(searchField).fetchSemanticsNode().size
+        val width = root().width
         compose.mainClock.autoAdvance = false
         compose.runOnUiThread { back.dispatchOnBackStarted(gesture(0f)) }
         recordFrames(4)
-        compose.runOnUiThread { back.dispatchOnBackProgressed(gesture(0.5f)) }
-        recordFrames(4)
-        val halfway = compose.onNode(field).fetchSemanticsNode().boundsInRoot
+        for (progress in listOf(0.25f, 0.5f)) {
+            compose.runOnUiThread { back.dispatchOnBackProgressed(gesture(progress)) }
+            recordFrames(4)
+            assertNear(searchAt + progress * width, xOf(searchField)!!, "Search at $progress of the gesture")
+            assertEquals(size, compose.onNode(searchField).fetchSemanticsNode().size, "Search's size at $progress of the gesture (the page is not scaled)")
+            assertNear(homeAt - (1 - progress) * width / 3f, xOf(homeTitle)!!, "Home under Search at $progress of the gesture")
+        }
         compose.mainClock.autoAdvance = true
-
-        assertTrue(halfway.left > before.left && halfway.left - before.left <= root().width / 10f + 1f, "not sliding to the end: $halfway, was $before")
-        assertNear(before.width, halfway.width, "width (the page is not scaled)")
     }
 
     /** The search page over the seeded library, searching "m" (every seed's author), with its results' tiles shown. */
@@ -403,14 +424,15 @@ class NavigationBackTest {
         compose.onNode(tileOf("m9")).assertIsDisplayed()
     }
 
-    /** The left edge of the node matching [matcher], or null when it is not composed. */
-    private fun leftOf(matcher: SemanticsMatcher): Float? = compose.onAllNodes(matcher).fetchSemanticsNodes().singleOrNull()?.boundsInRoot?.left
+    /** The x of the node matching [matcher], unclipped (a sliding page may put it off screen), or null when it is not composed. */
+    private fun xOf(matcher: SemanticsMatcher): Float? =
+        compose.onAllNodes(matcher).fetchSemanticsNodes().singleOrNull()?.positionInRoot?.x
 
-    /** On a paused clock, [frames] frames, recording the left edges of [a] and [b] after each. */
-    private fun recordLefts(frames: Int, a: SemanticsMatcher, b: SemanticsMatcher): List<Pair<Float?, Float?>> = List(frames) {
+    /** On a paused clock, [frames] frames, recording the x of [a] and of [b] after each. */
+    private fun recordXs(frames: Int, a: SemanticsMatcher, b: SemanticsMatcher): List<Pair<Float?, Float?>> = List(frames) {
         compose.mainClock.advanceTimeByFrame()
         compose.waitForIdle()
-        leftOf(a) to leftOf(b)
+        xOf(a) to xOf(b)
     }
 
     private fun List<Float>.falls() = zipWithNext().all { (x, y) -> y <= x + 0.5f } && first() > last() + 2f
@@ -418,49 +440,164 @@ class NavigationBackTest {
     private fun List<Float>.rises() = zipWithNext().all { (x, y) -> y >= x - 0.5f } && first() < last() - 2f
 
     /**
-     * T8 (spec 2026-10-12 §3.6, shared-axis X): going forward, the new page slides in from the end (its content starts right of
-     * where it settles, at most a tenth of the width, and moves left) while the page left slides out to the start. A plain Back
-     * is the reverse: the previous page slides back in from the start while the closed one slides out to the end. This also pins
-     * that the nav host's four page transitions are not None while motion is on.
+     * A push's pace, from a page's offsets one frame (16 ms) apart from the start: it is over in about 300 ms (its last move lands
+     * within [PUSH_FRAMES] frames), and it slows into its end, an eased curve: its last three moves add up to less than its
+     * fastest one (a linear slide moves alike every frame).
+     */
+    private fun assertPacedLikeAPush(offsets: List<Float>, what: String) {
+        val moves = offsets.zipWithNext { a, b -> abs(b - a) }
+        val last = moves.indexOfLast { it > 0.5f }
+        assertTrue(last in 2 until PUSH_FRAMES, "$what still moved $last frames on: $offsets")
+        assertTrue(moves.subList(last - 2, last + 1).sum() < moves.max(), "$what did not slow into its end: $offsets")
+    }
+
+    /**
+     * R24 (spec 2026-10-12, amending §3.6's shared axis): pages push. Going forward, the new page slides in from the end edge,
+     * its whole width (its content starts a screen's width right of where it settles, and moves left), while the page left
+     * drifts a third of the width towards the start. A plain Back is the exact reverse: the page closed slides out to the end
+     * edge while the previous one comes back from a third towards the start. Each is over in about 300 ms and slows into its
+     * end. This also pins that the nav host's four page transitions are not None while motion is on.
      */
     @Test
-    fun pagesSlideInFromTheEndGoingForwardAndBackFromTheStart() {
-        compose.setContent {
-            navController = rememberNavController()
-            back = LocalOnBackPressedDispatcherOwner.current!!.onBackPressedDispatcher
-            ReelsTheme {
-                CompositionLocalProvider(LocalAppContainer provides container) {
-                    ReelsNavHost(navController, startDestination = HomeRoute)
-                }
-            }
-        }
-        val home = hasText("Saved") // Home's title
-        val search = hasTestTag("searchField")
-        awaitUntil("Home") { leftOf(home) != null }
-        val homeAt = leftOf(home)!!
-        val tenth = root().width / 10f + 1f
+    fun pagesPushInFromTheEndAndBackOutTheSameWay() {
+        showHome()
+        val homeAt = xOf(homeTitle)!!
+        val width = root().width
+        val third = width / 3f
 
         compose.mainClock.autoAdvance = false
         compose.runOnUiThread { navController.navigate(SearchRoute) }
-        val forward = recordLefts(30, search, home)
+        val forward = recordXs(30, searchField, homeTitle)
         compose.mainClock.autoAdvance = true
         compose.waitForIdle()
-        val searchAt = leftOf(search)!!
-        val entering = forward.mapNotNull { it.first }
-        assertTrue(entering.size >= 3 && entering.first() - searchAt in 2f..tenth && entering.falls(), "Search did not slide in from the end: $entering, settles at $searchAt")
-        val leaving = forward.mapNotNull { it.second }
-        assertTrue(leaving.isNotEmpty() && leaving.all { it <= homeAt + 0.5f } && leaving.any { it < homeAt - 2f }, "Home did not slide out to the start: $leaving, was at $homeAt")
+        val searchAt = xOf(searchField)!!
+        val entering = forward.mapNotNull { it.first?.minus(searchAt) }
+        assertTrue(
+            entering.size >= 3 && entering.first() in width * 0.9f..width + 0.5f && entering.falls() && entering.last() == 0f,
+            "Search did not slide in from the end edge: $entering",
+        )
+        val leaving = forward.mapNotNull { it.second?.minus(homeAt) }
+        assertTrue(
+            leaving.size >= 3 && leaving.all { it in -third - 1f..0.5f } && leaving.min() < -third * 0.95f && leaving.falls(),
+            "Home did not drift a third of the width to the start: $leaving",
+        )
+        assertPacedLikeAPush(entering, "Search coming in")
+        assertPacedLikeAPush(leaving, "Home leaving")
 
         compose.mainClock.autoAdvance = false
         compose.runOnUiThread { back.onBackPressed() }
-        val backward = recordLefts(30, search, home)
+        val backward = recordXs(30, searchField, homeTitle)
         compose.mainClock.autoAdvance = true
         compose.waitForIdle()
-        val returning = backward.mapNotNull { it.second }
-        assertTrue(returning.size >= 3 && homeAt - returning.first() in 2f..tenth && returning.rises(), "Home did not slide back in from the start: $returning, settles at $homeAt")
-        val closing = backward.mapNotNull { it.first }
-        assertTrue(closing.isNotEmpty() && closing.all { it >= searchAt - 0.5f } && closing.any { it > searchAt + 2f }, "Search did not slide out to the end: $closing, was at $searchAt")
-        assertEquals(homeAt, leftOf(home))
+        val closing = backward.mapNotNull { it.first?.minus(searchAt) }
+        assertTrue(
+            closing.size >= 3 && closing.all { it in -0.5f..width + 0.5f } && closing.max() > width * 0.95f && closing.rises(),
+            "Search did not slide out to the end edge: $closing",
+        )
+        val returning = backward.mapNotNull { it.second?.minus(homeAt) }
+        assertTrue(
+            returning.size >= 3 && returning.first() in -third - 1f..-third * 0.9f && returning.rises() && returning.last() == 0f,
+            "Home did not come back from a third of the width towards the start: $returning",
+        )
+        assertPacedLikeAPush(closing, "Search closing")
+        assertPacedLikeAPush(returning, "Home coming back")
+        assertEquals(homeAt, xOf(homeTitle))
+    }
+
+    /** A screenshot, as ARGB pixels. */
+    private class Shot(val width: Int, val height: Int, private val argb: IntArray) {
+        operator fun get(x: Int, y: Int) = argb[y * width + x]
+
+        /** The colour most of it has: its page's background. */
+        val background: Int by lazy { argb.asList().groupingBy { it }.eachCount().maxBy { it.value }.key }
+    }
+
+    /** The screen as it is drawn now (Robolectric's native graphics). */
+    private fun shot(): Shot {
+        val pixels = compose.onRoot().captureToImage().toPixelMap()
+        return Shot(pixels.width, pixels.height, IntArray(pixels.width * pixels.height) { pixels[it % pixels.width, it / pixels.width].toArgb() })
+    }
+
+    /** The two colours differ by no more than a rounding in any channel. */
+    private fun alike(a: Int, b: Int) = (0 until 32 step 8).all { abs((a ushr it and 0xFF) - (b ushr it and 0xFF)) <= 8 }
+
+    /**
+     * [page], a shot of a page at rest, shows unchanged in [frame], drawn [dx] px to the side, over the columns [xs]: at least
+     * 95 % of its pixels landing there that would look otherwise if the page were not on top, or faded, are in [frame] as they
+     * are (there must be some). Otherwise is [under], a shot of the page under it drawn [underDx] px to the side, where that
+     * page lies; elsewhere the page's own background.
+     */
+    private fun assertShows(frame: Shot, page: Shot, dx: Int, xs: IntRange, what: String, under: Shot? = null, underDx: Int = 0) {
+        var telling = 0
+        var shown = 0
+        for (y in 0 until page.height) for (x in 0 until page.width) {
+            val at = x + dx
+            if (at !in xs || at !in 0 until frame.width) continue
+            val pixel = page[x, y]
+            val otherwise = if (under != null && at - underDx in 0 until under.width) under[at - underDx, y] else page.background
+            if (alike(pixel, otherwise)) continue
+            telling++
+            if (alike(frame[at, y], pixel)) shown++
+        }
+        assertTrue(telling >= 20 && shown >= telling * 0.95f, "$what: $shown of the page's $telling telling pixels in the columns $xs show as they are")
+    }
+
+    /**
+     * R24: the page that moves is drawn on top, and nothing fades, read from the screen's pixels frame by frame. Going forward
+     * the new page slides in over the page left; going back, and under the back gesture, the page closed slides out over the
+     * page coming back (Navigation 2.10 draws the page left above the other on a pop). So right of Search's edge the screen
+     * shows Search's pixels exactly as they are at rest, where Home's would differ (Search is on top, and not faded), and left
+     * of it Home's (not faded).
+     */
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun theMovingPageIsDrawnOnTopAndNothingFades() {
+        showHome()
+        val homeAt = xOf(homeTitle)!!
+        compose.runOnUiThread { navController.navigate(SearchRoute) }
+        compose.waitForIdle()
+        val searchAt = xOf(searchField)!!
+        val search = shot()
+        compose.runOnUiThread { back.onBackPressed() }
+        compose.waitForIdle()
+        val home = shot()
+
+        /** Checks the frame drawn now, if Search's edge is well inside the screen; whether it did. */
+        fun checked(what: String): Boolean {
+            val top = ((xOf(searchField) ?: return false) - searchAt).roundToInt()
+            val under = ((xOf(homeTitle) ?: return false) - homeAt).roundToInt()
+            if (top !in home.width / 5..home.width * 4 / 5) return false
+            val frame = shot()
+            assertShows(frame, search, top, top until frame.width, "$what, Search over Home (Search at $top)", home, under)
+            assertShows(frame, home, under, 0 until top, "$what, Home beside Search (Home at $under)")
+            return true
+        }
+
+        fun framesChecked(what: String) = List(30) {
+            compose.mainClock.advanceTimeByFrame()
+            compose.waitForIdle()
+            checked(what)
+        }.count { it }
+
+        compose.mainClock.autoAdvance = false
+        compose.runOnUiThread { navController.navigate(SearchRoute) }
+        val forward = framesChecked("forward")
+        compose.runOnUiThread { back.onBackPressed() }
+        val backward = framesChecked("back")
+        compose.mainClock.autoAdvance = true
+        compose.runOnUiThread { navController.navigate(SearchRoute) }
+        compose.waitForIdle()
+        compose.mainClock.autoAdvance = false
+        compose.runOnUiThread { back.dispatchOnBackStarted(gesture(0f)) }
+        recordFrames(4)
+        val seeked = listOf(0.3f, 0.6f).count { progress ->
+            compose.runOnUiThread { back.dispatchOnBackProgressed(gesture(progress)) }
+            recordFrames(4)
+            checked("at $progress of the back gesture")
+        }
+        compose.mainClock.autoAdvance = true
+
+        assertTrue(forward >= 3 && backward >= 3 && seeked == 2, "too few frames checked: $forward forward, $backward back, $seeked of the gesture")
     }
 
     /** With the system's animations off (scale 0): no growing, no shrinking, no fade; each page is there on the next frames. */
@@ -487,5 +624,8 @@ class NavigationBackTest {
     private companion object {
         /** A transition with no animation ends within a few frames; the 300 ms fades and the bounds spring take 20 or more. */
         const val FRAMES_WITHOUT_MOTION = 5
+
+        /** A 300 ms push is over within this many 16 ms frames of its start (19 frames, and the first few to compose the page). */
+        const val PUSH_FRAMES = 24
     }
 }

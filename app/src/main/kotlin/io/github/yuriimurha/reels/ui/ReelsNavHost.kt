@@ -22,10 +22,10 @@ import io.github.yuriimurha.reels.BuildConfig
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.common.LocalNavAnimatedVisibilityScope
 import io.github.yuriimurha.reels.ui.common.LocalSharedTransitionScope
-import io.github.yuriimurha.reels.ui.common.sharedAxisEnter
-import io.github.yuriimurha.reels.ui.common.sharedAxisExit
-import io.github.yuriimurha.reels.ui.common.sharedAxisPopEnter
-import io.github.yuriimurha.reels.ui.common.sharedAxisPopExit
+import io.github.yuriimurha.reels.ui.common.pageEnter
+import io.github.yuriimurha.reels.ui.common.pageExit
+import io.github.yuriimurha.reels.ui.common.pagePopEnter
+import io.github.yuriimurha.reels.ui.common.pagePopExit
 import io.github.yuriimurha.reels.ui.common.underViewerExit
 import io.github.yuriimurha.reels.ui.common.viewerEnter
 import io.github.yuriimurha.reels.ui.common.viewerExit
@@ -83,10 +83,15 @@ private val NavBackStackEntry.isViewer: Boolean get() = destination.hasRoute<Vie
 /**
  * [startDestination] is only overridden by tests.
  *
- * Motion (spec 2026-10-12 §3.6, `Motion.kt`): pages change with the shared-axis X transition. A post grows from its grid tile
- * into the viewer and shrinks back into the tile of the post the viewer is on (`sharedMedia`, over the [SharedTransitionLayout]
- * here), while the viewer fades and the page under it stays. Back is predictive (the manifest opts in): the gesture seeks the same
- * pop transitions, and letting go short of Back cancels them. With the system's animations removed, nothing animates.
+ * Motion (spec 2026-10-12 §3.6 and R24, `Motion.kt`): pages change with a push, the new page sliding in over the old one. A post
+ * grows from its grid tile into the viewer and shrinks back into the tile of the post the viewer is on (`sharedMedia`, over the
+ * [SharedTransitionLayout] here), while the viewer fades and the page under it stays. Back is predictive (the manifest opts in):
+ * the gesture seeks the same pop transitions, and letting go short of Back cancels them. With the system's animations removed,
+ * nothing animates.
+ *
+ * The moving page is drawn on top without anything here setting it: Navigation 2.10's [NavHost] gives the arriving page the
+ * z-index of the page left plus one on a navigate, and minus one on a pop and under the back gesture, so a page closing stays
+ * above the page coming back (`NavigationBackTest.theMovingPageIsDrawnOnTopAndNothingFades`).
  */
 @Composable
 fun ReelsNavHost(navController: NavHostController = rememberNavController(), startDestination: Any = HomeRoute) {
@@ -96,14 +101,19 @@ fun ReelsNavHost(navController: NavHostController = rememberNavController(), sta
             NavHost(
                 navController = navController,
                 startDestination = startDestination,
-                enterTransition = { sharedAxisEnter(context) },
-                exitTransition = { if (targetState.isViewer) underViewerExit(context) else sharedAxisExit(context) },
-                popEnterTransition = { if (initialState.isViewer) EnterTransition.None else sharedAxisPopEnter(context) },
-                popExitTransition = { sharedAxisPopExit(context) },
-                // The back gesture seeks these same transitions (Navigation's own predictive ones scale the page out instead).
-                // A destination's own pop transition does not apply to the gesture, so the viewer's fade is named here too.
-                predictivePopEnterTransition = { if (initialState.isViewer) EnterTransition.None else sharedAxisPopEnter(context) },
-                predictivePopExitTransition = { if (initialState.isViewer) viewerExit(context) else sharedAxisPopExit(context) },
+                enterTransition = { pageEnter(context) },
+                exitTransition = { if (targetState.isViewer) underViewerExit(context) else pageExit(context) },
+                popEnterTransition = { if (initialState.isViewer) EnterTransition.None else pagePopEnter(context) },
+                popExitTransition = { pagePopExit(context) },
+                // The back gesture seeks these same slides, linearly so the page follows the finger (Navigation's own predictive
+                // ones scale the page out instead). A destination's own pop transition does not apply to the gesture, so the
+                // viewer's fade is named here too.
+                predictivePopEnterTransition = {
+                    if (initialState.isViewer) EnterTransition.None else pagePopEnter(context, gesture = true)
+                },
+                predictivePopExitTransition = {
+                    if (initialState.isViewer) viewerExit(context) else pagePopExit(context, gesture = true)
+                },
             ) {
                 destinations(navController, context)
             }
