@@ -21,9 +21,33 @@ class DebugGatesGuardTest {
         assertEveryOccurrenceIsGated("ui/sync/SyncScreen.kt", "DeveloperSection(")
     }
 
+    /**
+     * Every registration of the lab's route, in any file and by any destination builder: the nav host's own `screen<>` (its
+     * `composable`, which gives each destination its animated scope, for shared elements), a plain `composable<>`, or any other
+     * that names the route as its type argument.
+     */
     @Test
     fun theLabRouteIsOnlyEverRegisteredInsideADebugGate() {
-        assertEveryOccurrenceIsGated("ui/ReelsNavHost.kt", "composable<AdapterLabRoute>")
+        val registrations = sources().flatMap { source -> labRouteRegistrations(source.text).map { source.path to it } }
+        assertTrue(registrations.any { it.first == "ui/ReelsNavHost.kt" }, "ui/ReelsNavHost.kt no longer registers the lab: update this pin")
+        assertEquals(emptyList(), ungatedLabRoutes(sources()), "the lab's route must only be registered inside a `$gate { ... }` block")
+    }
+
+    /** Task 6 minor 7: the widened pin catches a plain `composable<>` outside the gate, which the old `screen<>` pin let through. */
+    @Test
+    fun aLabRouteRegisteredWithPlainComposableOutsideTheGateIsCaught() {
+        val navHost = "NavHost(nav, Home) {\n    if (BuildConfig.DEBUG) {\n        screen<AdapterLabRoute> { Lab() }\n    }\n    composable<AdapterLabRoute> { Lab() }\n}\n"
+        assertEquals(listOf("test.kt:5"), ungatedLabRoutes(listOf(Source("test.kt", navHost))))
+    }
+
+    /** Offsets of every `<AdapterLabRoute>` type argument in [text], comments aside. */
+    private fun labRouteRegistrations(text: String): List<Int> =
+        Regex("""<\s*AdapterLabRoute\s*>""").findAll(code(text)).map { it.range.first }.toList()
+
+    /** `path:line` of each registration of the lab's route outside a debug gate. */
+    private fun ungatedLabRoutes(sources: List<Source>): List<String> = sources.flatMap { source ->
+        labRouteRegistrations(source.text).filterNot { isInsideGate(source.text.substring(0, it)) }
+            .map { offset -> "${source.path}:${source.text.substring(0, offset).count { it == '\n' } + 1}" }
     }
 
     @Test

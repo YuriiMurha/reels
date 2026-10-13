@@ -255,3 +255,101 @@ Two follow-ups the final review of the collection-names change parked (PR #8), a
 - Pacing: unchanged (no new request, no retry; a throttle written as a plain string no longer starts a repair).
 - Tests: `./gradlew check` 1285 (new: an envelope's own text keeping its meaning, the stale detail for envelopes and non-JSON pages, plain-string error entries, the
   reply-failure callback's contract both ways, the log line on a stopping repaired reply, an envelope that repairs).
+
+## 2026-10-12: viewer UX: carousels, icon buttons, the app icon and motion (Tasks 1 to 7)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` (its section 6 lists the rulings R1 to R22; R16 to R22 come
+from the final review, in the 2026-10-13 entry below), plan
+`docs/superpowers/plans/2026-10-12-viewer-ux.md`. Seven tasks; Tasks 1 to 6 were each reviewed, with a fix round where a review
+asked for one:
+
+- **Why.** The owner's first real use on the phone (2026-10-11) found four rough edges: a carousel post could not be swiped
+  (the app kept only its first picture and a "1/N" badge), Mute and Open on Instagram were text buttons, navigation had no
+  motion that related a post to its tile, and the app had no icon of its own.
+- **Tasks 1 and 2, the data.** `WebParsers` reads each child of `carousel_media` into `RemoteCarouselItem`s from the saved feed
+  the sync already downloads; an unreadable child leaves a post's items unknown, never a `ShapeChanged` (R4). Room goes to
+  version 2 (`carousel_item`, `MIGRATION_1_2`, no destructive fallback); foreign keys are now enforced, so `MediaDao.upsert`
+  must stay an in-place `@Upsert`. The sync replaces a page's items in that page's transaction, and an empty list keeps the
+  stored ones (R2). The schema files ship as debug assets (R5). `FakeLibrary` gives Mock mode's carousels items.
+- **Task 3, loading on demand.** `PacedMediaInfo` is the reel resolver's `mediaInfo` request and session gates, cut out and
+  shared. `CarouselRepository` fills a post's items, downloads an image and resolves a video item, with at most one
+  `mediaInfo` per `Visit`, spent by any outcome (R8). Images go through the cookieless CDN fetcher on the Pacer's CDN lane
+  into `CarouselImageStore` (R1, R7); video items are cached under `{pk}_{position}` and play the bundled clip in Mock mode
+  (R3), with the reels' cached-bytes table (R9). Eviction drops a post's `{pk}_*` videos (R6), each step on its own
+  (`MediaEviction.eachStep`). The review found the CDN lane unpinned: fixed and pinned.
+- **Task 4, the viewer.** A horizontal pager inside a carousel post, "N/M" and dots, the playable unit (post, item), one visit
+  per settled post with its calls in a post-scoped coroutine, item 0 showing the stored cover, images downloading when they
+  settle, no posters for video items (R10), and the next post's prefetch decided only on a post's first unit (R11). The review
+  found the visit's sharing and the cross-post guards unpinned: fixed and pinned, with a seeded pager and a same-post re-settle
+  that keeps its visit.
+- **Task 5, icons.** Mute and Open on Instagram are icon buttons with tooltips, from Material Symbols (Apache 2.0, notice in
+  `res/raw/license_material_symbols.txt`, R12); no `material-icons-extended`. The adaptive icon (`#0F6E56`, four masonry tiles
+  with a play triangle) has a monochrome layer with the triangle cut out of its tile (R13).
+- **Task 6, motion.** `Motion.kt`, a `SharedTransitionLayout` around the nav host, the key `media-<pk>` on the tile's picture
+  and the viewer's settled page, as shared bounds with scale-to-bounds (R14); shared-axis X pages; predictive back, which
+  needed the NavHost's own predictive transitions and `revealTile` (R15); nothing animates with animations off. On the
+  emulator the grow, the shrink, the page slides and the back gesture were seen frame by frame; the first viewer open after
+  an app start showed no grow there (a debug first composition stalls the main thread longer than the fade), and fell back to
+  a plain fade, by design. The viewer's two player effects now run on `Dispatchers.Main.immediate` (a test once woke one on a
+  Room thread); pinned since the final review.
+- **Task 7, docs.** `ARCHITECTURE.md` has sections Carousels, Viewer, Motion and App icon, and the tests; the spec has its
+  amendments; the README has a phone checklist and its text-button lines now describe the icon buttons.
+- **Tests.** `./gradlew check`: 1097 app tests and 382 `:instagram` tests, lint with no errors. `connectedDebugAndroidTest` on
+  the emulator in Mock mode: 54 of 54 at the last code change (the smoke suite gained a carousel swipe and a back from a far
+  post). The new tests were mutation-checked: a mutant of each rule named above (the visit sharing, the CDN lane, the
+  cross-post guards, the shared bounds, `revealTile`, a REPLACE upsert) fails a test, and the few survivors are equivalent in
+  this version or covered by another guard. The teardown flakes seen then were fixed in the final review (below); a rare
+  60 s hang in one `SyncViewModelTest` body stays open in `TODO.md`.
+- **Pacing.** The sync is unchanged: it sends no new request, and its replies already carry the items. A carousel visit sends
+  at most one `mediaInfo`, on the interactive lane (the fill and any renewal together), under the same session gates as a
+  reel's link renewal. Carousel images download on the existing CDN lane, which can only lower a rate. No rate, budget or
+  concurrency was raised, and item swipes never start a prefetch.
+- **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, local data and the emulator in
+  Mock mode only. Fixtures use synthetic ids and `cdn.example.invalid`-style hosts.
+- **Next, the owner's phone.** README section 8, "The viewer update": install over the app, swipe a carousel, play a video item,
+  reopen it offline, the icon buttons, the launcher icon and its themed layer, and the back swipe from a post and between pages.
+  On the release build the first open after a cold start should grow from its tile; a debug build on a slow phone may only fade.
+
+## 2026-10-13: viewer UX: the final review's fixes (R16 to R22)
+
+A five-lens final review of the whole update (correctness, pacing with the adapter boundary and secrets, data and the
+migration, tests by mutation, docs), then refuters for its findings, then one fix round. Spec section 6 records R16 to R22.
+
+- **Fixes.**
+  - **C1, a list moving under the viewer.** A sync that saved or removed a post above the viewed carousel reset it to item 1,
+    stopped its video item and, for one frame, handed the player the post that slid in (the pager re-keys a moved post only in
+    its next measure). The viewer now reports a settle only where the list and the pager's layout agree; a placeholder row
+    always settles.
+  - **R16.** A carousel video item the player cannot reach says "Offline: this item isn't cached yet" unless all its bytes are
+    cached, as an unviewed image does.
+  - **R20.** A carousel whose items change shape (a slide deleted, an image swapped for a video) drops its downloaded item
+    images and cached item videos, which are keyed by position: the sync after its page commits, a renewal after its store.
+    The same items with renewed links keep everything. A reorder that keeps every position's type is a known gap (TODO).
+  - **D3.** No image file is written, and no request sent, for a post a sync has marked removed.
+  - **R21.** `versionCode` 2 follows the Room schema, with a guard test, so a build from before the update is refused
+    (`INSTALL_FAILED_VERSION_DOWNGRADE`) instead of failing at every start; the README says never to uninstall to get past it.
+  - **Smaller.** The schema assets merge after Room writes them (D4); a tile taller than the grid aligns by its top on return;
+    the manifest's back flag says API 33 and the glyphs' notice is kept (lint warnings 18 to 16).
+- **Test gaps closed.** A held drag reports no settle; the bright dot, the black placeholder and Fit for item pictures; R2 on
+  the repository's renewal and fill; the log lines carry no link, host or pk; every v1 table keeps its rows; the shared-axis
+  direction forward and back and the nav host's use of every transition; Search's return; an activity naming its own icon;
+  each glyph's own outline; anchored session-gate pins; no stroke on the launcher tiles; the licence's terms; the player
+  called on the main thread only; an unset animator scale; any registration of the lab's route; the prefetch when a post's
+  first item was swiped past before it resolved.
+- **Flakes.** "Dispatchers.Main is used concurrently with setting it" (`SyncViewModelTest`, `ViewerViewModelTest`): a
+  ViewModel's cancelled (or never ended) coroutine still resumed on Main from the IO, Room or DataStore thread it waited on
+  while Main was reset. The tests now end their ViewModels and wait for them, then close the database, then reset Main.
+  "Pool closed" (`SyncScreenRealPacerNoteTest`, and the same order in `NavigationBackTest` and `ViewerScreenCarouselTest`): the
+  database closed while the screen was still composed; it now closes after the composition is disposed. A rarer 60 s hang in
+  one `SyncViewModelTest` body, seen once before and once in this round's first full `check`, is another mechanism; it stays
+  open in `TODO.md`.
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1137 app tests in 92 classes and 382 `:instagram` tests,
+  0 failures, lint with no errors and 16 warnings (one from this update, `ObsoleteSdkInt`). `connectedDebugAndroidTest` on the
+  emulator in Mock mode: 54 of 54. Every fix and pin was mutation-checked in a scratch export: 49 mutants, all killed.
+- **Pacing.** Nothing raised. R20's drop deletes local files and cache keys only (a dropped image downloads again only when
+  viewed), the removed-post guard can only send fewer requests, and the settle gate keeps a transient post from ever starting
+  a fill or a resolve.
+- **Safety.** No agent contacted Instagram, logged in, or touched the owner's phone: fakes, local data and the emulator in Mock
+  mode only.
+- **Next, the owner's phone.** Unchanged: README section 8, "The viewer update", now including the offline video item (step 4)
+  and the install rule of step 1.

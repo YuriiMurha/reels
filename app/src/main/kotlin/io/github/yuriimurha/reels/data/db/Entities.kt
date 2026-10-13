@@ -1,11 +1,13 @@
 package io.github.yuriimurha.reels.data.db
 
 import androidx.room.Entity
+import androidx.room.ForeignKey
 import androidx.room.Fts4
 import androidx.room.FtsOptions
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 
 /** The pseudo-collection holding every saved item ("All Saved"). */
 const val ALL_SAVED_ID = "__all__"
@@ -30,6 +32,41 @@ data class MediaEntity(
     val firstSeenAt: Long,
     val lastSeenAt: Long,
     val removedAt: Long?,
+)
+
+/**
+ * One item of a carousel post, at its 0-based [position] (spec 2026-10-12 §3.1). Deleting the post deletes its items; the
+ * sync's upsert of the post updates it in place, so that never fires on a re-sync.
+ */
+@Entity(
+    tableName = "carousel_item",
+    primaryKeys = ["parentPk", "position"],
+    foreignKeys = [ForeignKey(entity = MediaEntity::class, parentColumns = ["pk"], childColumns = ["parentPk"], onDelete = ForeignKey.CASCADE)],
+)
+data class CarouselItemEntity(
+    val parentPk: String,
+    val position: Int,
+    /** [MediaType.IMAGE] or [MediaType.VIDEO]. */
+    val type: MediaType,
+    val width: Int,
+    val height: Int,
+    /** Empty when Instagram sent no image for the item. */
+    val imageUrl: String,
+    val videoUrl: String?,
+    /** Epoch millis, like [MediaEntity.videoUrlExpiresAt]. */
+    val videoUrlExpiresAt: Long?,
+)
+
+/** This item's row, as an item of the post [parentPk]. */
+fun RemoteCarouselItem.toEntity(parentPk: String) = CarouselItemEntity(
+    parentPk = parentPk,
+    position = position,
+    type = type,
+    width = width,
+    height = height,
+    imageUrl = imageUrl,
+    videoUrl = videoUrl,
+    videoUrlExpiresAt = videoUrlExpiresAt?.toEpochMilli(),
 )
 
 @Fts4(contentEntity = MediaEntity::class, tokenizer = FtsOptions.TOKENIZER_UNICODE61)

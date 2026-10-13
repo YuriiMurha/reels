@@ -109,6 +109,33 @@ class VideoCacheTest {
         assertEquals(0L, videoCache.cache.cacheSpace)
     }
 
+    /**
+     * R6: a carousel's video items are cached under `{pk}_{position}` (CarouselRepository), so an unsaved post's eviction drops
+     * them too. Another post's keys stay, however alike: `12_` names post 12's items, never post 122's or 1220's.
+     */
+    @Test
+    fun removeCarouselItemsDropsThePostsItemVideosAndNothingElse() {
+        for (key in listOf("12", "12_0", "12_2", "122_0", "1220_0", "1_2", "2_12")) videoCache.cacheWholeFile(key, clip("$key.mp4", 1_000))
+
+        videoCache.removeCarouselItems("12")
+
+        assertFalse(videoCache.isFullyCached("12_0"))
+        assertFalse(videoCache.isFullyCached("12_2"))
+        assertEquals(setOf("12", "122_0", "1220_0", "1_2", "2_12"), videoCache.cache.keys, "the post's own video and every other post's stay")
+        assertEquals(5_000L, videoCache.cache.cacheSpace, "the items' bytes are gone from disk")
+    }
+
+    /** The prefix only names one post's items because a pk is all digits. A pk that is not (or none at all) removes nothing. */
+    @Test
+    fun removeCarouselItemsOfAPkThatIsNotAllDigitsRemovesNothing() {
+        for (key in listOf("a_0", "a_b_0", "_0", "1_0")) videoCache.cacheWholeFile(key, clip("$key.mp4", 1_000))
+
+        // Without the guard each of these would match a key: "a_" → a_0, "a_b_" → a_b_0, "_" → _0.
+        for (pk in listOf("a", "a_b", "")) videoCache.removeCarouselItems(pk)
+
+        assertEquals(setOf("a_0", "a_b_0", "_0", "1_0"), videoCache.cache.keys)
+    }
+
     @Test
     fun clearDropsEveryVideo() {
         videoCache.cacheWholeFile("1", clip("a.mp4", 5_000))

@@ -21,6 +21,24 @@ import java.io.File
 /** Removed items' cached videos go too (engine reconcile, Delete library). */
 fun interface MediaEviction {
     fun evict(pks: List<String>)
+
+    companion object {
+        /**
+         * Runs every one of [steps] for every pk, each on its own: a step that fails (a disk error, a key it refuses) skips no
+         * other step of that pk and nothing of a later pk. What a failed step leaves only takes space, so it is not reported.
+         */
+        fun eachStep(vararg steps: (pk: String) -> Unit) = MediaEviction { pks ->
+            for (pk in pks) {
+                for (step in steps) {
+                    try {
+                        step(pk)
+                    } catch (e: Exception) {
+                        // Intentionally ignored: housekeeping after the reconcile; a stale cached file only takes space.
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -28,7 +46,7 @@ fun interface MediaEviction {
  * by the link: a link changes each time it is refreshed, the video does not. Bounded to [maxBytes], least recently used first.
  *
  * One instance per directory per process (`SimpleCache` refuses a second): the app holds exactly one, in `AppContainer`.
- * Disk work: call [remove] and [clear] off the main thread.
+ * Disk work: call [remove], [removeCarouselItems] and [clear] off the main thread.
  */
 @UnstableApi
 class VideoCache(dir: File, databaseProvider: DatabaseProvider, maxBytes: Long = MAX_BYTES) {
@@ -46,6 +64,18 @@ class VideoCache(dir: File, databaseProvider: DatabaseProvider, maxBytes: Long =
 
     fun remove(pk: String) {
         cache.removeResource(pk)
+    }
+
+    /**
+     * R6: removes the videos of [pk]'s carousel items, cached under `{pk}_{position}` (`CarouselRepository`), and nothing else:
+     * not [pk]'s own video ([remove] does that). The prefix `{pk}_` names this post's items only because a pk is all digits
+     * (`12_` cannot start post 122's keys), so a pk that is not all digits removes nothing.
+     */
+    fun removeCarouselItems(pk: String) {
+        if (pk.isEmpty() || !pk.all { it in '0'..'9' }) return
+        val prefix = "${pk}_"
+        // A copy: removing a resource changes the key set while it is walked.
+        for (key in cache.keys.toList()) if (key.startsWith(prefix)) cache.removeResource(key)
     }
 
     fun clear() {

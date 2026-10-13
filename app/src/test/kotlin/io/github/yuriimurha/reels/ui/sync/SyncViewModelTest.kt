@@ -29,6 +29,7 @@ import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.endViewModels
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -81,14 +82,26 @@ class SyncViewModelTest {
     private val probe = FakeProbe()
     private lateinit var session: SessionRepository
 
-    @Before
-    fun setMain() = Dispatchers.setMain(StandardTestDispatcher())
+    private val main = StandardTestDispatcher()
 
+    /** Every ViewModel a test built: their scopes outlive the test unless the teardown ends them. */
+    private val viewModels = mutableListOf<SyncViewModel>()
+
+    @Before
+    fun setMain() = Dispatchers.setMain(main)
+
+    /**
+     * The flake ("Dispatchers.Main is used concurrently with setting it", 3 runs in 50): nothing ended the ViewModels, so their
+     * flows (Room's, the settings file's, the 1 s ticker) went on resuming on Main from other threads while `resetMain`, or the
+     * next test's `setMain`, swapped it. Each is now ended and waited for first, then the database and the settings file go,
+     * and only then is Main reset.
+     */
     @After
     fun tearDown() {
-        Dispatchers.resetMain()
+        endViewModels(viewModels, main)
         db.close()
         storeScope.cancel()
+        Dispatchers.resetMain()
     }
 
     /** When set, the scheduler's [SyncScheduler.cancel] throws it, as a WorkManager failure would. */
@@ -135,7 +148,7 @@ class SyncViewModelTest {
             collectionNamesStale = if (realCollections) settings.collectionNamesStale else flowOf(false),
             now = clock,
             io = StandardTestDispatcher(testScheduler),
-        )
+        ).also { viewModels += it }
     }
 
     /** The settings of the ViewModel built last. */

@@ -1,6 +1,7 @@
 package io.github.yuriimurha.reels.instagram.fake
 
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 import io.github.yuriimurha.reels.instagram.RemoteCollection
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import java.time.Instant
@@ -9,6 +10,8 @@ import kotlin.random.Random
 /**
  * A deterministic, mutable stand-in for one account's saved items. Index 0 is the newest save.
  * Thumbnails use `fake://thumb/{pk}`; `fake://missing/{pk}` simulates an item Instagram no longer serves.
+ * A carousel's children use `fake://thumb/{pk}-{position}` for their image (a video child's poster too) and
+ * `fake://video/{pk}-{position}` for a video child's video.
  */
 class FakeLibrary(seed: Long = 42, itemCount: Int = 2_000, collectionCount: Int = 8) {
     private class Entry(val media: RemoteMedia, val collectionIds: MutableSet<String>)
@@ -99,7 +102,24 @@ class FakeLibrary(seed: Long = 42, itemCount: Int = 2_000, collectionCount: Int 
             videoUrlExpiresAt = null,
             savedCollectionIds = null,
         )
-        return Entry(media, collectionIds)
+        return Entry(media.copy(carouselItems = media.carouselCount?.let { carouselItems(pk, it) }), collectionIds)
+    }
+
+    /**
+     * A carousel's children: every third one (positions 2, 5, ...) a video, the rest images. Derived from [pk] alone, so it draws
+     * nothing from [random] and the rest of the library stays what it was.
+     */
+    private fun carouselItems(pk: String, count: Int): List<RemoteCarouselItem> = List(count) { position ->
+        val video = position % 3 == 2
+        RemoteCarouselItem(
+            position = position,
+            type = if (video) MediaType.VIDEO else MediaType.IMAGE,
+            width = 1080,
+            height = if (video) 1920 else 1350,
+            imageUrl = "fake://thumb/$pk-$position",
+            videoUrl = if (video) "fake://video/$pk-$position" else null,
+            videoUrlExpiresAt = null,
+        )
     }
 
     private companion object {

@@ -3,10 +3,20 @@ package io.github.yuriimurha.reels.di
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.data.media.CarouselRepository
+import io.github.yuriimurha.reels.data.media.ItemImage
+import io.github.yuriimurha.reels.data.media.ItemsResult
+import io.github.yuriimurha.reels.data.media.VideoSource
+import io.github.yuriimurha.reels.data.media.sampleClipUri
 import io.github.yuriimurha.reels.instagram.InstagramException
+import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
+import java.io.File
+import kotlin.test.assertIs
 import io.github.yuriimurha.reels.session.SessionState
 import io.github.yuriimurha.reels.testutil.MainThreadTimeout
 import android.os.Looper
@@ -84,6 +94,7 @@ class InstagramTransportWiringTest {
         // Everything the screens build in Mock mode.
         container.adapterLab
         container.videoResolver
+        container.carouselRepository
         container.syncEngine()
         assertFalse(container.instagramTransportCreated, "building the Mock mode graph built the transport")
 
@@ -145,6 +156,37 @@ class InstagramTransportWiringTest {
         assertFalse(container.instagramTransportCreated, "a Mock mode run built the transport")
     }
 
+    /**
+     * R3: a Mock mode carousel visit (the lazy fill, an image, a video item) runs on the fake library alone: its request goes to
+     * the fake client on the fake backend's own Pacer, so the real 24 h budget does not move, the transport is never built, the
+     * image is the fake fetcher's placeholder, and the video item plays the bundled clip under its own key.
+     */
+    @Test
+    fun aMockModeCarouselVisitNeverReachesTheTransportOrTheRealBudget() = runBlocking {
+        val container = container(useFake = true)
+        val fake = container.backend.client as FakeInstagramClient
+        val post = fake.library.allSaved().first { it.type == MediaType.CAROUSEL && (it.carouselCount ?: 0) >= 3 }
+        val media = MediaEntity(
+            pk = post.pk, code = post.code, type = post.type, author = post.author, caption = post.caption, takenAt = 0,
+            width = post.width, height = post.height, carouselCount = post.carouselCount, thumbPath = null, thumbUrl = post.thumbnailUrl,
+            videoUrl = null, videoUrlExpiresAt = null, collectionNames = "", firstSeenAt = 0, lastSeenAt = 0, removedAt = null,
+        )
+        container.db.mediaDao().upsert(listOf(media))
+        val realRequestsBefore = container.instagramPacer.status().requestsLast24h
+        val visit = CarouselRepository.Visit()
+
+        val items = assertIs<ItemsResult.Items>(container.carouselRepository.items(media, visit)).items
+        val image = assertIs<ItemImage.File>(container.carouselRepository.image(media, 0, visit))
+        val video = container.carouselRepository.video(media, 2, visit)
+
+        assertEquals(post.carouselCount, items.size)
+        assertEquals(listOf("mediaInfo:${post.pk}"), fake.calls, "the fill went to the fake client, once")
+        assertTrue(File(image.path).length() > 0, "the fake fetcher's placeholder was stored")
+        assertEquals(VideoSource.Play(sampleClipUri(context.packageName), "${post.pk}_2"), video)
+        assertEquals(realRequestsBefore, container.instagramPacer.status().requestsLast24h, "the real budget did not move")
+        assertFalse(container.instagramTransportCreated, "a Mock mode carousel visit built the transport")
+    }
+
     /** Turns the main looper (so work posted to the main thread runs) until [condition] holds or [timeoutMs] passes. */
     private fun idleTheMainLooperUntil(timeoutMs: Long, condition: () -> Boolean): Boolean {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000
@@ -162,6 +204,7 @@ class InstagramTransportWiringTest {
         val container = container(useFake = false)
         assertTrue(container.backend is Backend.Real)
         container.adapterLab
+        container.carouselRepository
         container.syncEngine()
         assertFalse(container.instagramTransportCreated, "building the real graph built the transport")
 

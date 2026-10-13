@@ -9,6 +9,7 @@ import io.github.yuriimurha.reels.data.db.CollectionCard
 import io.github.yuriimurha.reels.data.db.CollectionEntity
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.data.db.ReelsDatabase
+import io.github.yuriimurha.reels.data.media.CarouselImageStore
 import io.github.yuriimurha.reels.data.media.ThumbnailStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -23,7 +24,7 @@ enum class LibraryDeletion {
     /** The settings write that forgets the library's account failed: the next run still checks against the old account. Delete library again. */
     ACCOUNT_RECORD_KEPT,
 
-    /** Some thumbnails or cached videos could not be removed. They only take space. */
+    /** Some thumbnails, carousel images or cached videos could not be removed. They only take space. */
     CACHED_FILES_KEPT,
 
     /** Both of the above. */
@@ -47,6 +48,8 @@ enum class LibraryDeletion {
 class LibraryRepository(
     private val db: ReelsDatabase,
     private val thumbnails: ThumbnailStore,
+    /** The carousel items' downloaded images (R1), removed with the library like the thumbnails; null removes none. */
+    private val carouselImages: CarouselImageStore? = null,
     /** Empties the video cache with the library: cached videos belong to items that no longer exist (spec 8.3). */
     private val clearVideoCache: () -> Unit = {},
     /** R84: forgets the library's account (`LibraryAccount.forget`). */
@@ -106,16 +109,16 @@ class LibraryRepository(
     suspend fun collectionsOf(pk: String): List<CollectionEntity> = collectionDao.collectionsOf(pk)
 
     /**
-     * Wipes synced items, collections, history, thumbnails and cached videos, and forgets which Instagram account the library
-     * belonged to (R84), so the next sync may be another account's. Keeps the session and the request log (spec 9.5). The
-     * account is forgotten only after the rows are gone: the other order could leave a library with no owner to check against.
-     * Then the names notice is cleared (C-M5); a failure there is swallowed, since only the notice would be wrong.
+     * Wipes synced items, collections, history, thumbnails, carousel images and cached videos, and forgets which Instagram
+     * account the library belonged to (R84), so the next sync may be another account's. Keeps the session and the request log
+     * (spec 9.5). The account is forgotten only after the rows are gone: the other order could leave a library with no owner to
+     * check against. Then the names notice is cleared (C-M5); a failure there is swallowed, since only the notice would be wrong.
      *
      * Once the rows are gone nothing after them may fail the delete or stop the rest: forgetting the account is a settings write,
-     * and a thumbnail or a cached video may not be removable. Each is tried, and what was left is reported in the result
-     * ([LibraryDeletion.ACCOUNT_RECORD_KEPT], [LibraryDeletion.CACHED_FILES_KEPT], or both) instead of escaping to the caller's
-     * scope, where it would crash the app. A second Delete library finishes the job. Cancellation still propagates. A failure of
-     * the delete itself (the rows) still throws, for the caller to say so.
+     * and a thumbnail, a carousel image or a cached video may not be removable. Each is tried, and what was left is reported in
+     * the result ([LibraryDeletion.ACCOUNT_RECORD_KEPT], [LibraryDeletion.CACHED_FILES_KEPT], or both) instead of escaping to the
+     * caller's scope, where it would crash the app. A second Delete library finishes the job. Cancellation still propagates. A
+     * failure of the delete itself (the rows) still throws, for the caller to say so.
      */
     suspend fun deleteLibrary(): LibraryDeletion {
         try {
@@ -146,6 +149,13 @@ class LibraryRepository(
         withContext(Dispatchers.IO) {
             try {
                 thumbnails.deleteAll()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                cachedFilesKept = true
+            }
+            try {
+                carouselImages?.deleteAll()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

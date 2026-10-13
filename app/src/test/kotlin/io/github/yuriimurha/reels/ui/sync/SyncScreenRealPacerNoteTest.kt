@@ -18,6 +18,7 @@ import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.closingAfterComposition
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +26,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -39,8 +39,17 @@ import java.io.File
  */
 @RunWith(AndroidJUnit4::class)
 class SyncScreenRealPacerNoteTest {
-    @get:Rule
     val compose = createComposeRule()
+
+    /**
+     * The database and the settings file go only once the compose rule has disposed the screen: closed in an `@After`, they
+     * were closed under the screen's still-running flows (the "pool closed" flake).
+     */
+    @get:Rule
+    val rules = closingAfterComposition(compose) {
+        db.close()
+        storeScope.cancel()
+    }
 
     @get:Rule
     val tmp = TemporaryFolder()
@@ -49,12 +58,6 @@ class SyncScreenRealPacerNoteTest {
     private val storeScope = CoroutineScope(Dispatchers.IO + Job())
     private val settings by lazy {
         SettingsStore(PreferenceDataStoreFactory.create(scope = storeScope) { File(tmp.root, "s.preferences_pb") })
-    }
-
-    @After
-    fun tearDown() {
-        db.close()
-        storeScope.cancel()
     }
 
     private object IdleScheduler : SyncScheduler {

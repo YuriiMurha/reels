@@ -42,6 +42,7 @@ import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.library.TypeFilter
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.MediaGrid
+import io.github.yuriimurha.reels.ui.common.revealTile
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -63,7 +64,7 @@ fun SearchScreen(
     val gridState = rememberLazyStaggeredGridState()
     LaunchedEffect(returnedIndex) {
         if (returnedIndex != null) {
-            gridState.scrollToItem(returnedIndex)
+            gridState.revealTile(returnedIndex)
             onReturnedIndexConsumed()
         }
     }

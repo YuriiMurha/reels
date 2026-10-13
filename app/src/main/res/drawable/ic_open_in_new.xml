@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material Symbols "open_in_new" (outlined, 24 dp), Apache License 2.0: see res/raw/license_material_symbols.txt. Drawn on a 960 grid; Compose tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="960"
+    android:viewportHeight="960">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M200,840q-33,0 -56.5,-23.5T120,760v-560q0,-33 23.5,-56.5T200,120h280v80H200v560h560v-280h80v280q0,33 -23.5,56.5T760,840H200Zm188,-212 -56,-56 372,-372H560v-80h280v280h-80v-144L388,628Z" />
+</vector>
