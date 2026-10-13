@@ -634,11 +634,16 @@ with its scoped re-review's two Minors, one docs Minor and two nits open. This f
   while it was written (a reshape, a sync, the renewal), those are another video's bytes, and M2's check that drops them came
   only after a few more hops: the re-review's probe had a player read 309,248 bytes of the old video in the middle of the new
   one. Now `CarouselRepository.video` hands out the item's source only once a start of it from another link than the one it
-  plays has stopped and been checked (`Visit.startsOut`), however long that takes (the connection's 8 s timeouts at worst; the
-  item shows its poster meanwhile). A start of the very link played is the same video, so the cap still holds for it. The
-  check of a finished write no longer gives way to a cancel landing as it runs (it would have left those bytes unchecked).
-  Pinned through the repository with the real writer, a real cache and a stall the abort cannot cut: the play is held, the old
-  bytes are gone when it is handed out, and the player, built with the app's flags, reads none of them.
+  plays has stopped and been checked, however long that takes (a write cancelled during its handshake can take the connect
+  and then the answer's headers, each with its 8 s timeout: about 16 s; the item shows its poster meanwhile). The repository
+  keeps the write out until then (`startsOut`, by `{pk}_{position}`), not the visit: the branch's review found that a visit
+  the owner leaves does not wait for its write, so coming back to the post while the write was stopping skipped the hold, and
+  its cross-visit probe read 309,248 old bytes again. While a start of a key is out, no other start of it is written. A start
+  of the very link played is the same video, so the cap still holds for it. The check of a finished write no longer gives
+  way to a cancel landing as it runs (it would have left those bytes unchecked). Pinned through the repository with the real
+  writer, a real cache and a stall the abort cannot cut, in the same visit and across visits: the play is held, the old bytes
+  are gone when it is handed out, and the player, built with the app's flags, reads none of them; leaving the post ends a
+  held play at once.
 - **N-M2, a cancel during the handshake.** `OneTryUpstream` wrapped `DefaultDataSource`, whose close forgets the source it
   opened, and an open the abort came during closed its connection only if the abort had not tried already. A cancel that
   landed during the TCP or TLS handshake therefore closed nothing, and the connection stayed open with its body. Now
@@ -660,17 +665,21 @@ with its scoped re-review's two Minors, one docs Minor and two nits open. This f
 - **N3.** `aStartThatIsSlowToStopHoldsThePlayerUpForAMomentOnly` now checks the cap (the player waits at least about 300 ms
   and under 1 s, where it allowed anything below 1.5 s and so a 1 s cap) and the order its message states (the next start
   begins only once the cancelled write has stopped), from the fake's ordered log.
-- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1248 app tests in 94 classes and 382 `:instagram` tests, 0
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1251 app tests in 94 classes and 382 `:instagram` tests, 0
   failures, lint with no errors and the same 16 warnings. New: one `VideoStartsTest` (N-M2, a SOCKS5 proxy on loopback that holds
-  its handshake), three `CarouselRepositoryTest` (N-M1's hold, its other side for the same link, and the check a cancel cannot
-  skip) and one `ViewerViewModelTest` (N-M1 through the viewer); the slow-stop test tightened (N3). Mutation-checked in a
-  scratch export: 23 mutants of the fix and of the fix round's code it touches, 21 killed; 2 survive as equivalent (a start
-  left in `Visit.startsOut` after it is done is never waited on, its job being complete; X45, an upstream registered after
-  the abort, as before). Two more runs took the slow-stop test's other checks out to show its new order check fails on its
-  own. The re-review's probes on the fix: the SOCKS hold now hangs up as the answer comes (1 request, sent after the cancel,
-  cancel and join 1,854 ms for a 2 s handshake); the rest read as before.
+  its handshake), six `CarouselRepositoryTest` (N-M1's hold in one visit and across visits, the review's cross-visit probe
+  among them, its other side for the same link, no second write of a key while one is out and a write again once it has gone,
+  a held play ending with the visit while a reel or an image item is never held, and the check a cancel cannot skip) and one
+  `ViewerViewModelTest` (N-M1 through the viewer); the slow-stop test tightened (N3). Mutation-checked in scratch exports: 23
+  mutants of the first round, 21 killed, 2 surviving as equivalent (X45, an upstream registered after the abort, as before;
+  and a start left in the map after it is done, which the cross-visit round made killable), then 12 of the cross-visit round,
+  all killed (among them the first round's per-visit hold, whose new visit's player read 309,248 old bytes). Two more runs took
+  the slow-stop test's other checks out to show its new order check fails on its own. The re-review's probes on the fix: the
+  SOCKS hold now hangs up as the answer comes (1 request, sent after the cancel, cancel and join 1,854 ms for a 2 s handshake);
+  the rest read as before.
 - **Pacing.** Nothing raised: no new request, rate, budget or concurrency. Still one write in flight on the CDN lane, still at
   most one `mediaInfo` a visit and none from a start. N-M1 only delays handing out an item's source until a write already out
-  has stopped; N-M2 only closes a connection sooner.
+  has stopped, and a new visit's start of a key whose write is still out is skipped, which only removes a request; N-M2 only
+  closes a connection sooner.
 - **Safety.** Nothing contacted Instagram or touched the owner's phone: fakes, MockWebServer, a SOCKS proxy on loopback and
   local data only.

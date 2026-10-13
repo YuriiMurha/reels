@@ -149,18 +149,20 @@ class CarouselRepository(
          * nothing). A 403 or 410 goes into [refused] instead.
          */
         internal val startsRefused: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
-        /**
-         * N-M1: the start being written ahead now, by item position, until it has stopped and been checked (P2, D3, M2): the
-         * item's own play waits for one of another link ([video]).
-         */
-        internal val startsOut = ConcurrentHashMap<Int, StartOut>()
     }
 
     /** N-M1: a start written ahead from [url]; [checked] completes once the write has stopped and its bytes were checked. */
-    internal class StartOut(val url: String) {
+    private class StartOut(val url: String) {
         val checked: CompletableJob = Job()
     }
+
+    /**
+     * N-M1: the start being written ahead now, by its cache key `{pk}_{position}`, until it has stopped and been checked (P2,
+     * D3, M2). The repository's, not a visit's: a visit that ends (the owner left the post) does not wait for its write to
+     * stop, so the post's next visit may meet it. The item's own play waits for one of another link ([video]), and while one
+     * is out no other start of that key is written ([preloadVideo]).
+     */
+    private val startsOut = ConcurrentHashMap<String, StartOut>()
 
     /** Stored items; when none, one paced `mediaInfo` fills them (once a [visit]). Not a carousel: [ItemsResult.CoverOnly] (null). */
     suspend fun items(media: MediaEntity, visit: Visit): ItemsResult = try {
@@ -220,7 +222,9 @@ class CarouselRepository(
      * R19). The CDN's 429, offline, a failing cache (I1) and a post gone stop the queue (P1). Bytes written for a link that
      * was replaced meanwhile, or for a post that left the library, are dropped again (P2, D3), also when the write is
      * cancelled (M2), and while that check is out the item's play waits for it if the item has another link by then (N-M1).
-     * Throws only [CancellationException]; cancelled, it returns once the write has stopped and been checked.
+     * A start of the item still out from an earlier visit (the owner left the post and came back while it was stopping) is
+     * left alone: this one is [StartAhead.Skipped], with no request. Throws only [CancellationException]; cancelled, it
+     * returns once the write has stopped and been checked.
      */
     suspend fun preloadVideo(media: MediaEntity, position: Int, visit: Visit): StartAhead = try {
         loadStart(media, position, visit)
@@ -248,13 +252,14 @@ class CarouselRepository(
      * all there, else a renewed link only.
      *
      * N-M1: while a start of this item written ahead from ANOTHER link (the item's link was replaced meanwhile: a reshape, a
-     * sync, the renewal) has not stopped and been checked, the source is not handed out. That write may yet commit the other
-     * link's bytes under the item's key, and a player reading the key past the write's lock would meet them at its next look
-     * at the cache, in the middle of its own video; the check (M2) drops them first. A start of the very link played is the
-     * same video, so the player may read past it at once.
+     * sync, the renewal) has not stopped and been checked, in this visit or an earlier one, the source is not handed out.
+     * That write may yet commit the other link's bytes under the item's key, and a player reading the key past the write's
+     * lock would meet them at its next look at the cache, in the middle of its own video; the check (M2) drops them first. A
+     * start of the very link played is the same video, so the player may read past it at once. The wait ends with the
+     * caller's cancellation (the post was left).
      */
     suspend fun video(media: MediaEntity, position: Int, visit: Visit, forceRefresh: Boolean = false): VideoSource = try {
-        loadVideo(media, position, visit, forceRefresh).also { visit.startOtherThan(position, it)?.checked?.join() }
+        loadVideo(media, position, visit, forceRefresh).also { startOtherThan(it)?.checked?.join() }
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
@@ -365,13 +370,13 @@ class CarouselRepository(
         // D3: a post deleted or unsaved gets no request.
         if (!isLive(pk)) return StartAhead.Stop
         // N-M1: out until it has stopped and been checked, finished or cancelled; the item's play waits for it meanwhile if
-        // the item has another link by then.
+        // the item has another link by then. One out already is an earlier visit's, still stopping: it stays the one out.
         val out = StartOut(url)
-        visit.startsOut[position] = out
+        if (startsOut.putIfAbsent(key, out) != null) return StartAhead.Skipped
         try {
             return writeStart(pk, position, url, key, visit)
         } finally {
-            visit.startsOut.remove(position, out)
+            startsOut.remove(key, out)
             out.checked.complete()
         }
     }
@@ -425,10 +430,10 @@ class CarouselRepository(
     private suspend fun startStillStored(pk: String, position: Int, url: String): Boolean =
         isLive(pk) && storedItem(pk, position)?.takeIf { it.type == MediaType.VIDEO }?.videoUrl == url
 
-    /** N-M1: the start of item [position] out now ([Visit.startsOut]) from another link than [source] plays; null when none. */
-    private fun Visit.startOtherThan(position: Int, source: VideoSource): StartOut? {
+    /** N-M1: the start out now ([startsOut]) under the key [source] plays, from another link than it plays; null when none. */
+    private fun startOtherThan(source: VideoSource): StartOut? {
         val play = source as? VideoSource.Play ?: return null
-        return startsOut[position]?.takeIf { it.url != play.uri.toString() }
+        return startsOut[play.cacheKey]?.takeIf { it.url != play.uri.toString() }
     }
 
     /**

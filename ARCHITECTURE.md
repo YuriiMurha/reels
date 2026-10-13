@@ -1285,12 +1285,17 @@ are shown in the viewer on demand.
       before the cancellation goes on (M2), and a cancel that lands as a finished write is being checked does not skip the
       check (N-M1). A renewal that keeps the shape but renews the link loses a start it could have kept; it only costs that
       download again.
-    - **The item's play waits for a start of another link (N-M1).** The start out is kept in `Visit.startsOut` (its
-      position, its link, and a job done once the write has stopped and been checked). `video` hands out a `Play` of the item
-      only once a start of it from another link than the one it plays is done: that write may commit the other link's bytes
-      under the item's key when it stops, which can be after the viewer's 300 ms wait ([Viewer](#viewer)), and a player
-      already reading the key past the write's lock would meet them at its next look at the cache, in the middle of its own
-      video. The check drops them first. A start of the very link played is the same video, so its play is not held.
+    - **The item's play waits for a start of another link (N-M1).** The start out is kept by the repository, not the visit
+      (`startsOut`, by its key `{pk}_{position}`: its link, and a job done once the write has stopped and been checked), and
+      its entry goes only then, whether the write finished or was cancelled: a visit that ends (the owner left the post) does
+      not wait for its write to stop, so the post's next visit can meet it. `video` hands out a `Play` of the item only once a
+      start of it from another link than the one it plays is done, in this visit or an earlier one: that write may commit the
+      other link's bytes under the item's key when it stops, which can be after the viewer's 300 ms wait ([Viewer](#viewer))
+      or after the owner came back to the post, and a player already reading the key past the write's lock would meet them at
+      its next look at the cache, in the middle of its own video. The check drops them first. A start of the very link played
+      is the same video, so its play is not held, and neither is anything that is not a `Play` (a reel, an image item). The
+      wait ends with the caller (leaving the post ends it at once). While a start of a key is out, `preloadVideo` writes no
+      other start of it (`Skipped`, no request): two writes of one key would contend for its lock.
   - **One download of an item at a time (R23).** `Visit` keeps a lock per item position (`downloadOf`), apart from its request:
     `image` and `prefetchImage` both hold it, so an item asked for while its picture is being fetched ahead waits for that
     download and then serves its file, or, if it stored none, loads as before. Another item's call never waits for it.
@@ -1464,8 +1469,9 @@ renewal and the cache are in [Video](#video).
     what it wrote when it stops, after the player has started. That is the same video's start when the item still has the
     write's link. When it does not (the post was reshaped, or a sync or the renewal replaced the link while the start was
     written), the bytes are another video's, so the repository's `video` holds the item's source until the write has stopped
-    and its bytes were dropped (N-M1), however long that takes (the connection's 8 s timeouts at worst); the player meets
-    neither a lock nor those bytes.
+    and its bytes were dropped (N-M1), however long that takes (a write cancelled during its handshake can take the connect
+    and then the answer's headers, each with its 8 s timeout: about 16 s); the player meets neither a lock nor those bytes,
+    also when the owner left the post and came back while the write was stopping.
 
   The same post settling again in place (the list moved under it) keeps its visit and takes the newer row: a sync may have
   stored its cover since. `CarouselUiState(items, settled, coverOnlyMessage, loading)` is what the pager shows.
@@ -1650,7 +1656,10 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   or cancelled (M2), also when the cancel lands as a finished write is being checked (N-M1), the item's play held while a
   start of another link still being written by the real writer is stalled, and handed out once its bytes are dropped, the
   player as the app builds it then reading none of them, and not held for a start of the very link it plays (N-M1, the
-  re-review's probe), a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
+  re-review's probe); across visits too: a new visit's play held by an earlier visit's write still stopping, its player
+  reading none of the old bytes even when they commit while the repository cannot drop them yet (the review's cross-visit
+  probe), no second write of a key while one is out and a write again once it has gone, and a held play ending with the
+  visit at once while a reel or an image item is never held, a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
   poster and a start written by the real writer, R16 still saying offline with only a start cached, every R26 log line
   labelled and naming no link, host or pk, and every path of a visit together sending one `mediaInfo`),
   `CarouselImageStoreTest`, `VideoCacheTest` (`removeCarouselItems`), `MediaEvictionTest` (`eachStep`), `VideoStartsTest`

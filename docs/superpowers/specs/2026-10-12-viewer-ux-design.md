@@ -245,9 +245,11 @@ The fix round's re-review (2026-10-14) passed it and left two Minors, fixed afte
   stops, after the player has started. When the item's link was replaced while it was written (a reshape, a sync, the
   renewal), those are another video's bytes, and M2's check that drops them came later still: a player reading past the
   write's lock could meet them at its next look at the cache, in the middle of its own video. Now the item's source is
-  handed out only once such a write has stopped and been checked, however long that takes (the connection's 8 s timeouts
-  at worst); a write of the very link the item plays is the same video, so the cap still holds for it. The check of a
-  finished write no longer gives way to a cancel either.
+  handed out only once such a write has stopped and been checked, however long that takes (a write cancelled during its
+  handshake can take the connect and then the answer's headers, each with its 8 s timeout: about 16 s); a write of the very
+  link the item plays is the same video, so the cap still holds for it. The repository keeps the write out until then, not
+  the visit, so this holds when the owner leaves the post and comes back while the write is stopping too, and no other start
+  of that item is written meanwhile. The check of a finished write no longer gives way to a cancel either.
 - **N-M2, a cancel during the handshake.** A write cancelled while its connection was still being made (a TCP or TLS
   handshake) closed nothing, and its connection stayed open after the request. The abort now wraps the HTTP data source
   itself, and an open the abort came during closes its connection once it returns. The platform's blocking connect cannot

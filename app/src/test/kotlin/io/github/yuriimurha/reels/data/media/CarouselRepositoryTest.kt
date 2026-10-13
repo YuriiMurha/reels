@@ -34,6 +34,7 @@ import io.github.yuriimurha.reels.testutil.cacheWholeFile
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -56,7 +57,9 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 import kotlin.random.Random
+import kotlin.system.measureTimeMillis
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -1593,6 +1596,116 @@ class CarouselRepositoryTest {
     }
 
     /**
+     * N-M1 across visits, the review's cross-visit probe: item 2's start is stalled on its old link and the post is reshaped;
+     * the owner leaves the post (its visit ends without waiting for the write) and comes back while the write is still
+     * stopping. The new visit's play is not handed out until that write has stopped and its old bytes were dropped. The
+     * player, as the app builds it, reads from the moment it is handed the item, and reads none of the old video's bytes,
+     * also in the worst case: the old write commits them while the repository cannot drop them yet (this thread holds the
+     * test's dispatcher, as a busy main thread would).
+     */
+    @Test
+    fun aStartOfAReplacedLinkStillStoppingFromAnEarlierVisitHoldsTheNextVisitsPlay() = runTest {
+        storeOldItems()
+        val stall = Stall()
+        val repository = repository(starts = stallingWriter(videoOf(OLD_BYTE), stall))
+        val writing = async { repository.preloadVideo(media, 2, CarouselRepository.Visit()) }
+        try {
+            stall.awaitReached()
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { NEW_LINK }) })
+            videoCache.removeCarouselItems(pk) // R20's drop, as a reshape runs it
+            writing.cancel() // the owner leaves the post: its visit ends, and does not wait for the write
+
+            val play = async { repository.video(media, 2, CarouselRepository.Visit()) } // and comes back: a new visit
+            val player = PlayerOnceHandedOut(play, videoOf(NEW_BYTE))
+            withContext(Dispatchers.Default) { delay(600) }
+            val handedOutWhileStalled = play.isCompleted
+            stall.release() // the stalled read returns: the old write stops, and commits what it wrote
+            blockUntilCached("${pk}_2")
+            player.goOn()
+            player.awaitDone()
+
+            assertEquals(0, player.oldBytes(), "the player read the old video's bytes")
+            assertEquals(900 * 1024, player.read)
+            assertFalse(handedOutWhileStalled, "the item was handed out while the earlier visit's write could still commit")
+            assertTrue(writing.isCancelled)
+        } finally {
+            stall.release()
+        }
+    }
+
+    /**
+     * N-M1: while an earlier visit's write of a key is still stopping, a new visit writes no start of that key (it is passed,
+     * with no request: two writes of one key would contend for its lock), and the item's play still waits for the old one.
+     * Once that write has stopped and been checked its entry goes, so a later visit writes the start again.
+     */
+    @Test
+    fun aStartStillStoppingFromAnEarlierVisitIsLeftAloneAndThenForgotten() = runTest {
+        storeOldItems()
+        val stall = Stall()
+        val writes = AtomicInteger()
+        val repository = repository(starts = stallingWriter(videoOf(OLD_BYTE), stall, writes))
+        val writing = async { repository.preloadVideo(media, 2, CarouselRepository.Visit()) }
+        try {
+            stall.awaitReached()
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { NEW_LINK }) })
+            writing.cancel()
+
+            val second = CarouselRepository.Visit()
+            val again = async { repository.preloadVideo(media, 2, second) }
+            assertEquals(StartAhead.Skipped, withContext(Dispatchers.Default) { withTimeout(5_000) { again.await() } })
+            assertEquals(1, writes.get(), "no second write of the key while the first is out")
+            val play = async { repository.video(media, 2, second) }
+            withContext(Dispatchers.Default) { delay(300) }
+            assertFalse(play.isCompleted, "the item's play still waits for the earlier visit's write")
+
+            stall.release()
+            val source = withContext(Dispatchers.Default) { withTimeout(10_000) { play.await() } }
+            assertEquals(VideoSource.Play(Uri.parse(NEW_LINK), "${pk}_2"), source)
+            withContext(Dispatchers.Default) { withTimeout(10_000) { writing.join() } }
+            val later = async { repository.preloadVideo(media, 2, CarouselRepository.Visit()) }
+            val outcome = withContext(Dispatchers.Default) { withTimeout(10_000) { later.await() } }
+            assertEquals(StartAhead.Cached, outcome, "a later visit writes it")
+            assertEquals(2, writes.get())
+        } finally {
+            stall.release()
+        }
+    }
+
+    /**
+     * N-M1 holds nothing it need not: leaving the post ends a held play at once (it does not wait for the write), and a post
+     * that is not a carousel, or an item that is not a video, answers at once while a write of another link is stalled.
+     */
+    @Test
+    fun aHeldPlayEndsWithTheVisitAndNothingElseIsHeld() = runTest {
+        storeOldItems()
+        val stall = Stall()
+        val repository = repository(starts = stallingWriter(videoOf(OLD_BYTE), stall))
+        val writing = async { repository.preloadVideo(media, 2, CarouselRepository.Visit()) }
+        try {
+            stall.awaitReached()
+            db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { NEW_LINK }) })
+            writing.cancel()
+            val visit = CarouselRepository.Visit()
+            val play = async { repository.video(media, 2, visit) }
+            withContext(Dispatchers.Default) { delay(300) }
+            assertFalse(play.isCompleted, "precondition: the play is held")
+
+            val reel = async { repository.video(mediaEntity(pk, MediaType.REEL), 2, visit) }
+            val image = async { repository.video(media, 1, visit) }
+            assertEquals(VideoSource.Unavailable(CANT_LOAD), withContext(Dispatchers.Default) { withTimeout(2_000) { reel.await() } })
+            assertEquals(VideoSource.Unavailable(CANT_LOAD), withContext(Dispatchers.Default) { withTimeout(2_000) { image.await() } })
+            val ended = measureTimeMillis {
+                play.cancel() // the post is left: the visit's scope ends
+                withContext(Dispatchers.Default) { withTimeout(2_000) { play.join() } }
+            }
+            assertTrue(play.isCancelled && ended < 1_000, "the held play ended with the visit, in $ended ms")
+            assertFalse(writing.isCompleted, "and did not wait for the write, still stalled")
+        } finally {
+            stall.release()
+        }
+    }
+
+    /**
      * N-M1's other side: a start of the very link the item plays is the same video, so its play is handed out at once while
      * the write is still stopping (the viewer's 300 ms cap holds), and what that write had written stays.
      */
@@ -1834,13 +1947,16 @@ class CarouselRepositoryTest {
 
     /**
      * N-M1: the real writer (`CacheWriter`) into this test's video cache, over a local upstream serving [bytes] whose read
-     * stops at 600 KB on [stall]: a stall nothing cuts, as a body read stalled inside the platform's stream (M5).
+     * stops at 600 KB on [stall]: a stall nothing cuts, as a body read stalled inside the platform's stream (M5). [writes]
+     * counts the writes it starts.
      */
-    private fun stallingWriter(bytes: ByteArray, stall: Stall) = CacheVideoStarts({ videoCache.cache }, { _ ->
-        CacheDataSource.Factory().setCache(videoCache.cache).setFlags(0)
-            .setUpstreamDataSourceFactory { StallingSource(bytes, 600 * 1024, stall) }
-            .createDataSource()
-    })
+    private fun stallingWriter(bytes: ByteArray, stall: Stall, writes: AtomicInteger = AtomicInteger()) =
+        CacheVideoStarts({ videoCache.cache }, { _ ->
+            writes.incrementAndGet()
+            CacheDataSource.Factory().setCache(videoCache.cache).setFlags(0)
+                .setUpstreamDataSourceFactory { StallingSource(bytes, 600 * 1024, stall) }
+                .createDataSource()
+        })
 
     /**
      * 900 KB of [source] read as the viewer's player reads it (its flags: past a locked span, from the network), from a CDN
@@ -1862,6 +1978,77 @@ class CarouselRepositoryTest {
             player.close()
         }
         return got.copyOf(read)
+    }
+
+    /**
+     * N-M1: the viewer's player, on a thread of its own, from the moment [play] hands it the item: it reads 250 KB (past a
+     * write's lock, from the network, if the key is locked), waits for [goOn], then reads on to 900 KB, as the app builds it.
+     */
+    private inner class PlayerOnceHandedOut(play: Deferred<VideoSource>, network: ByteArray) {
+        private val goOn = CountDownLatch(1)
+        private val got = ByteArray(900 * 1024)
+
+        @Volatile
+        var read = 0
+            private set
+
+        @Volatile
+        private var failure: Throwable? = null
+
+        private val reading = thread(isDaemon = true, name = "n-m1-player") {
+            try {
+                val deadline = System.currentTimeMillis() + 20_000
+                while (!play.isCompleted) {
+                    check(System.currentTimeMillis() < deadline) { "the item was never handed out" }
+                    Thread.sleep(2)
+                }
+                val source = play.getCompleted() as VideoSource.Play
+                val player = CacheDataSource.Factory().setCache(videoCache.cache)
+                    .setUpstreamDataSourceFactory { ByteArrayDataSource(network) }
+                    .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR).createDataSource()
+                player.open(DataSpec.Builder().setUri(source.uri).setKey(source.cacheKey).build())
+                try {
+                    readUpTo(player, 250 * 1024)
+                    check(goOn.await(20, TimeUnit.SECONDS))
+                    readUpTo(player, got.size)
+                } finally {
+                    player.close()
+                }
+            } catch (e: Throwable) {
+                failure = e
+            }
+        }
+
+        private fun readUpTo(player: DataSource, limit: Int) {
+            while (read < limit) {
+                val n = player.read(got, read, minOf(8 * 1024, limit - read))
+                if (n == C.RESULT_END_OF_INPUT) break
+                read += n
+            }
+        }
+
+        fun goOn() = goOn.countDown()
+
+        /**
+         * Blocks this thread a moment first, so a player handed the item already reads on while nothing else runs, then
+         * suspends until it is done.
+         */
+        suspend fun awaitDone() {
+            reading.join(1_000)
+            withContext(Dispatchers.IO) { reading.join(20_000) }
+            failure?.let { throw it }
+        }
+
+        fun oldBytes() = got.copyOf(read).count { it == OLD_BYTE }
+    }
+
+    /** Waits on this thread, blocking (so the test's dispatcher runs nothing meanwhile), until [key] has bytes cached. */
+    private fun blockUntilCached(key: String) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (videoCache.cache.getCachedBytes(key, 0, Long.MAX_VALUE) == 0L) {
+            check(System.currentTimeMillis() < deadline) { "nothing was committed under $key" }
+            Thread.sleep(2)
+        }
     }
 
     /** Where a [StallingSource]'s read stops: [awaitReached] once it is there, until [release]. */
