@@ -21,6 +21,7 @@ First time through, do sections 1 to 5 in order. Sections 6 to 10 are reference 
 | M0 Skeleton, M1 Mock app | Done. Home, grid, viewer, search and sync work on a built-in fake library of 2,000 items in 8 collections. |
 | M2 Session | Code done. Logging in through Instagram's own page (or pasting a `sessionid`) needs your on-phone check ([section 8](#8-on-phone-checklist)). |
 | Collection names | Code done and tested against fakes and local test servers only. The collections and their names come from the website's own query, and the app learns the query's new id from the site when Instagram changes it. It has never met Instagram: do the box [After the collection names update](#after-the-collection-names-update) on your phone. |
+| Viewer update | Code done and tested on fakes and on the emulator in Mock mode: a carousel post swipes through its images and videos, mute and Open on Instagram are icon buttons, the app has its own icon, and a post grows from and shrinks back into its tile. It has never met a real carousel: do [The viewer update](#the-viewer-update-carousels-icon-buttons-the-app-icon-motion) on your phone. |
 | M3 Adapter lab | Code done. A debug-only lab sends one request per endpoint and saves scrubbed copies of the answers. The parsers follow the open-source clients' known response shapes and have never met Instagram, so running the lab and handing the answers back is yours ([section 7](#7-adapter-lab-and-the-spike-handback)). |
 | M4 Real sync | Code done and tested against fakes and a local test server only. Sync, Full sync, resume, budgets, cooldowns, the challenge stop and thumbnails need your first real sync ([section 5](#5-first-real-sync)). |
 | M5 Video | Code done: reels play on demand and are cached. Needs your on-phone check ([section 6](#6-watching-videos)). |
@@ -110,7 +111,12 @@ Then open **Reels** on the phone. A fresh debug install is in Mock mode.
 
 - **Saved** (home) lists All Saved, Uncategorized and your collections, each with its item count. Tap a card for its
   grid. When the library is empty it says "Nothing synced yet": tap **Open Sync**.
-- **Grid**: tap a tile for the full-screen viewer; swipe up and down; **Back** returns to the same tile.
+- **Grid**: tap a tile and its picture grows into the full-screen viewer; swipe up and down for the next post. A carousel
+  (its tile reads "1/N") also swipes left and right through its images and videos, with a counter ("2/5") and dots.
+  **Back** (the button, or the back swipe from the screen edge) shrinks the post into its tile, and the grid shows the tile of
+  the post you were on.
+- **Viewer buttons**: two icon buttons over the picture, **Open on Instagram** at the bottom left and **Mute** / **Unmute**
+  (a speaker) at the bottom right. A long press on either shows its name.
 - **Search** (magnifier, top right) searches captions, authors and collection names, and can narrow to reels or
   posts.
 - **Sync** (the status chip, top right: "Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and a problem):
@@ -148,7 +154,7 @@ and never contacts Instagram. A release build has no such switch and always uses
 An on-device UI suite (`app/src/androidTest/`) drives the real app through its screens, like a browser test for the phone
 app. It covers: launch (Home's "Saved" bar, Search, the sync chip), the Sync screen (the session shown logged out, the
 Developer section with Mock mode on), a fake **Sync** to the end, a collection grid, opening the viewer, a reel that
-starts playing, and Search. It never contacts Instagram: it never logs in and never taps Log in, Check now, Open on
+starts playing, a carousel swiped to its second item, back from a post far down the list to that post's tile, and Search. It never contacts Instagram: it never logs in and never taps Log in, Check now, Open on
 Instagram, the Adapter lab or the Mock mode switch (it only checks that they are there).
 
 - **It skips on a real phone.** Every test begins by checking that the device is an emulator, before anything is
@@ -191,11 +197,12 @@ On the Sync screen, under **Instagram session**:
 The app keeps the session only in Android's WebView cookie store: it writes no file of its own with it and never logs
 it. Android's WebView keeps that cookie store on the phone (app-private, and excluded from backup).
 
-Instagram's API requests (the session check, the lab, sync, a video's link renewal) are sent by a hidden Instagram page
-inside the app, with the same browser engine and cookie store as the login screen, not by the app's own network code. The
-first request after the app starts, and the first after 5 minutes without one, loads instagram.com once in that page; the
-site's own requests come with that load, as they do on any visit to Instagram, and they are not counted in "Requests in 24 h".
-Thumbnails and videos are not sent that way.
+Instagram's API requests (the session check, the lab, sync, a video's link renewal, a carousel's fill or link renewal) are
+sent by a hidden Instagram page inside the app, with the same browser engine and cookie store as the login screen, not by
+the app's own network code. The first request after the app starts, and the first after 5 minutes without one, loads
+instagram.com once in that page; the site's own requests come with that load, as they do on any visit to Instagram, and
+they are not counted in "Requests in 24 h".
+Thumbnails, carousel images and videos are not sent that way.
 
 ## 5. First real sync
 
@@ -392,8 +399,8 @@ If any step answers 429 (Sync says "Instagram is limiting requests", or the log 
 - **Gaps:** a random 4–12 s between two requests (typically about 6 s). **Breaks:** 60–180 s after every 15–30
   requests.
 - **Budgets:** **300 requests per run** and **600 per rolling 24 hours**. The 24-hour count is a log kept on the
-  phone; every request counts, including session checks, lab taps and the viewer's link renewals (not thumbnail
-  downloads: they come from Instagram's image servers, 2 at a time with a short random pause).
+  phone; every request counts, including session checks, lab taps, the viewer's link renewals and carousel fills (not
+  thumbnail or carousel-image downloads: they come from Instagram's image servers, 2 at a time with a short random pause).
 - **Cooldowns:** if Instagram answers with a rate limit, the run stops and the app makes **no Instagram API request** for
   **1 hour**. A second rate limit within 24 hours means **24 hours**. The cooldown survives killing the app: don't
   clear the app's data or reinstall to get around it.
@@ -442,9 +449,9 @@ The other stops (paused, not stopped) are listed in [Troubleshooting](#10-troubl
 ### Delete library: the escape hatch
 
 **Sync → Storage → Delete library**, then **Delete** in the dialog. It removes every synced item, collection, history
-row, thumbnail and cached video from the phone, and forgets which Instagram account the library belonged to. It keeps
-your login **and the request log**, so the 600-per-24-hour budget and any cooldown carry on. Then **Sync** (or **Full
-sync**) refills from scratch. Use it when:
+row, thumbnail, carousel image and cached video from the phone, and forgets which Instagram account the library belonged
+to. It keeps your login **and the request log**, so the 600-per-24-hour budget and any cooldown carry on. Then **Sync** (or
+**Full sync**) refills from scratch. Use it when:
 
 - a Full sync was refused with "full sync would remove N of M items" and you really did unsave that much;
 - you really did delete every collection on Instagram ("empty collection list");
@@ -455,8 +462,8 @@ sync**) refills from scratch. Use it when:
 It costs a full, paced re-sync. If a line under the **Delete library** button then says "Library deleted, but the
 account record couldn't be cleared; try Delete library again", the items are gone but the phone still remembers the old
 account: tap **Delete library** once more. "Library deleted; some cached files couldn't be removed" means only some
-thumbnails or cached videos are left (they take space, nothing more; **Delete library** again tries them again), and
-"Couldn't delete the library; try again" means nothing was deleted. (Log out has a similar one, under the session status:
+thumbnails, carousel images or cached videos are left (they take space, nothing more; **Delete library** again tries them
+again), and "Couldn't delete the library; try again" means nothing was deleted. (Log out has a similar one, under the session status:
 "Couldn't finish logging out; try again". The login is already gone from the phone, and a second **Log out** finishes the
 job.)
 
@@ -479,13 +486,40 @@ Videos are never downloaded during a sync. A reel is fetched when you open it:
 - **Offline or limited.** A reel you watched all the way through still plays with no network, or while the app is
   cooling down after a rate limit. One you haven't shows a message over its thumbnail: "Offline: this video isn't
   cached yet", "Can't play this video", or why it can't load ([Troubleshooting](#10-troubleshooting)).
-- **Open on Instagram** is always under the thumbnail, also when a video can't play. It opens the link in whatever
-  handles it on the phone (the Instagram app or a browser), so it uses whatever account is logged in there. If
-  Instagram no longer has the reel, the app says so and keeps your copy of the item.
+- **Open on Instagram** is the icon button at the bottom left of the viewer (a box with an arrow; a long press shows its
+  name), there also when a video can't play. It opens the link in whatever handles it on the phone (the Instagram app or a
+  browser), so it uses whatever account is logged in there. If Instagram no longer has the reel, the app says so and keeps
+  your copy of the item.
 - A link Instagram refuses (HTTP 403 or 410) is renewed once and retried; if that fails too you see "Can't play this
   video". The player itself never retries a refused link (nor a 429 or 404): one refusal is one request. Video requests
   carry no cookies; if Instagram's video server redirects, the redirect is followed (the player can't refuse it).
 - In Mock mode the bundled clip plays for every reel and nothing is requested.
+
+### Carousels
+
+A carousel post keeps all its items, and the viewer shows them on demand, as it does videos:
+
+- **What a sync stores.** The addresses of every item, taken from the saved-feed replies the sync already downloads: a sync
+  sends no extra request for them and downloads no carousel image or video. A Sync stops at the first post it already has, so a
+  carousel saved before this update gets its items from a Full sync, or on its first open (below).
+- **On open.** The first item shows at once (it is the picture already in the grid). The other images download when you swipe
+  to them, from Instagram's image servers, with no cookies and at the thumbnails' pace, and are kept on the phone, so an item
+  you have seen shows with no network. A video item streams like a reel and is cached under the post's id and its position.
+- **At most one request a visit.** If the post has no stored items, or a link has run out (an image the server refuses, a
+  video link with 10 minutes or less left, a video the player is refused), the app asks Instagram once for the post: the same
+  `GET api/v1/media/<n>/info/` as a reel's link renewal, on the interactive lane, counted in the 600 per 24 hours. The answer
+  serves the rest of the visit. It never asks twice in a visit, even when the answer was a failure: leave the post and come
+  back for another try. Without a valid session it asks nothing, and the first picture shows with "Instagram session needs
+  attention (Sync screen)".
+- **Unsaving and deleting.** A Full sync that finds a post unsaved drops its downloaded images and its cached videos (the
+  small stored list of its items' addresses stays with the removed post), and **Delete library** removes everything.
+- **When a carousel changes.** If the poster deletes a slide (or swaps an image for a video), the next sync or link renewal
+  drops that post's downloaded images and cached videos, so a shifted item never shows the old picture; they download again
+  when viewed. If the poster only reorders slides of the same kind, the old pictures can still show at the moved positions
+  until the post is unsaved or **Delete library** runs (a known gap, `TODO.md`).
+- **Messages** over an item are in [Troubleshooting](#the-viewer-messages-over-a-video-or-a-carousel-item).
+- In Mock mode the fake carousels show placeholder pictures and the bundled clip for their video items, and nothing is
+  requested.
 
 ## 7. Adapter lab and the spike handback
 
@@ -587,7 +621,9 @@ needs verification, or the login screen opened to fix that), and `transport rese
 failed: <Class>` (the page could not be closed; the class name only), `collections query stale` (Instagram no longer runs the
 stored names query id; `collections query stale (not graphql)` or `(http <code>)` when it answered with an error envelope
 or a non-JSON page instead of a GraphQL error, which still repairs once a day but is worth pasting) or `collections query forced` (Forget asked for a repair), then `repair: start`,
-`repair: learned new id` or `repair: failed (<reason>)` (the repair page's one attempt; never an id, a handle or a page). No
+`repair: learned new id` or `repair: failed (<reason>)` (the repair page's one attempt; never an id, a handle or a page), and
+for carousels `carousel fill: <outcome>` or `carousel renew: <outcome>` (`fresh (N items)`, `gone`, `offline`, ...) and
+`carousel image failed (<reason>)` (`refused`, `offline`, `cdn limit`, `no link`, `post gone`), never a link or a post id. No
 cookie, token or header is logged: the app never sees them. One `GET` or `GRAPHQL` line is one call: at most one API
 request; a line without an HTTP status sent none (it ended before the request, or the page's request failed; `no tokens`
 means the page could not send the names query). A repair is one call too, with no `GET` or `GRAPHQL` line of its own: count
@@ -686,8 +722,9 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 
 ### M5: video
 
-- [ ] **Plays.** Open a reel. **Look for:** picture and sound start within a few seconds, it loops, a tap pauses, and
-  **Mute** / **Unmute** sticks across reels and a restart. **Report:** a pass, or the reel and what happened.
+- [ ] **Plays.** Open a reel. **Look for:** picture and sound start within a few seconds, it loops, a tap pauses, and the
+  speaker button (**Mute** / **Unmute**, bottom right) sticks across reels and a restart. **Report:** a pass, or the reel and
+  what happened.
 - [ ] **Link renewal.** With logcat running, open a reel shortly after a sync (its link is fresh), then open one a day
   or more later. **Look for:** no `GET api/v1/media/<n>/info/` line for the fresh one; exactly **one** for the old
   one, then it plays. The next reel's link may be renewed in advance, once, after the current one plays. **Report:**
@@ -746,6 +783,81 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 
   **Look for:** `status=speed-profile` (the emulator smoke saw it). Compilation can lag after an install: if it still
   says `run-from-apk`, report that.
+
+### The viewer update (carousels, icon buttons, the app icon, motion)
+
+The update that added carousel swiping, icon buttons, the app's own icon and the grow-and-shrink motion. It was built and tested
+on fakes and on the emulator in Mock mode. No agent has seen a real carousel, a real expired link or your launcher, so these
+checks are yours. Do them after the first real sync ([section 5](#5-first-real-sync)): steps 2 to 4 need a carousel in the
+real library (a grid tile reading "1/N"). Steps 5 to 8 also work in Mock mode, whose fake library has carousels.
+
+**What it sends.** A sync is unchanged and sends nothing new. A visit to a carousel sends at most one
+`GET api/v1/media/<n>/info/` (the interactive lane) in all, and only when its items are not stored yet or a link it needs has
+run out; swiping through the items adds nothing beyond that one. If a cooldown is running, wait it out first.
+
+For the log checks, clear the log, then watch the requests in a second terminal (the start of this section says how):
+
+```bash
+adb -d logcat -c
+```
+
+```bash
+adb -d logcat -s InstagramHttp
+```
+
+1. **Install over the app you have.** Your data is kept: the database adds one table on its first open and changes nothing
+   else.
+
+   ```bash
+   SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
+   ```
+
+   Open **Reels**. **Look for:** Saved lists the same collections and counts as before. **Report:** a pass, or what changed.
+   - **From now on, install only current builds.** The upgraded library can't be opened by a build from before this update,
+     so Android refuses such a build with `INSTALL_FAILED_VERSION_DOWNGRADE` (an older checkout, or a branch cut before this
+     update). Never uninstall or clear the app's data to get past it: that deletes the library (a full, paced re-sync), the
+     login and the request log. Pull or rebase that checkout, then install again ([Troubleshooting](#build-and-install)).
+2. **Swipe a carousel.** Open a post whose tile reads "1/N" and swipe left and right. **Look for:** its first picture at once; a
+   counter at the top end ("1/5") and small dots at the bottom centre; each swipe left shows the next item, and the counter and
+   the dots follow ("2/5"); a swipe up or down moves to the next post, never to the next item; leaving the post and coming back
+   starts it at the first item again. In the log: at most one `GET api/v1/media/<n>/info/` for the whole visit (none if its items
+   were already stored and no link had run out). **Report:** a pass, the counter you saw, and the request lines.
+3. **Play a video item.** Swipe to an item that is a video. **Look for:** it plays and loops, a tap pauses it, the speaker
+   button mutes it (the button shows only while a video item is on screen), and it stops when you swipe to an image item or to
+   another post. **Report:** a pass, or what happened.
+4. **Reopen it offline.** After you have viewed some of a carousel's items, run one Sync (it re-stores the carousel's items;
+   the images you viewed must survive it), then turn on airplane mode, leave the viewer and open the same carousel again. **Look for:** the items you viewed show; an image you never viewed, and a video item you never watched
+   through, say "Offline: this item isn't cached yet" (a video item says it whether its link was still good or had to be
+   renewed). **Report:** the message text, and whether the item was an image or a video.
+5. **Check the icon buttons.** **Look for:** at the bottom left an icon (a box with an arrow), at the bottom right a speaker
+   icon (on a video, or on a carousel's video item, only), and no text buttons. Long-press each: a tooltip says "Open on
+   Instagram", "Mute" or "Unmute". Tap the speaker: it flips between speaker and speaker-off, the sound follows, and the setting
+   holds across posts and a restart. Tap the first one if you like: it opens the post in the Instagram app or a browser, as it did
+   before. **Report:** a pass, or which button looked or behaved wrong.
+6. **Check the launcher icon.** Go to the home screen and find **Reels**. **Look for:** the app's own icon, teal (the launcher's
+   shape may make it round) with four rounded tiles in a masonry and a play triangle on one of them, in place of the system
+   default. Then switch on themed icons (Settings, Wallpaper & style, Themed icons; Android 13 or later, and your launcher must
+   support them). **Look for:** the icon turns one colour, with the triangle as a cut-out. **Report:** a pass, a screenshot of
+   the icon, or what it looked like.
+7. **Open a post and go back with the back swipe.** This needs gesture navigation and Android 14 or later (13 with the
+   developer option for predictive back). With 3-button navigation tap the Back button instead: the post still shrinks into
+   its tile, but the finger-following part can't be checked; say so in the report. Tap a grid tile, then drag in from the
+   screen edge slowly, without letting go. **Look for:** the post shrinks towards its tile with the grid showing behind it; let
+   go before the end and it springs back and the viewer stays; go all the way and it lands in its tile. Also: tapping a tile grows its picture into the viewer, and
+   after swiping up through several posts, going Back shrinks the post into its own tile and the grid shows that tile (it scrolls
+   only when the tile was out of view). **Report:** a pass, or what looked wrong.
+   - **The first open after a cold start.** Force-stop the app (Settings, Apps, Reels, Force stop), open it, open a collection
+     from Saved and tap a tile, with no post opened before. On the **release** build ([section 9](#9-release-build)) that first
+     open should grow from its tile. A **debug** build on a slow phone may only fade in this one case (the viewer's first screen is slow to compose on a debug build, and the
+     fade is over before the picture is ready); every later open grows. **Report:** which build, and whether that first open grew
+     or only faded.
+8. **Move between pages with the back swipe.** As step 7, this needs gesture navigation (with 3-button navigation, check only
+   that Back slides the page). From Saved open Search (or Sync) and drag back from the edge. **Look for:** the page slides a
+   little to the side with a fade and follows your finger, letting go early cancels it, and going forward slides the same way.
+   **Report:** a pass, or what looked wrong.
+
+With animations switched off (Settings, Developer options, Animator duration scale: off), nothing animates: pages and posts
+change at once. Switch it back on afterwards.
 
 ## 9. Release build
 
@@ -829,6 +941,11 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
   adb -d uninstall io.github.yuriimurha.reels
   ```
 
+- **`INSTALL_FAILED_VERSION_DOWNGRADE`**: the build you are installing is older than the one on the phone (a checkout or a
+  branch from before the viewer update, whose database the installed app has already upgraded). Android refuses it because
+  that build could not open the upgraded library and would close at every start. Never uninstall or clear the app's data to
+  get past this: on the phone that deletes the library, the login and the request log. Pull or rebase the checkout and install
+  the current build. (On the emulator, in Mock mode, an uninstall loses only fake data.)
 - **`keystore.properties has no (or an empty) '...'`**: that key is missing or blank in the file (section 9).
 - **A commit is refused with `pre-commit: ... session material`, `... sessionid value` or `... release signing
   material`**: the secret guard found something that looks like a cookie, a session id or a signing file. Remove it;
@@ -966,7 +1083,7 @@ tapping), "query not sent: no tokens" (**Collections** only: the hidden page had
 was sent), "The call failed", or "Couldn't save the scrubbed copy". **Collections** showing the classification `StaleQuery`
 means Instagram no longer runs the stored names query id: the lab doesn't repair it, a Sync does.
 
-### The viewer: messages over a video
+### The viewer: messages over a video or a carousel item
 
 - **"Instagram session needs attention (Sync screen)"**: no valid login, so nothing was sent. Fix it on Sync.
 - **"This item is no longer available on Instagram"**: Instagram doesn't have the reel any more. Your copy stays.
@@ -978,4 +1095,16 @@ means Instagram no longer runs the stored names query id: the lab doesn't repair
 - **"Can't play this video"**: the player failed and one renewal (if it was a 403 or 410) didn't help.
 - **"Not available on Instagram"** (a tile with no picture): the item has no thumbnail.
 
-In every case **Open on Instagram** stays under the thumbnail.
+Over a carousel item (centred on that item, with the counter and the dots still there):
+
+- **"Can't load this item"**: its image or video could not be had. The server refused its link and the visit's one renewal did
+  not help (or was already used), the image server was limiting requests, the player failed for another reason than the
+  connection (a video it could not decode, say), or Instagram's answer was not understood.
+- **"Offline: this item isn't cached yet"**: no connection (or the image server answered with an error page or a redirect,
+  which reads the same), and you have not viewed that image before or watched that video item through.
+- **"Can't load this item right now: ..."**: followed by "Cooling down after a rate limit" or "The 24-hour request budget is
+  used up": the app won't ask Instagram for new links yet.
+- **"Instagram session needs attention (Sync screen)"**, **"Instagram is limiting requests"** and **"This item is no longer
+  available on Instagram"** mean the same as above.
+
+In every case the **Open on Instagram** icon (bottom left) stays.

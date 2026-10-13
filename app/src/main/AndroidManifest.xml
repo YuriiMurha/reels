@@ -11,9 +11,14 @@
         android:name=".ReelsApp"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Reels">
+        android:theme="@style/Theme.Reels"
+        tools:targetApi="33">
+        <!-- tools:targetApi: enableOnBackInvokedCallback is read from Android 13 (API 33) on, and ignored below it. -->
         <activity
             android:name=".MainActivity"
             android:exported="true">

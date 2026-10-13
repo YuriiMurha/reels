@@ -36,6 +36,17 @@ tests, which load only local servers. What is still unconfirmed needs the owner'
 - **M4:** a real Sync and Full sync, the budgets, the cooldown display and the challenge stop.
 - **M5:** playing real reels, link renewal and the cache.
 - **M6:** the release build's hidden-page transport, real client, CDN fetcher and WebView login under R8.
+- **The viewer update (2026-10-12): carousels, icon buttons, the app icon and motion.** Built and tested on fakes, in
+  JVM and Compose tests, and on the emulator in Mock mode (the swipe, the icon buttons, the grow and shrink and the
+  back gesture were seen there); no agent has met a real carousel. Its final review (2026-10-13) added R16 to R22 (spec
+  §6), each fix with a test. Its database is version 2, and `versionCode` follows it (R21): a build from before it is
+  refused instead of installed. Still unconfirmed, on the owner's phone (README section 8, "The viewer update"):
+  - that a real carousel's `carousel_media` reads as parsed (one more of the M3 shape candidates, pinned by a synthetic
+    fixture only), that its images load and its video items play, and that an expired link is renewed by the one
+    `mediaInfo` a visit may send ([Carousels](#carousels));
+  - the launcher icon and its themed layer ([App icon](#app-icon));
+  - the post-to-tile motion and the back gesture on the phone, where a debug build's first open after a cold start may
+    only fade ([Motion](#motion)).
 
 A debug build starts in Mock mode (the fake library); a release build always uses the real one.
 
@@ -65,8 +76,9 @@ A debug build starts in Mock mode (the fake library); a release build always use
   database, thumbnails, client, fetcher and video resolver follow that choice.
 - Every Instagram API request, from a sync, a session check, the viewer or the lab, goes through the one `Pacer` and then
   through the one `WebViewTransport` ([Transport](#transport)): one `fetch` in a hidden instagram.com page per call, a GET
-  or the one allow-listed GraphQL POST. Thumbnails and videos do not: they use cookieless clients. The one other thing that
-  loads instagram.com is the collections repair, a second hidden page that views the owner's Saved page, at most every 24 h
+  or the one allow-listed GraphQL POST. Thumbnails, carousel images and videos do not: they use cookieless clients. The
+  viewer sends one kind of API request, `mediaInfo`, for a reel's link renewal and for a carousel's fill or renewal, and a
+  carousel visit sends at most one ([Carousels](#carousels)). The one other thing that loads instagram.com is the collections repair, a second hidden page that views the owner's Saved page, at most every 24 h
   and inside the Pacer's gate ([Collection names](#collection-names)).
 - Sync runs in a WorkManager foreground worker and writes Room; the screens read Room.
 
@@ -79,10 +91,11 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Adapter lab (core) | `instagram/.../lab/` | One request per call; a redacted shape and a scrubbed copy of the answer (spec 6.3). [Details](#adapter-lab-core). |
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
 | Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`, `*.p12`, `*.pfx`; compared in lower case), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
-| Database | `app/.../data/db/` | Room v1: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `sync_run`, `sync_cursor`, `api_request`. Schema exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. |
-| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT`, or `CACHED_FILES_KEPT` when a thumbnail or the video cache could not be emptied (`ThumbnailStore.deleteAll()` throws once it has tried them all), or both, and `SyncViewModel` says so under the Delete library button), then clears "Couldn't refresh collection names" through an injected `clearNamesStale` (C-M5: the real library's container passes `settings.setCollectionNamesStale(false)`, Mock mode's nothing; a failure is swallowed, only the notice would be wrong), and clears thumbnails and the cached videos, through an injected `clearVideoCache`; neither failure fails the delete, the rows are already gone, and both are reported), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
-| Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
-| Video | `app/.../data/media/`, `ui/viewer/` | On-demand playback with a `pk`-keyed cache (spec 8). [Details](#video). |
+| Database | `app/.../data/db/` | Room v2: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `carousel_item` (a carousel post's items, a foreign key to `media` with cascade delete), `sync_run`, `sync_cursor`, `api_request`. Schemas `1.json` and `2.json` exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. [Details](#carousels). |
+| Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT`, or `CACHED_FILES_KEPT` when a thumbnail, a carousel image or the video cache could not be emptied (`ThumbnailStore.deleteAll()` and `CarouselImageStore.deleteAll()` throw once they have tried every file), or both, and `SyncViewModel` says so under the Delete library button), then clears "Couldn't refresh collection names" through an injected `clearNamesStale` (C-M5: the real library's container passes `settings.setCollectionNamesStale(false)`, Mock mode's nothing; a failure is swallowed, only the notice would be wrong), and clears the thumbnails, the carousel images (an injected `CarouselImageStore`) and the cached videos (through an injected `clearVideoCache`); no failure of these fails the delete, the rows are already gone, and each is reported), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
+| Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), `CarouselImageStore` (`{pk}_{position}.jpg` in `filesDir/fake-carousel` or `filesDir/carousel`, the same rules), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
+| Carousels | `app/.../data/media/CarouselRepository.kt`, `PacedMediaInfo.kt`, `CarouselImageStore.kt`, `data/db/CarouselItemDao.kt`, `ui/viewer/CarouselPager.kt` | A carousel post's items, read from the saved feed the sync already downloads, shown in the viewer on demand: images through the CDN lane, video items through the video cache, at most one `mediaInfo` a visit. [Details](#carousels). |
+| Video | `app/.../data/media/`, `ui/viewer/` | On-demand playback with a `pk`-keyed cache (spec 8); a carousel's video items play through the same cache under `{pk}_{position}`. [Details](#video). |
 | Pacer | `app/.../sync/pacing/` | The single gate for Instagram API calls. [Details](#pacer). |
 | Transport | `app/.../transport/`, `app/src/main/assets/ig_fetch.js` | Sends every Instagram API call as a same-origin `fetch` inside a hidden instagram.com WebView page. [Details](#transport). |
 | Collection names | `instagram/.../web/WebGraphQl.kt`, `DocIdStore.kt`, `app/.../transport/AndroidRepairPage.kt`, `DesktopSite.kt`, `RepairPage.kt`, `app/src/main/assets/ig_watch.js`, `app/.../sync/QueryRepairer.kt`, `app/.../data/settings/SettingsDocIdStore.kt` | The names come from the website's own GraphQL query, sent by the hidden page; a second, desktop-mode hidden page learns the query's id from the site when the stored one goes stale (at most once per 24 h). The last names are kept when that fails. [Details](#collection-names). |
@@ -90,8 +103,9 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
 | Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 home loads per user action (counted again after an idle close), plus at most one repair page view of the owner's Saved page per 24 h or per Forget. [Details](#wiring). |
-| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges. |
-| Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list; one reused ExoPlayer (Media3 `ContentFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, "Open on Instagram" via `Permalinks` (an `ACTION_VIEW` intent, so whichever app handles the link). Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
+| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages change with the shared-axis X transition, and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
+| App icon | `app/src/main/res/mipmap-anydpi-v26/`, `drawable/ic_launcher_*.xml` | An adaptive icon, all vectors, with a monochrome layer. [Details](#app-icon). |
+| Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list, and inside a carousel post a horizontal pager of its items ([Viewer](#viewer)); one reused ExoPlayer (Media3 `ContentFrame` in `VideoFrame`, thumbnail as shutter), loop, remembered mute, author/caption/collection overlay, and two icon buttons: "Open on Instagram" at the start (via `Permalinks`, an `ACTION_VIEW` intent, so whichever app handles the link) and Mute/Unmute at the end, for a video, or a carousel while its settled item is one. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
 | Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Collections" is feeds walked over feeds to walk, so `1 / 1` under strategy A, not the number of collections; "Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session, and its session section adds one line for the real Pacer's cooldown or 24 h count (see Session). Log out cancels a running sync before it forgets the session. With the real backend the Library section also says "Couldn't refresh collection names" while the names are the last good ones ([Collection names](#collection-names)). Debug builds add the Developer section ([Lab screen](#lab-screen)). |
 | Lab screen | `app/.../ui/lab/`, `ui/sync/DeveloperSection.kt` | The debug-only front end of the Adapter lab, and the Mock mode switch. [Details](#lab-screen). |
@@ -135,8 +149,9 @@ A debug build starts in Mock mode (the fake library); a release build always use
     fetcher (OkHttp) and the WebView login.
 - **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, README "Automated smoke tests"):
   `SmokeTest` drives the debug app through its real UI on the emulator, in Mock mode: Home, Sync (logged-out session, the
-  Developer section, a fake Sync to the end), grid, viewer, video playback and Search, with a screenshot per step in the
-  app's `files/smoke/`. It never touches Instagram: `SmokeGuard`, the outermost rule, skips every test on a physical device
+  Developer section, a fake Sync to the end), grid, viewer, video playback, a carousel swiped to its second item (`t6`), back
+  from a post far down the list to that post's tile (`t7`) and Search, with a screenshot per step in the
+  app's `files/smoke/`. The viewer's icon buttons are found by content description ("Open on Instagram", "Mute", "Unmute"). It never touches Instagram: `SmokeGuard`, the outermost rule, skips every test on a physical device
   (`isEmulator()`, pinned by `EmulatorDetectionTest`) and fails unless `AppContainer.usesFake`, both before the Activity is
   launched; no test taps a login, check, Instagram-link, lab or Mock mode control. Video playback is read from the viewer's
   `TextureView` (the playing page carries the `video-surface` test tag): a frame is drawn and a later one differs. Sync pacing
@@ -145,6 +160,25 @@ A debug build starts in Mock mode (the fake library); a release build always use
   on purpose: v2 runs composition coroutines on the test thread, and the viewer's ExoPlayer insists on the main thread.
   `android.injected.androidTest.leaveApksInstalledAfterRun=true` in `gradle.properties` stops Gradle from uninstalling the app
   (and its data) after the run.
+- **Room schemas ship as debug assets (R5).** `app/build.gradle.kts` adds `app/schemas` to the debug variant's assets, and
+  `androidx.room:room-testing` (catalog entry `androidx-room-testing`) is a test dependency, so `MigrationTestHelper` can build
+  version 1 from `1.json` in a Robolectric test (`ReelsDatabaseMigrationTest`). They are debug assets, not test assets,
+  because AGP 9.4.1 merges no assets of the `test` source set for unit tests (Robolectric reads the debug variant's). The
+  files hold table definitions only, no data and no secrets; a release build carries none, a debug APK about 30 KB of them
+  (under 5 KB compressed). Switching the migration test to open a version-1 file through `ReelsDatabase.build` would let them
+  go. `mergeDebugAssets` depends on `copyRoomSchemas` (D4), so the first build after a schema change merges the schema Room
+  has just written, not the old one (`./gradlew :app:mergeDebugAssets --dry-run` lists `copyRoomSchemas` first;
+  `SchemaBuildGuardTest` pins the line).
+- **`versionCode` tracks the schema (R21).** `versionCode` is at least the Room database version (2 now), and
+  `SchemaBuildGuardTest` fails when a schema bump leaves it behind. So a build from before a schema change has a lower code and
+  Android refuses it (`INSTALL_FAILED_VERSION_DOWNGRADE`) instead of installing over the upgraded library, where Room, with no
+  way back and no destructive fallback (there must be none: it would wipe the library and the request log), would fail at
+  every start. The README tells the owner never to uninstall or clear data to get past the refusal, but to install a current
+  build.
+- **Manifest.** `android:enableOnBackInvokedCallback="true"` on the application (predictive back, [Motion](#motion)), with
+  `tools:targetApi="33"` (the attribute is read from API 33 on; minSdk is 29), and `android:icon` / `android:roundIcon` ([App
+  icon](#app-icon)); `ManifestGuardTest` and `AppIconGuardTest` pin them, and no activity may name an icon of its own.
+  `res/raw/keep.xml` keeps the glyphs' licence notice (`tools:keep`), which no code reads, through resource shrinking.
 
 ## `:instagram`
 
@@ -156,7 +190,8 @@ Pure Kotlin/JVM.
   (R20: the transport could not send it, never retried) and the sealed `RepairUnavailable` with `RepairSkipped` and
   `RepairFailed`); `Permalinks`; and `FakeInstagramClient` over a deterministic
   `FakeLibrary` with scripted failures (its `repairCollections` is the interface's default, a `Transient`: the fake library has
-  nothing to repair). `mediaInfo` returns `RemoteMedia?`: null means Instagram no longer has the item (P8).
+  nothing to repair). `mediaInfo` returns `RemoteMedia?`: null means Instagram no longer has the item (P8). A `RemoteMedia` also
+  carries `carouselItems: List<RemoteCarouselItem>?`, a carousel post's children ([Carousels](#carousels)).
 - **Web layer.**
   - **The transport seam.** `InstagramTransport.get(pathAndQuery)` makes exactly one GET per call and never retries or
     follows a redirect, and `graphql(query, docId, variables)` makes exactly one POST of an allow-listed GraphQL query under
@@ -263,8 +298,19 @@ Pure Kotlin/JVM.
   - `saved_collection_ids` with any non-string entry counts as "the response doesn't say" (null), never a shorter list.
   - The collections come from the GraphQL reply ([Collection names](#collection-names)): its `edges[].node`s, less the
     automatic ones, which are told by an id that is not digits (fact AUTO, assumed), never by a display name.
+  - **A carousel's children** are read from the `carousel_media` the saved feed (and `mediaInfo`) already carry, into
+    `RemoteMedia.carouselItems`: one `RemoteCarouselItem` per child, in order (`media_type` 1 is an image, 2 a video), with the
+    image `MediaLinks.chooseThumbnail` picks from the child's own `image_versions2` (empty when it has none), the first
+    `video_versions` url of a video child and its `oe` expiry, and a width and height from `original_width` and
+    `original_height`, else the chosen candidate's, else 0 (they may be 0 or mixed, so nothing may divide by them). The list is
+    `null` when the post is not a carousel or the reply has no `carousel_media`, and also when ANY child cannot be read (R4: an
+    unknown or missing `media_type`, a child that is not an object, a null): the post's items are then unknown, never a
+    `ShapeChanged`, because stopping a whole sync for an enhancement would be a regression (before the update such a carousel
+    synced fine, with only its cover read). An empty `carousel_media` is an empty list, which the sync reads as no information
+    ([Carousels](#carousels), R2). `firstVideoUrl` is the one helper that reads a `video_versions` url, for a post and a child.
 - **`MediaLinks`** picks the thumbnail (narrowest `image_versions2` candidate at least 720 px wide, else the widest; a
-  carousel uses its first child's candidates) and reads the CDN link expiry from the hex `oe` parameter.
+  carousel's cover uses its first child's candidates, and each child's own image is chosen by the same rule) and reads the
+  CDN link expiry from the hex `oe` parameter.
 - **`WebInstagramClient`** is the real `InstagramClient`. `WebEndpoints` builds the three candidate URLs it still GETs (P4:
   `feed/saved/posts/`, `feed/collection/{id}/posts/` (only the lab, and strategy B below, ask for it) and
   `media/{pk}/info/`; the cursor is `max_id`), the transport fetches them (`classifyReply`, then the JSON object), `WebParsers`
@@ -823,11 +869,12 @@ current one from the site itself, on the phone, with no rebuild.
     right before the break slot and the run budget are counted and the request is recorded and sent. A throw sends and logs
     nothing, uses neither the run budget nor the break slot, leaves the end of the last request where it was, frees the gate
     and reaches the caller. It can only stop requests.
-- **Interactive lane** (viewer link renewals, session checks, lab calls): priority, so interactive requests never wait
+- **Interactive lane** (viewer link renewals and carousel fills, session checks, lab calls): priority, so interactive requests never wait
   behind a sync gap or break, with a 2 s minimum gap, counted in the 24 h budget. `interactive(precondition, request)`
   runs the optional `precondition` once the gate is held, the gap waited out and the last `ensureAllowed()` passed, right
   before the request is recorded and sent (R79).
-- **CDN lane:** 2 concurrent downloads with 0.2–0.8 s jitter, not budgeted.
+- **CDN lane:** 2 concurrent downloads with 0.2–0.8 s jitter, not budgeted. The sync's thumbnails use it, and so do the
+  viewer's carousel images (R7): they wait their turn behind a running sync's thumbnails, which can only lower a rate.
 - **Cooldowns:** after a `RateLimited` the cooldown is 1 h, or 24 h if the previous rate limit was less than 24 h ago. It
   is persisted in DataStore, so killing the app does not reset it. While it is active every API lane refuses
   (`PacerRefusal.CoolingDown`). Refusals are `CoolingDown`, `RunBudgetReached` and `DailyBudgetReached`.
@@ -854,7 +901,7 @@ current one from the site itself, on the phone, with no rebuild.
 ## Sync engine
 
 `app/.../sync/SyncEngine.kt`. One run: session check (`currentUser()`), collection list, scope walks, one transaction per
-page (media, memberships, cursor), thumbnails on the CDN lane.
+page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
 
 - **Collections first.** After the session check the run lists the collections with their names (`fetchCollections`,
   [Collection names](#collection-names)): the website's query, page by page, a stale first page repaired once (or, when Forget
@@ -928,8 +975,21 @@ page (media, memberships, cursor), thumbnails on the CDN lane.
   - A thumbnail failure (network, decode or disk) is counted and the sync goes on. A page is committed before its
     thumbnails are cached, so a resumed scope first retries the thumbnails of items the run already saw without one.
   - None of this adds a request, a rate or a concurrency: the gates only stop work.
-- **Eviction.** The removed pks of a reconcile are handed to a `MediaEviction` (default none), so their cached videos go
-  with their thumbnails (a failing eviction is ignored: the reconcile is already committed).
+- **Carousel items.** In the page's transaction, right after the media upsert, a carousel post's items are replaced with the
+  ones its reply carried (`CarouselItemDao.replace`), so a failed page rolls them back with the post. A `null` or EMPTY list
+  says nothing about them (R2) and the stored items stay: an empty array is more likely a shape blip than a carousel without
+  items, and wiping them would force a refill request. The cost: a carousel whose items Instagram really emptied keeps stale
+  ones until a renewal replaces them. No request is added: the items come in the replies the sync already downloads. A
+  QUICK run stops at the first known post, so carousels synced before this update get their items from a FULL run, or on
+  their first open ([Carousels](#carousels)). A post only soft-removed (`markRemoved`, an UPDATE) keeps its items; the
+  cascade fires on a real DELETE only. Before the replace, the stored items are read: when the new ones differ in count or in
+  the type at some position (`itemShapeChanged`, R20), the page's outcome names the post.
+- **Eviction.** The removed pks of a reconcile are handed to a `MediaEviction` (default none), so their cached videos, their
+  carousel items' cached videos and their carousel images go with their thumbnails: `MediaEviction.eachStep` runs each step
+  for each pk on its own, so one that fails (a disk error, a key it refuses) skips no other step and no later pk (the
+  reconcile is already committed, and what a failed step leaves only takes space). The same way, after the commit, the
+  carousels a page reshaped go to `carouselEviction` (R20: their item images and item videos only), and a failing drop does not
+  stop the run. Files are never touched inside the page's transaction, so a page that rolls back drops nothing.
 - **Session signals.** `run` reads `signals.epoch()` first thing inside its try (a session layer that cannot answer ends the
   run PAUSED "Unexpected error", never RUNNING), tells the session layer `sessionOk(username, epoch)` once
   `currentUser()` has succeeded, and passes the same epoch with `loginRequired` and `challengeRequired`; a failing receiver
@@ -986,15 +1046,18 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   stored link as it is while it has MORE than `FRESH_MARGIN_MS` (10 min) left (no request). A video that is FULLY cached
   plays from its stored link whatever that link's age, with no request (R78: the bytes are on disk).
 - **Otherwise one `mediaInfo`** on the Pacer's interactive lane (the process's one Conservative pacer, so a refresh counts
-  against the same 600/24 h and cooldown as sync), but only under a valid session (R76, spec 6.4):
+  against the same 600/24 h and cooldown as sync), but only under a valid session (R76, spec 6.4). The request and its gates
+  are `PacedMediaInfo` ([Carousels](#carousels)), which the resolver builds from the arguments it always had and which a
+  carousel's fill and renewal use too, so a reel and a carousel ask the same way, and the gates below are its gates. The
+  resolver's own answers are unchanged (it maps each of `PacedMediaInfo`'s outcomes to the answer it always gave):
   - The resolver is given `isSessionReady`, which `AppContainer` wires to `session.state.first() is SessionState.Valid`,
     so after a challenge, an expiry or a logout NOTHING is sent, by a settle, a forced refresh or a prefetch alike (a
     cached video still plays, anything else shows "Instagram session needs attention (Sync screen)").
   - It is asked twice: before the request queues, and again from INSIDE the Pacer's gate. The interactive lane can wait
     seconds (a request in flight holds the gate, then the 2 s gap) and a challenge can arrive meanwhile, so the Pacer runs
     the `precondition` once the gate is held and the gap waited out (R79): a throwing precondition sends nothing, logs
-    nothing (no budget is used), frees the gate and reaches the caller, and the resolver turns its private "not ready"
-    signal into the same answer as the early check. The new argument adds no request, rate or concurrency.
+    nothing (no budget is used), frees the gate and reaches the caller, and `PacedMediaInfo` turns its private "not ready"
+    signal into the same `NO_SESSION` outcome as the early check. The new argument adds no request, rate or concurrency.
 - **The renewed link** is stored with `MediaDao.setVideoLink`; one whose URL names no expiry (`oe`) is stored as fetch time
   + 1 h (`ASSUMED_LIFETIME_MS`, R78), so it cannot cost a `mediaInfo` on every settle. The sync engine still stores such a
   link as it comes, with no expiry: it costs one refresh at its first settle and is then stored with the assumed hour.
@@ -1031,16 +1094,24 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
     anything else (a dropped connection, a timeout). A refused link therefore costs one CDN request, not four, and reaches
     `onPlayerError` at once. `VideoWiringGuardTest` pins that the viewer uses this factory and that it installs the policy.
   - **Eviction:** a FULL reconcile's removed pks go to `MediaEviction` right after their thumbnails are deleted, and Delete
-    library clears the whole cache.
-- **In the viewer,** settled pages are collected with `collectLatest` (`playSettledPages`), so a newer page cancels the
-  older resolve, and `playIfStillSettled` re-checks that the page still shows the same pk before the player is touched.
+    library clears the whole cache. A carousel's video items are cached under `{pk}_{position}`, so `removeCarouselItems(pk)`
+    (R6) drops every key that starts with `{pk}_`, and nothing else (not the post's own key, which `remove` drops). The prefix
+    names this post's items only because a pk is all digits (`12_` cannot start post 122's keys), so a pk that is not all
+    digits removes nothing.
+- **In the viewer,** settled units are collected with `collectLatest` (`playSettledPages`), so a newer unit cancels the
+  older resolve, and `playIfStillSettled` re-checks that the unit (the post, and for a carousel its item, `Playable`) is still
+  the settled one before the player is touched ([Viewer](#viewer)).
 - **403 and 410.** A `Player.Listener.onPlayerError` whose cause chain holds an `InvalidResponseCodeException` 403 or 410
   triggers ONE `resolve(forceRefresh = true)` per item per visit (`ViewerViewModel.recover`), which first cancels a
   prefetch still out for a DIFFERENT item, so the visible item's refresh does not queue behind the next item's in the
   interactive lane (R79). Cancelling does not unsend: if that prefetch's request was already out, it was sent, so a 403/410
   recovery can cost one extra request (still paced by the interactive lane's 2 s gap and counted in the 24 h budget), and
   `recover` never reuses a prefetch's request. A second error, or any other error, shows the thumbnail with "Can't play
-  this video". An `Unavailable` shows its message above "Open on Instagram".
+  this video". An `Unavailable` shows its message above "Open on Instagram". A carousel's video item recovers the same way,
+  once per item per visit, through `CarouselRepository.video(..., forceRefresh = true)` on the visit's own `Visit` (so it can
+  send a request only if the visit has not spent its one), and a failure reads "Can't load this item" on the item, except that
+  a player error that is no connection says "Offline: this item isn't cached yet" while the item's bytes are not all cached
+  (R16, [Viewer](#viewer)).
 - **Prefetch.** Once the settled item's OWN resolve has returned (R77: `playSettledPages` calls `afterResolved` after it,
   so the visible item's request is never queued behind the prefetch in the interactive lane's FIFO), the NEXT item's link
   is renewed through the same resolver (so under the same session check) only if it is a video whose link has run out or
@@ -1049,10 +1120,352 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
     for the request still out (a finished prefetch is not reused; the resolver sees the renewed row).
   - If that prefetch is cancelled while the settle waits (a newer prefetch replaces it, or a refresh makes way), the settle
     is not: it asks the resolver itself, at the cost of one more request; the settle's own cancellation still propagates.
+  - The prefetch is decided once a post, on the post's first resolved unit (R11), and never on a carousel item's settle: an
+    item swipe is not a prefetch trigger, so pacing does not depend on how often the owner swipes inside a carousel.
 - **Request rate.** Nothing here adds a lane, a rate or a concurrency: a video costs at most one interactive `mediaInfo`
   when it is opened with an expired link, plus at most one prefetch per settled page, each paced by the interactive lane's
   2 s minimum gap and counted in the 24 h budget; a fresh link, a cached video and Mock mode send nothing. The player
-  retries no HTTP error status (R85), which only removes CDN requests.
+  retries no HTTP error status (R85), which only removes CDN requests. A carousel's video items add no request type and no
+  lane: they stream through the same cookieless, unpaced video stack, and any renewal they need is the carousel visit's one
+  `mediaInfo` ([Carousels](#carousels)).
+
+## Carousels
+
+Spec [`2026-10-12-viewer-ux-design.md`](docs/superpowers/specs/2026-10-12-viewer-ux-design.md) §3.1 to §3.3, with the
+amendments at its end. A carousel post's items come from the saved feed the sync already downloads, are stored in Room, and
+are shown in the viewer on demand.
+
+- **Data.** `WebParsers` turns each child of `carousel_media` into a `RemoteCarouselItem` ([`:instagram`](#instagram)), and
+  the sync stores them in `carousel_item` (`CarouselItemEntity`): `parentPk`, `position` (0-based), `type` (IMAGE or VIDEO),
+  `width`, `height`, `imageUrl` (empty when Instagram sent none), `videoUrl` and `videoUrlExpiresAt` (epoch ms, like the media
+  row's). The primary key is `(parentPk, position)`, and a foreign key to `media.pk` cascades a delete, so items go with their
+  post. There is no separate `parentPk` index: the key's leading column is one.
+  - **Mock mode.** `FakeLibrary` derives a carousel's items from its pk alone, `carouselCount` of them: positions 2, 5, 8 and
+    so on are videos, the rest images (`fake://thumb/{pk}-{position}`, `fake://video/{pk}-{position}`). Nothing is drawn from
+    its random source, so the rest of the library is what it was. `FakeInstagramClient`'s saved pages and `mediaInfo` carry them.
+- **Room v2.** `MIGRATION_1_2` only creates the table (`2.json`'s statement verbatim), so every existing row stays. It is
+  registered in `ReelsDatabase.build`, so both library files (`reels.db`, `library.db`) upgrade, and there is still no
+  destructive fallback: a lost library costs a full, paced re-sync. `ReelsDatabaseMigrationTest` builds version 1 from
+  `1.json`, adds rows, migrates, and checks the rows and the table; it also opens a version-1 file of either library through
+  `build`.
+  - **Foreign keys are enforced now.** Room switches `PRAGMA foreign_keys` on as soon as one entity declares a foreign key,
+    and `carousel_item` is the first and only one. Deleting a `media` row now deletes its items. That makes the way a post is
+    written matter: `MediaDao.upsert` must stay an in-place `@Upsert` (an update when the row exists, as it is). An
+    `INSERT OR REPLACE` deletes the old row first and would cascade away the items of every carousel a sync saw again.
+    `CarouselItemDaoTest.upsertingThePostAgainKeepsItsItems` pins it, and fails if the upsert becomes a REPLACE.
+  - `deleteLibrary()` also deletes every item explicitly (`CarouselItemDao.deleteAll`), although the cascade would do it.
+  - `CarouselItemDao.replace(pk, items)` (delete, then insert, in one `@Transaction`) needs the post to be stored: the foreign
+    key refuses the items of a post that is gone.
+- **Sync.** A page's carousel items are replaced in the page's own transaction ([Sync engine](#sync-engine)). A `null` list
+  or an empty one keeps the stored items (R2), and an unreadable child leaves a post's items unknown (R4, `null`, no
+  `ShapeChanged`: [`:instagram`](#instagram)). Posts synced before this update have no items until a FULL run or the first
+  open of the post (below). A page that stores items of another shape for a carousel (R20, below) names that post in its
+  outcome, and once the page is committed the engine's `carouselEviction` drops the post's cached item media.
+- **`PacedMediaInfo`** (`data/media/`) is the viewer's one way of asking Instagram about an item: one `mediaInfo` on the
+  Pacer's interactive lane, under the session gates of R76 and R79. It was cut out of `RealVideoSourceResolver` (whose answers
+  are unchanged) so that a reel's link renewal and a carousel's fill ask the same way.
+  - Nothing is sent without a usable session. `isSessionReady` is asked before the request queues and again from inside the
+    Pacer's gate, together with `signals.runSession(epoch)` for the epoch the fetch started under, because the wait for the
+    gate can take seconds.
+  - `fetch(pk)` answers an `Outcome` and throws only `CancellationException`: `Fresh(media)`; `Gone` (`mediaInfo` returned
+    null, Instagram no longer has the item); or `Failed(message, reason)`. The reasons are `NO_SESSION` (nothing sent),
+    `REFUSED` (the Pacer's cooldown or budget refusal; nothing sent), `OFFLINE` (a transient failure or an `IOException`),
+    `NEEDS_ATTENTION` (a login or challenge reply, told to the session layer under the epoch read before the request; a
+    challenge URL is never shown), `RATE_LIMITED` (the Pacer has armed the cooldown) and `UNEXPECTED` (a changed shape, a
+    failing session store, anything unforeseen: its own text is never kept, because it may hold session data).
+- **`CarouselRepository`** (`data/media/`; built only by the container, see [Wiring](#wiring)). Stored items are used as they
+  are. Every call answers, none throws but cancellation, and a failure never deletes the post, its cover or its items.
+  - `items(media, visit)`: the stored items, or, when there are none, the fill: one `mediaInfo`. A post that is not a carousel
+    gets `CoverOnly(null)`. The answers are `Items` (never empty) or `CoverOnly(message)`: only the cover shows and the
+    indicator reads "1/N".
+  - `image(media, position, visit)`: the stored file when there is one; otherwise the download of the item's stored link (the
+    fill first, when there are no items). A link the CDN refuses (`MediaFetcher` returns null for 403, 404 and 410), or an item
+    with no link, renews the post's links, and only a link that differs from the refused one is downloaded. An `IOException` is
+    "Offline: this item isn't cached yet". The CDN's own 429 (`CdnRateLimited`) is "Can't load this item" and renews nothing.
+  - `video(media, position, visit, forceRefresh)`: a `VideoSource.Play(uri, "{pk}_{position}")`. In Mock mode (R3) it is the
+    bundled clip. Otherwise it is the stored link while it has more than 10 minutes left (the reels' rule,
+    `videoLinkNeedsRefresh`), else the stored link while all of the item's bytes are cached (R78), else the link a renewal
+    brings. `forceRefresh` (the player was refused with a 403 or 410) skips the first two and plays only a link that differs
+    from the refused one.
+  - **R9: when the renewal could not be made,** cached bytes still play for the reasons in which Instagram was not asked or
+    not reached (`NO_SESSION`, `REFUSED`, `OFFLINE`), and not when it answered against the item (a login or challenge, a rate
+    limit, gone, anything else). That is the reel resolver's own table, so there is one rule for "may cached bytes play" across
+    reels and items. The cost: an item whose renewal got `NEEDS_ATTENTION` or `RATE_LIMITED` says unavailable even if its bytes
+    are cached, as a reel does.
+  - **Once per visit (R8).** A `CarouselRepository.Visit` holds the visit's one request. The first call that needs it sends it,
+    under a mutex, and every later call of the visit uses what it brought. It is spent from the moment it is tried, whatever
+    comes of it, a cancelled call included (that call may already have sent it): a visit sends AT MOST ONE `mediaInfo`, the
+    fill and any renewal together, and a visit that went offline stays offline until the post is shown again, which makes a new
+    `Visit`. The viewer makes exactly one per settled carousel post ([Viewer](#viewer)). The cost of the strict reading: a
+    cancelled fill leaves the post cover-only until it is shown again.
+  - A renewal's items replace the stored ones (`CarouselItemDao.replace`). A video link that names no expiry is stored with the
+    fetch time plus one hour, the assumed lifetime of R78 (`RealVideoSourceResolver.ASSUMED_LIFETIME_MS`), so it costs no
+    request on every visit; a renewal that brings no items stores nothing and the stored ones stay.
+  - **R20: items of another shape drop the post's cached item media.** Images and item videos are keyed by position, so when
+    a renewal stores items whose count, or whose type at some position, differs from the stored ones (`itemShapeChanged`: a
+    slide deleted, an image swapped for a video), the post's downloaded item images and its `{pk}_*` item videos go, once the
+    items are stored (`itemEviction`, the container's `carouselItemEviction`, which the sync uses too). The same items with
+    renewed links keep everything, so what the owner viewed still shows offline. A fill has nothing stored to compare with. A
+    known gap: a reorder that keeps every position's type is not seen, and the moved positions show the old picture until the
+    post is unsaved or Delete library runs (`TODO.md`). Telling it would mean comparing links, which rests on CDN paths staying
+    the same when Instagram signs them again: that cannot be checked without contacting Instagram, and if wrong it would wipe
+    every carousel's offline images on each sync.
+  - **A post gone or unsaved.** Delete library can run while a request or a download is out, and so can a FULL sync's
+    reconcile, which only marks a post removed (its row stays) and has already evicted its files. So no request is sent and no
+    image file is written for a post that is no longer stored or is marked removed (`isLive`; every viewer list shows only
+    live posts), and a store the foreign key refuses ends as "Can't load this item". The check and the write are not one step,
+    so a delete in between can still leave a file; it only takes space until the next Delete library.
+  - **R16: a video item the player cannot reach.** `unreachable(media, position)` answers "Offline: this item isn't cached
+    yet" unless every byte of the item is cached under `{pk}_{position}`, then "Can't load this item". It sends nothing. The
+    viewer asks it when the player's error is no connection or a timeout ([Viewer](#viewer)).
+  - **Copy.** "Can't load this item"; "Offline: this item isn't cached yet"; "This item is no longer available on Instagram"
+    (`Gone`); "Can't load this item right now: <reason>", where the reason is the Pacer's own ("Cooling down after a rate
+    limit", "The 24-hour request budget is used up"); and `PacedMediaInfo`'s "Instagram session needs attention (Sync screen)"
+    and "Instagram is limiting requests". The debug log (`debugLog`) gets one line per request ("carousel fill: fresh (N
+    items)") and per failed image, never a link or a pk.
+- **`CarouselImageStore`** (`data/media/`) keeps an item's image as `{pk}_{position}.jpg` in `filesDir/carousel` (the real
+  library) or `filesDir/fake-carousel` (Mock mode), app-private, where the OS never evicts it, so an item seen once shows
+  offline. The same rules as `ThumbnailStore`: a key that could leave the folder is refused (`[A-Za-z0-9_]+`, a position of 0 or
+  more), a write is atomic (a `.tmp` file, then a rename), `deleteFor(pk)` removes that post's images (and a partial one), and
+  `deleteAll()` tries every file and throws an `IOException` with a count, never a name or a path, when some stayed.
+  - **Why not Coil's network layer (R1).** The spec first said "Coil's disk cache". Coil 3 here has only `coil-compose` and no
+    network fetcher, so using its network layer means a new dependency and a second HTTP client that would not share the
+    cookieless CDN client's rules. Instead an image is downloaded by the existing `MediaFetcher` (`backend.fetcher`: the CDN
+    client, or the placeholder fetcher in Mock mode) into this store, and Coil only shows the local file
+    (`Thumbnail(path)`), as it does a grid thumbnail. Files also behave like thumbnails: offline after the first view, removed
+    with the post.
+- **Eviction.** The sync's `MediaEviction.eachStep` drops, for each removed pk, its cached video (`VideoCache.remove`), its
+  carousel items' cached videos (`removeCarouselItems`, R6) and its carousel images (`CarouselImageStore.deleteFor`); Delete
+  library removes every image and clears the whole video cache. A reshaped carousel (R20) loses only the last two, through
+  the container's `carouselItemEviction` (`eachStep` too), which the sync runs after the page's commit and a renewal after its
+  store; never the post's own video or its thumbnail.
+- **Pacing.**
+  - **The sync is unchanged and sends no new request.** The items come in the replies it already downloads. R20's drop
+    deletes local files and cache keys only; a dropped image downloads again only when the owner views that item.
+  - **A carousel visit sends at most one `mediaInfo`,** on the interactive lane (a 2 s minimum gap, counted in the 24 h budget
+    and the cooldown), under the same session gates as a reel's link renewal. That one request is the fill and any renewal
+    together: swiping through the items adds no request beyond it, and never starts the next post's prefetch (R11).
+  - **Carousel images download on the existing CDN lane** (R7: 2 concurrent, 0.2–0.8 s jitter, not budgeted), through the
+    cookieless CDN fetcher, on demand only and never with the session; a sync never downloads one. They share that lane with
+    the sync's own thumbnails (a viewer can be open while a sync runs), so they can only lower a rate (an image can wait
+    behind a running sync's thumbnails; the cost is 200–800 ms of first-view jitter per image). A carousel's video items
+    stream through the same cookieless, unpaced video stack as reels.
+  - **No rate, budget or concurrency is raised.** The pinned wiring is in [Wiring](#wiring).
+
+## Viewer
+
+`app/.../ui/viewer/`: `ViewerScreen.kt`, `ViewerViewModel.kt`, `ViewerPlayback.kt`, `CarouselPager.kt`. Playback, link
+renewal and the cache are in [Video](#video).
+
+- **Pagers.** The vertical post pager is unchanged. A carousel post holds a horizontal pager of its items (`CarouselPager`), so
+  a vertical swipe moves between posts and a horizontal one between items, and a horizontal swipe never changes the post. The
+  carousel's `PagerState` is hoisted to `ViewerPage` (`rememberCarouselPagerState`), which draws the dots (`CarouselDots`,
+  bottom centre, above the overlay) from it. It is seeded with the visit's settled item (coerced into the page count), so a
+  rotation, which makes the pager again, does not flip the post to item 0; it is `remember`ed, not saved (the lazy layout
+  would bring a post back on its old item), and `CarouselPager` follows the visit's `settled` when that changes and the owner
+  is not swiping.
+- **Indicator.** "N/M" at the top end (`CAROUSEL_COUNTER_TAG`), where M is the stored items' count when there are any, else
+  `carouselCount` (at least 1), and dots (none for fewer than 2 items). They replace the viewer's old static "1/N" badge; the
+  grid tile keeps its own (`carouselLabel`). The viewer never reads an item's width or height (they may be 0 or mixed): every
+  item is fitted to the screen (`ContentScale.Fit`).
+- **The playable unit.** `Playable(pk, position)`, `position` null for a post that is not a carousel; `SettledPage(index,
+  media, position)` has `.playable`. The player has only the unit whose post AND item are both settled:
+  - `ViewerScreen` hands it to a page only while `playing?.playable == unit`, and `CarouselPager` to an item only when that
+    item is the settled page and a VIDEO (`onlyTheSettledVideoItemDrawsThePlayer` pins the per-page gate);
+  - `playSettledPages`, `playIfStillSettled`, `ViewerViewModel.resolveVideo` and `recover` all take the unit;
+  - `onSettled` stops the player on every settle, so settling on an image item stops the video of the item before it, and
+    swiping to another post stops the carousel's video;
+  - `VideoFrame` is the one video surface, a post's and a carousel video item's alike (the one `ContentFrame`, on a
+    `TextureView`; `VideoWiringGuardTest` requires exactly one `ContentFrame(` in `ViewerScreen.kt` and none in
+    `CarouselPager.kt`).
+- **Post settle and item settle.** `followSettledPages` tells them apart: a post settle (the index or the pk changed) runs
+  `ViewerViewModel.onSettled(media)`, an item settle (the same post, another position) only moves the visit's item and the
+  player. An item settle keeps the visit, the fill and the prefetch the post started; the next post's prefetch is decided once a
+  post, on its first resolved unit (R11, `prefetchDue`), never on an item.
+- **The visit** (`ViewerViewModel.CarouselVisit`). `viewModel.carousel` is a `StateFlow<SettledCarousel?>` (the pk and a
+  `CarouselUiState`) for the settled post only. Each time a carousel post becomes the settled post it gets a new visit, at item
+  0 (R8), which holds:
+  - ONE `CarouselRepository.Visit`: at most one `mediaInfo`;
+  - a `SupervisorJob` child of `viewModelScope` that only leaving the post cancels. The fill (the `items` `Deferred`, started
+    with the visit), the images and the items' video resolves all run in it, so an item swipe, which cancels the settle that
+    waits for them, never cancels a call that may have spent the visit;
+  - each item's image asked at most once, and each video item's refresh after a refusal at most once.
+
+  The same post settling again in place (the list moved under it) keeps its visit and takes the newer row: a sync may have
+  stored its cover since. `CarouselUiState(items, settled, coverOnlyMessage, loading)` is what the pager shows.
+
+  **The settle gate (C1).** A sync that saves or removes a post above the viewed one (a foreground sync keeps committing after
+  the owner leaves Sync for the viewer) changes the list at once, but the pager moves the viewed post's key to its new index
+  only in its next measure. For that instant the settled index held another post: the viewer ended the carousel's visit (back
+  to item 1, its video item stopped) and handed the player the post that slid in. So a settle is reported only where the list
+  and the pager's layout agree (`settledPageOrNull`): a loaded row whose pk differs from the key laid out at the settled index
+  is no settle, and the flow skips it; a placeholder row (whose key is Paging's own) always settles, so the previous post's
+  video still stops while the row loads. A list move then reaches the ViewModel as the same post at its new index, the re-settle
+  in place above; its video item restarts, as a reel does. `ViewerScreenCarouselTest` pins a post saved above and one removed
+  above; `ViewerPlaybackTest` the placeholder rule. While the fill
+  runs it has one page, the stored cover, with a small loading mark (`CAROUSEL_LOADING_TAG`) and "1/N" from `carouselCount`;
+  if the fill fails the cover stays and says why.
+- **Product calls (R10).** Item 0 shows the stored cover at once and is never downloaded when the post has one (the sync took
+  the cover from the first child by the same rule, so a download would fetch the same picture). Any other image downloads when
+  its item settles: on demand, once a visit, not on scrolling into view and not as a prefetch, so a fast fling downloads only
+  the item it ends on; until then the viewer's black shows. A video item has no poster (black; item 0 shows the cover), since
+  posters would cost one CDN request per video item. The cost: 200–800 ms of placeholder on a newly viewed image, and a dark
+  frame before a video item starts.
+- **A refused video item.** A 403 or 410 from the player renews the link once per item per visit (`recoverItem`), after
+  cancelling another post's prefetch (R79), through `CarouselRepository.video(..., forceRefresh = true)` on the visit's own
+  `Visit`, which sends nothing when the visit's request is spent; the item then says "Can't load this item". A player error
+  that is no connection or a timeout (`isNetworkError`: Media3's connection-failed and connection-timeout codes) renews
+  nothing: `CarouselRepository.unreachable` says "Offline: this item isn't cached yet" unless every byte of the item is
+  cached (R16), so a video item never watched through says it is offline, as an unviewed image does, whether its link was
+  still good or not. Any other failure says "Can't load this item"; a reel keeps "Can't play this video". A carousel item's
+  failure is merged into that item (`CarouselUiState.withItemFailure`) and shown centred on it; a reel's stays above "Open on
+  Instagram".
+- **Icon buttons.** "Open on Instagram" at the start of the bottom row, Mute or Unmute at its end, each an `IconButton` in a
+  `TooltipBox` (a `PlainTooltip`: a long press shows its label) on a translucent dark disc (45 % black, the button's 48 dp
+  touch target), the glyph white, no text. The label is the content description and the tooltip: "Open on Instagram"
+  (`ic_open_in_new`), and "Mute" (`ic_volume_up`) while sound is on or "Unmute" (`ic_volume_off`) while it is muted. Mute shows
+  for a REEL or VIDEO, and for a CAROUSEL while its settled item is a video; an image post has only Open on Instagram. The
+  glyphs are Material Symbols (outlined, 24 dp, Apache 2.0) copied into `res/drawable` as vector drawables, so the app does
+  not take the large `material-icons-extended` dependency; the notice is `res/raw/license_material_symbols.txt` (R12: AAPT2
+  refuses upper case and hyphens in resource names). Instagram's logo is not used: the repository is public and the logo is a
+  trademark. The Back arrow stays one of Material's core icons.
+- **Threads.** The two effects that call the player (following the settled units, and the failure recovery) run inside
+  `onMainThread` (`withContext(Dispatchers.Main.immediate)`), because Media3 requires the application looper. In the app they
+  already ran on the main thread, so nothing changes; it keeps them there where a Compose test's dispatcher would resume them
+  on whatever thread woke them (once a Room thread that had applied a snapshot made the player throw). Pinned three ways in
+  `ViewerPlaybackTest` and `ViewerScreenCarouselTest`: an effect started on the IO dispatcher and woken from a background
+  thread still calls a thread-checking player on the main thread only; a source pin that both effects use `onMainThread`; and
+  every player call in the carousel screen tests is checked for its thread.
+- **A test-only overload.** The public `ViewerScreen(source, startIndex, onIndexSettled, onBack)` delegates to `internal
+  ViewerScreen(…, player)`, so a test can pass a player it can watch (a `ForwardingPlayer` that records `stop`, `clear` and
+  `set:<cacheKey>`). Production builds the player with `rememberViewerPlayer`; a change to the screen must keep the delegation.
+
+## Motion
+
+`app/.../ui/common/Motion.kt`, `ui/ReelsNavHost.kt`, `ui/common/MediaGrid.kt` (spec §3.6, as amended).
+
+- **One place.** `Motion.kt` holds every transition. Pages use shared-axis X: forward, the new page slides in from the end by a
+  tenth of its width with a 300 ms fade while the old one slides out to the start by a tenth with a fade; back is the reverse
+  (`sharedAxisEnter`, `sharedAxisExit`, `sharedAxisPopEnter`, `sharedAxisPopExit`). The viewer only fades (`viewerEnter`,
+  `viewerExit`, 300 ms): the post's shared element carries its motion. `motionEnabled(context)` is false when the system's
+  animator duration scale is 0 (Remove animations), and then every factory gives `None` and `sharedMedia` does nothing, so no
+  transition runs; an unset scale counts as 1.
+- **The shared element.** `ReelsNavHost` wraps the `NavHost` in a `SharedTransitionLayout` and provides
+  `LocalSharedTransitionScope`; a private `screen<T>` wrapper around `composable<T>` provides `LocalNavAnimatedVisibilityScope`
+  (the destination's own scope) for every destination. `Modifier.sharedMedia(pk)` uses the key `"media-<pk>"` and sits on the
+  grid tile's thumbnail (a placeholder tile has none) and on the viewer's SETTLED page only: its neighbours are composed too,
+  and only one element on screen may carry a post's key. In the viewer it is on `PostMedia`'s box (`POST_MEDIA_TAG`), which
+  wraps whatever shows, the thumbnail, the playing video or, for a carousel, the whole pager. So the thumbnail giving way to
+  the video, or a carousel moving to another item, never replaces the shared node mid-transition, and a carousel's counter
+  scales with it.
+- **Shared bounds, not a shared element (R14).** `sharedMedia` is `sharedBounds(…, resizeMode =
+  ResizeMode.scaleToBounds())`: each side is laid out at its own size and scaled into the bounds, and the two cross-fade. On
+  the emulator `sharedElement`, which draws only the target's content laid out again at every animated size, made the picture
+  visibly zoom at the start of the shrink (the tile crops its picture and the viewer fits it) and cut a playing video straight
+  to the cover. With scale-to-bounds both
+  pictures land on the same spot, a video's frames keep playing in the overlay as they fade into the cover, and the
+  `TextureView` is never resized mid-transition. `NavigationBackTest`'s page-shape check pins the choice; reverting is one
+  line in `sharedMedia`. The cost: a cross-fade instead of one continuous picture, and the tile's 10 dp rounded clip is not
+  applied during the motion (the overlay is unclipped), so the corners snap round at the end.
+- **The page under the viewer stays put (R15).** When the viewer opens, the grid (or the search results) uses
+  `KeepUntilTransitionsFinished` (`underViewerExit`, an extension on `AnimatedContentTransitionScope` because that is its only
+  public form in Compose 1.12); on the way back it uses `EnterTransition.None`. With the NavHost-wide shared-axis the grid slid
+  while the post grew, and the shrink then landed on the tile's final spot while the tile was still moving. (In 1.12
+  `ExitTransition.None` keeps the page until the end too, so the two read alike; the former states the intent.)
+- **Back from the viewer: `revealTile` (R15).** The viewer still writes its settled index to the previous entry
+  (`VIEWER_INDEX_KEY`), and the grid and the search screen now call `LazyStaggeredGridState.revealTile(index)` in place of
+  `scrollToItem`. It waits one frame (defensive: the effect has started after the grid's first layout in every run seen, and
+  nothing pins the wait); a tile wholly in view stays where it is, so backing out of the post that was tapped lands where it was
+  tapped; a tile partly hidden scrolls just enough, above the top bar's padding or below the bottom padding; a tile taller than
+  the visible run (landscape, a short split-screen window), which can never be wholly in view, aligns by its top rather than
+  being scrolled past it; any other tile goes to the top with `scrollToItem`. The scroll is instant, so the shrink retargets at
+  once. A behaviour change from before (every return scrolled the tile to the top), and what spec §3.6 says: the grid scrolls
+  when the owner swiped to another post. `MediaGridTest` pins each case, and `NavigationBackTest` the grid's and the search
+  results' returns.
+- **Predictive back.** The manifest sets `android:enableOnBackInvokedCallback="true"`. Navigation 2.10's `NavHost` uses its own
+  predictive transitions for the gesture (a 0.7 scale-out of the page being left, a fade in), and a destination's own pop
+  transition does not apply to the gesture, so the gesture first showed the viewer shrinking to a 0.7 card instead of into its
+  tile. `ReelsNavHost` therefore sets `predictivePopEnterTransition` and `predictivePopExitTransition` with the same logic as
+  the pop transitions: the viewer's fade, none for the page under it, shared-axis pop for every other page. The gesture seeks
+  them frame by frame and can be cancelled: letting go short of Back brings the post back full screen, with the viewer still
+  open.
+- **A late first page only fades.** The shared element needs the viewer's first page to exist while the transition runs. That
+  page arrives with Paging's first Room load (about 110 ms after the viewer composes on the emulator), and the viewer's first
+  composition after a cold start stalls the main thread (class loading, JIT, building ExoPlayer: 200 to 500 ms for a debug
+  build on a software emulator). The 300 ms fade can then finish first, and the media appears in place at full size, never
+  flying in from a tile that is gone (`MotionTest.aPageThatShowsAfterTheTransitionShowsInPlace`). So a first open after a cold
+  start on a slow device may just fade, while warm opens grow. The owner's phone, on the release build, is the judge (README
+  section 8). A follow-up, if it looks late there: show the tapped post in the viewer's first frame, before Paging's first load.
+- **Pacing.** Motion adds no request, rate or concurrency.
+
+## App icon
+
+Spec §3.5. An adaptive icon, all vectors: minSdk 29 is above 26, so no raster files and no legacy fallbacks are needed.
+
+- `mipmap-anydpi-v26/ic_launcher.xml` and `ic_launcher_round.xml` (identical) name the three layers, and the manifest sets
+  `android:icon` and `android:roundIcon`.
+  - **Background:** `@color/ic_launcher_background`, `#0F6E56` (`values/ic_launcher_background.xml`).
+  - **Foreground:** `drawable/ic_launcher_foreground.xml`, a masonry of four rounded tiles in light teals in two columns (a
+    tall tile over a short one on the left, a short one over a tall one on the right), with a play triangle in the background
+    colour on the tall right tile.
+  - **Monochrome:** `drawable/ic_launcher_monochrome.xml`, the layer a themed icon uses (Wallpaper & style, Android 13 and up).
+    It is the same shapes in one colour, which the launcher tints by alpha alone. R13: the play triangle is CUT OUT of its tile
+    (an even-odd fill) instead of being a second path, because a themed icon tints every path one colour and a triangle drawn
+    over its tile would vanish into it. The full-colour foreground is as designed.
+- All three are drawn on the 108 dp adaptive canvas, with the content (x and y 30 to 78) inside the 21 to 87 safe zone, the 66
+  dp the launcher's mask never cuts. The foreground has no group or transform, so `AppIconGuardTest` can read its raw path
+  data and measure it.
+- The icon is original to this project, covered by the repository's LICENSE; the three viewer glyphs are Material Symbols
+  ([Viewer](#viewer)).
+
+## Tests of the viewer update
+
+All of them run without Instagram: fakes, an in-memory or file Room database, a Conservative Pacer in virtual time, local data.
+
+- **`:instagram`.** `WebParsersTest` (children in order, a mixed carousel, a child's own size or its image's, a video child
+  without or an image child with `video_versions`, no `carousel_media` and a non-carousel giving `null`, an unreadable child
+  giving `null` (R4), an empty array giving an empty list, twenty children, a child with no image candidate), `FakeLibraryTest`
+  and `FakeInstagramClientTest` (the fake carousel's items, the same for the same seed, on the saved pages and in `mediaInfo`).
+- **Room.** `ReelsDatabaseMigrationTest` (a row in each of version 1's six data tables survives), `CarouselItemDaoTest`
+  (replace, position order, the cascade, the upsert that must not cascade, Delete library), `SchemaBuildGuardTest` (R21's
+  `versionCode`, D4's asset merge). `SyncEngineTest` (items stored with the page, replaced on a re-sync, kept when the reply has
+  none or an empty list, written in the page's transaction; R20's drop for a deleted slide and a type swap, none for the same
+  items or a page that rolls back, and a failing drop that does not stop the run).
+- **Data layer.** `PacedMediaInfoTest` (every outcome and gate), `CarouselRepositoryTest` (the fill, once per visit including a
+  cancelled call, the CDN lane, renewals, R2 on both paths, the cached-video table of R9, R20's drop with a real image store
+  and video cache, a post marked removed mid-download, log lines with no link, host or pk, Mock mode's clip, Delete library),
+  `CarouselImageStoreTest`, `VideoCacheTest` (`removeCarouselItems`), `MediaEvictionTest` (`eachStep`).
+- **Wiring** (source and runtime pins). `BackendWiringGuardTest` (the carousel request's gates in both modes, anchored at both
+  ends, the folders, the construction sites, the eviction, R20's shared drop and Delete library wiring),
+  `InstagramTransportWiringTest` (a Mock mode carousel visit never builds the transport or moves the real budget),
+  `VideoWiringGuardTest` (one `ContentFrame`, no cookie jar, the resolver's gate).
+- **Viewer.** `CarouselPagerTest` (also: a held drag reports no settle, the bright dot follows the item, an item without its
+  image is not the cover, every picture is fitted), `ViewerPlaybackTest` (the unit, in order, with a fake player; the C1 gate's
+  placeholder rule; the main-thread effects), `ViewerViewModelTest` (the visit, R8 and R11, the refresh once per item, R16, the
+  prefetch when the first item was swiped past before it resolved, a real repository over the fake client),
+  `ViewerScreenCarouselTest` (the real screen over a player the test watches and whose every call is checked for its thread;
+  C1's list moves; R16 on screen), `ViewerOverlayTest` (the icon buttons: labels, tooltips, which button when, no text button
+  left), `ViewerPageTest`, `AppIconGuardTest` (the layers, the safe zone, no stroke, no activity icon, each glyph's own outline,
+  the helper drawing the glyph it is given, the notice and its licence terms, the notice kept, no extended icon library).
+- **Motion.** `MotionTest` (the transitions, scale 0, an unset scale, the nav host's use of every factory, the shared key, a
+  late page), `NavigationBackTest` (the real nav host and Room, bounds read frame by frame on a paused clock: open grows from
+  the tile, back shrinks into the tile of the post the viewer is on, a tile in view stays put, the search results' returns, no
+  motion at scale 0, the back gesture shrinks and can be cancelled, a page gesture, the shared-axis direction forward and
+  back), `MediaGridTest` (`revealTile`, a tall tile included), `ManifestGuardTest` (predictive back is on, with its target API).
+- **Emulator, Mock mode.** `SmokeTest` `t6Carousel_aCarouselSwipesToItsSecondItem` and
+  `t7Motion_backFromAFarPostShowsThatPostsTile`. Its viewer controls are matched by content description now.
+- **Lint.** `./gradlew check` runs lint, with no errors. The update adds one warning, left alone: `ObsoleteSdkInt` for the
+  `mipmap-anydpi-v26` folder (minSdk is 29, so `mipmap-anydpi` would do; the spec names the former). `tools:targetApi` on the
+  manifest's back flag and `tools:keep` on the licence notice cleared the other two.
+- **Compose test rules.** The new tests use the v1 `createComposeRule()`, like the rest of the suite. v2 runs composition
+  coroutines on the test thread, and mixing the two in one JVM stopped tiles from loading in `ReelsNavHostTest`,
+  `MediaGridTest` and `ViewerScreenCarouselTest`.
+- **Teardown order.** A test that sets Main ends its ViewModels first and waits for them (`endViewModels`: a cancelled
+  coroutine still resumes on Main to finish, from whichever thread it waited on, and a `resetMain` racing that read throws
+  "Dispatchers.Main is used concurrently with setting it"), then closes the database, then resets Main. A screen test closes
+  its database only after the compose rule has disposed the screen (`closingAfterComposition`), never in an `@After`, where the
+  screen's flows still query it. `SyncViewModelTest`, `ViewerViewModelTest`, `NavigationBackTest`, `ViewerScreenCarouselTest`
+  and `SyncScreenRealPacerNoteTest` follow it.
 
 ## Wiring
 
@@ -1073,8 +1486,32 @@ and `ui/viewer/` (`ViewerPlayback.kt`, `ViewerViewModel.kt`, `ViewerScreen.kt`).
   `cacheDir/video` otherwise; `BackendSelectionTest` runs both) and `videoResolver` (`FakeVideoSourceResolver` in
   Mock mode, else `RealVideoSourceResolver(backend.client, instagramPacer, db.mediaDao(), videoCache, session,
   isSessionReady = { session.state.first() is SessionState.Valid })`, where `session` is both the `SessionSignals`
-  argument and the source of the readiness check) live here too. `syncEngine()` passes a `MediaEviction` over
-  `videoCache.remove`, and `library` gets `clearVideoCache = { videoCache.clear() }`.
+  argument and the source of the readiness check) live here too. `syncEngine()` passes `MediaEviction.eachStep(`
+  `videoCache.remove`, `videoCache.removeCarouselItems`, `carouselImages.deleteFor`), and `library` gets
+  `clearVideoCache = { videoCache.clear() }` and `carouselImages = carouselImages`.
+- **Carousel wiring.**
+  - `carouselImages` (lazy) is a `CarouselImageStore` in `filesDir/fake-carousel` in Mock mode and `filesDir/carousel`
+    otherwise: each library has its own, like its thumbnails and its video cache (R85), so Mock mode's placeholders can never
+    answer for a real item.
+  - `carouselRepository` (lazy, the container's one, which `ViewerViewModel` is built with) builds its `PacedMediaInfo` from an
+    exhaustive `when (backend)`, like `syncEngine()`: a new backend must say which session gate its requests pass. `Real` gets
+    `PacedMediaInfo(backend.client, instagramPacer, session, isSessionReady = { session.state.first() is SessionState.Valid })`,
+    the video resolver's gates (R76/R79). `Fake` gets the fake client, the fake backend's own fast Pacer,
+    `SessionSignals.None` and `isSessionReady = { true }`, so Mock mode can never reach Instagram, the transport or the real
+    budget (R3). The repository itself gets `db.carouselItemDao()`, `db.mediaDao()`, that request, `backend.fetcher` (the
+    cookieless CDN client, or the fake placeholder fetcher), `carouselImages`, `backend.pacer` (whose CDN lane carries the image
+    downloads), `isVideoCached = { key -> videoCache.isFullyCached(key) }`, `sampleClip` (Mock mode's bundled clip, else null),
+    `log = debugLog` and `itemEviction = carouselItemEviction`.
+  - `carouselItemEviction` (R20) is `MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { carouselImages.deleteFor(it) })`:
+    a reshaped carousel's item videos and item images, never the post's own video. `syncEngine()` passes the same one as
+    `carouselEviction`, so the sync and a renewal drop the same things.
+  - `BackendWiringGuardTest` pins all of it as source text: both `PacedMediaInfo` branches and their arguments, no transport, CDN
+    client or Pacer of the repository's own, the folder names, that `PacedMediaInfo(` is constructed only by the container and the
+    video resolver and `CarouselRepository(` only by the container, and the eviction, R20's drop and Delete library wiring.
+    `InstagramTransportWiringTest` runs a whole Mock mode
+    carousel visit (the fill, an image, a video item) and checks that the transport is never built and the real budget
+    does not move. The older guards now read `syncEngine()`'s own Mock branch (the container has other `when (backend)` blocks
+    now), with their assertions unchanged.
 - **Engine signals and gate.** `syncEngine()` is an exhaustive `when (backend)`: `Fake` gets `SessionSignals.None` and a
   gate that is always `USABLE`; `Real` gets the `SessionRepository`, whose signals carry the session epoch, and
   `sessionUsable = session::runSession` (R82: Challenge if the stored state is Challenge, Usable only for a Valid state
@@ -1325,6 +1762,8 @@ Mock mode switch.
 | Instagram access | Private web endpoints, isolated in the `:instagram` JVM module | No official API exposes saved items, and the endpoints change without notice. |
 | API transport | Every API call is a same-origin `fetch()` in a hidden instagram.com WebView page (`WebViewTransport`); the OkHttp client stays only for the cookieless CDN and as the JVM-test transport | OkHttp's first two requests got HTTP 429, and copying headers cannot copy Chromium's TLS and HTTP/2 fingerprint. The page's cookies, client hints and Sec-Fetch headers are the browser's own. |
 | Video | Streamed on demand with per-item link refresh; LRU cache keyed by media `pk` | Gigabytes saved, and no bulk-download pattern. |
+| Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore`, video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). |
+| Motion | A post grows from and shrinks back into its grid tile (shared bounds, scale-to-bounds, key `media-<pk>`); every other page uses shared-axis X; predictive back; nothing animates when the animator duration scale is 0 | `sharedElement` zoomed visibly on the emulator and cut a playing video to the cover (R14); Navigation 2.10's own predictive transitions scale the page out, so the NavHost names its own (R15). |
 | Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds (an older item newly added to a collection included) | Detecting removals needs a full walk, so it stays an explicit, paced action. |
 | Collection names | The website's own GraphQL query, sent by the hidden page; when its doc id goes stale a second, desktop-mode hidden page learns the current one from the site (at most once per 24 h); the last names are kept when that fails | The website answers the first design's collections-list call with a 404. A query id changes with every site deploy, and the owner wants the names to keep working with no computer: no rebuild, no reinstall. |
 | Sync trigger | Manual only, executed by WorkManager | The fewest requests; runs survive leaving the app and resume. |

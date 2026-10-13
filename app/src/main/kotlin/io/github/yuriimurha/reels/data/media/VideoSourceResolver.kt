@@ -3,6 +3,7 @@ package io.github.yuriimurha.reels.data.media
 import android.net.Uri
 import androidx.core.net.toUri
 import io.github.yuriimurha.reels.R
+import io.github.yuriimurha.reels.data.db.CarouselItemEntity
 import io.github.yuriimurha.reels.data.db.MediaEntity
 import io.github.yuriimurha.reels.instagram.MediaType
 
@@ -28,13 +29,19 @@ val MediaEntity.isVideo: Boolean get() = type == MediaType.REEL || type == Media
  * A link about to run out would die mid-playback (spec 8.2). Shared by the resolver and the viewer's prefetch, so both
  * mean the same.
  */
-fun MediaEntity.videoLinkNeedsRefresh(now: Long): Boolean {
-    val expiresAt = videoUrlExpiresAt
-    return videoUrl == null || expiresAt == null || expiresAt - now <= RealVideoSourceResolver.FRESH_MARGIN_MS
-}
+fun MediaEntity.videoLinkNeedsRefresh(now: Long): Boolean = videoLinkNeedsRefresh(videoUrl, videoUrlExpiresAt, now)
+
+/** The same rule for a carousel's video item (spec 2026-10-12 §3.3: "the same rules as reel video links"). */
+fun CarouselItemEntity.videoLinkNeedsRefresh(now: Long): Boolean = videoLinkNeedsRefresh(videoUrl, videoUrlExpiresAt, now)
+
+private fun videoLinkNeedsRefresh(url: String?, expiresAt: Long?, now: Long): Boolean =
+    url == null || expiresAt == null || expiresAt - now <= RealVideoSourceResolver.FRESH_MARGIN_MS
+
+/** The bundled synthetic clip that every video plays in Mock mode (R3). */
+fun sampleClipUri(packageName: String): Uri = "android.resource://$packageName/${R.raw.sample_clip}".toUri()
 
 /** Every fake video plays the bundled synthetic clip. */
 class FakeVideoSourceResolver(private val packageName: String) : VideoSourceResolver {
     override suspend fun resolve(media: MediaEntity, forceRefresh: Boolean): VideoSource? =
-        if (media.isVideo) VideoSource.Play("android.resource://$packageName/${R.raw.sample_clip}".toUri(), media.pk) else null
+        if (media.isVideo) VideoSource.Play(sampleClipUri(packageName), media.pk) else null
 }

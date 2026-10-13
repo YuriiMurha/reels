@@ -12,6 +12,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDisplayed
@@ -25,11 +26,16 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_COUNTER_TAG
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_DOTS_TAG
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_PAGER_TAG
 import io.github.yuriimurha.reels.ui.viewer.VIDEO_SURFACE_TAG
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -196,6 +202,60 @@ class SmokeTest {
         shots.take("home-after-search")
     }
 
+    // --- 6. Carousel ----------------------------------------------------------------------------------------------------
+
+    /** A carousel post swipes left to its second item, and its counter says so (spec 2026-10-12 §3.2). */
+    @Test
+    fun t6Carousel_aCarouselSwipesToItsSecondItem() {
+        val shots = Screenshots(composeRule, "t6")
+        ensureLibrary()
+        openCard("All Saved")
+        composeRule.onAllNodes(tile)[0].performClick()
+        await("the viewer's Open on Instagram") { displayed(openOnInstagram).isNotEmpty() }
+        swipeToCarouselPage()
+
+        // The pager has one page (the cover) until the items are read or filled; the dots come with them.
+        await("the carousel's items (its dots)") { displayed(hasTestTag(CAROUSEL_DOTS_TAG)).isNotEmpty() }
+        val first = textOf(displayed(carouselCounter).single())
+        assertTrue("the counter starts at the first item: $first", first.matches(Regex("1/\\d+")))
+        val total = first.substringAfter('/')
+        shots.take("carousel-first-item")
+
+        displayed(hasTestTag(CAROUSEL_PAGER_TAG)).single().performTouchInput { swipeLeft() }
+
+        await("the counter to read 2/$total") { displayed(carouselCounter and hasText("2/$total")).isNotEmpty() }
+        shots.take("carousel-second-item")
+    }
+
+    // --- 7. Motion ------------------------------------------------------------------------------------------------------
+
+    /**
+     * Back from a post shrinks it into its tile (spec 2026-10-12 §3.6), so after swiping far from the post that was opened, the
+     * grid brings the tile of the post the viewer is on into view. Runs under the emulator's own animation settings.
+     */
+    @Test
+    fun t7Motion_backFromAFarPostShowsThatPostsTile() {
+        val shots = Screenshots(composeRule, "t7")
+        ensureLibrary()
+        openCard("All Saved")
+        composeRule.onAllNodes(tile)[0].performClick()
+        await("the viewer's Open on Instagram") { displayed(openOnInstagram).isNotEmpty() }
+        repeat(FAR_SWIPES) {
+            composeRule.onRoot().performTouchInput { swipeUp(startY = height * 0.8f, endY = height * 0.2f, durationMillis = 250) }
+            composeRule.waitForIdle()
+        }
+        // What the viewer shows of the post it is on: its author and caption, among the other texts on screen.
+        val onScreen = displayed(hasAnyText).flatMap(::textsOf).toSet()
+        assertTrue("the viewer shows no author: $onScreen", onScreen.any { it.startsWith("@") })
+        shots.take("viewer-far-post")
+
+        pressBackUntil("the grid again") { exists(gridTitle("All Saved")) && exists(tile) && !exists(openOnInstagram) }
+        await("the tile of the post the viewer was on, in view") {
+            displayed(tile).any { node -> identityOf(textsOf(node)).let { it.isNotEmpty() && onScreen.containsAll(it) } }
+        }
+        shots.take("grid-at-that-tile")
+    }
+
     // --- Steps -----------------------------------------------------------------------------------------------------------
 
     /** Home shows cards, or, when the fake library is empty, a sync fills it first. */
@@ -259,6 +319,26 @@ class SmokeTest {
         await("a video page within $MAX_SWIPES swipes") { displayed(muteControl).isNotEmpty() }
     }
 
+    /** Swipes the viewer up until the settled page is a carousel (it has the "N/M" counter). About one post in ten is one. */
+    private fun swipeToCarouselPage() {
+        repeat(MAX_CAROUSEL_SWIPES) {
+            if (displayed(carouselCounter).isNotEmpty()) return
+            composeRule.onRoot().performTouchInput { swipeUp(startY = height * 0.8f, endY = height * 0.2f, durationMillis = 250) }
+            composeRule.waitForIdle()
+        }
+        await("a carousel page within $MAX_CAROUSEL_SWIPES swipes") { displayed(carouselCounter).isNotEmpty() }
+    }
+
+    private fun textOf(node: SemanticsNodeInteraction): String =
+        node.fetchSemanticsNode().config[SemanticsProperties.Text].joinToString("") { it.text }
+
+    /** Every text of [node] (a tile's are merged: its badge, its author, its caption). */
+    private fun textsOf(node: SemanticsNodeInteraction): List<String> =
+        node.fetchSemanticsNode().config.getOrElse(SemanticsProperties.Text) { emptyList() }.map { it.text }
+
+    /** A tile's author and caption (its badge comes first and is left out): what the viewer shows of the same post. */
+    private fun identityOf(tileTexts: List<String>): List<String> = tileTexts.dropWhile { !it.startsWith("@") }.take(2)
+
     private fun pressBack() {
         InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
         composeRule.waitForIdle()
@@ -285,8 +365,10 @@ class SmokeTest {
     private fun gridTitle(name: String) = hasText(name) and !hasTestTag("collection-name") and !hasClickAction()
     private val syncChip = hasClickAction() and
         (hasText("Not synced") or hasText("Syncing…") or hasText("Synced ", substring = true) or hasText("⚠", substring = true))
-    private val openOnInstagram = hasText("Open on Instagram")
-    private val muteControl = hasText("Mute") or hasText("Unmute")
+    private val openOnInstagram = hasContentDescription("Open on Instagram") // an icon button: its words are its content description
+    private val muteControl = hasContentDescription("Mute") or hasContentDescription("Unmute")
+    private val carouselCounter = hasTestTag(CAROUSEL_COUNTER_TAG)
+    private val hasAnyText = SemanticsMatcher.keyIsDefined(SemanticsProperties.Text)
 
     private fun exists(matcher: SemanticsMatcher): Boolean = composeRule.onAllNodes(matcher).fetchSemanticsNodes().isNotEmpty()
 
@@ -347,6 +429,9 @@ class SmokeTest {
         const val VIDEO_TIMEOUT_MS = 30_000L
         const val SYNC_TIMEOUT_MS = 180_000L
         const val MAX_SWIPES = 12
+        const val MAX_CAROUSEL_SWIPES = 40
+        /** Far enough that the post's tile is off the grid's first screen. */
+        const val FAR_SWIPES = 8
         const val SEARCH_WORD = "coffee"
         const val FRAME_WIDTH = 54
         const val FRAME_HEIGHT = 96

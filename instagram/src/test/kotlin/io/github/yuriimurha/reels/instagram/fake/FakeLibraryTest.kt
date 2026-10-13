@@ -3,6 +3,7 @@ package io.github.yuriimurha.reels.instagram.fake
 import io.github.yuriimurha.reels.instagram.MediaType
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class FakeLibraryTest {
@@ -26,6 +27,37 @@ class FakeLibraryTest {
         assertTrue(items.any { it.savedCollectionIds.orEmpty().size == 2 }, "some items in two collections")
         assertTrue(items.any { it.thumbnailUrl.startsWith("fake://missing/") }, "some unavailable items")
         assertEquals(items.size, items.map { it.code }.toSet().size, "codes are unique")
+    }
+
+    @Test
+    fun aFakeCarouselHasItsItems() {
+        val items = FakeLibrary().allSaved()
+        val carousels = items.filter { it.type == MediaType.CAROUSEL }
+        assertTrue(carousels.any { (it.carouselCount ?: 0) >= 3 }, "some carousels long enough to hold a video")
+        for (carousel in carousels) {
+            val children = assertNotNull(carousel.carouselItems, carousel.pk)
+            assertEquals(carousel.carouselCount, children.size, carousel.pk)
+            assertEquals(children.indices.toList(), children.map { it.position }, carousel.pk)
+            for (child in children) {
+                // Every third child (positions 2, 5, ...) is a video; the rest are images.
+                val video = child.position % 3 == 2
+                assertEquals(if (video) MediaType.VIDEO else MediaType.IMAGE, child.type, carousel.pk)
+                assertTrue(child.imageUrl.startsWith("fake://thumb/"), "a poster or image for every child")
+                assertEquals(video, child.videoUrl != null, carousel.pk)
+            }
+            if (children.size >= 3) assertTrue(children.any { it.type == MediaType.VIDEO }, carousel.pk)
+        }
+        val urls = carousels.flatMap { it.carouselItems.orEmpty() }.map { it.imageUrl }
+        assertEquals(urls.size, urls.toSet().size, "every child has its own image url")
+        assertTrue(items.filter { it.type != MediaType.CAROUSEL }.all { it.carouselItems == null })
+    }
+
+    @Test
+    fun theSameSeedGivesTheSameCarouselItems() {
+        assertEquals(
+            FakeLibrary(seed = 7, itemCount = 80).allSaved().map { it.carouselItems },
+            FakeLibrary(seed = 7, itemCount = 80).allSaved().map { it.carouselItems },
+        )
     }
 
     @Test

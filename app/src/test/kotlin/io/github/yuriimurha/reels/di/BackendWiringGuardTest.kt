@@ -20,6 +20,10 @@ class BackendWiringGuardTest {
         return code(file.readText())
     }
 
+    /** `syncEngine()`'s Mock mode branch: from its `is Backend.Fake ->` to its `is Backend.Real ->` (the container has other `when`s). */
+    private fun syncEngineFakeBranch(container: String): String =
+        container.substringAfter("fun syncEngine()").substringAfter("is Backend.Fake ->").substringBefore("is Backend.Real ->")
+
     /** Every Kotlin file of `:app`'s `src/main`, comments blanked, by its path under the package root. */
     private fun allMain(): Map<String, String> {
         val root = File("src/main/kotlin/io/github/yuriimurha/reels")
@@ -113,7 +117,7 @@ class BackendWiringGuardTest {
         assertTrue(Regex("""\blog\s*=\s*debugLog\b""").containsMatchIn(engine), "the engine's log: $engine")
         val real = Regex("""is Backend\.Real\s*->\s*\{([^}]*)}""").find(container)?.groupValues?.get(1)
         assertTrue(real != null && Regex("""setNamesStale\s*=\s*settings::setCollectionNamesStale\b""").containsMatchIn(real), "Backend.Real's notice: $real")
-        val fake = container.substringAfter("is Backend.Fake ->").substringBefore("is Backend.Real ->")
+        val fake = syncEngineFakeBranch(container)
         assertTrue(Regex("""setNamesStale\s*=\s*\{\s*}""").containsMatchIn(fake), "Backend.Fake's notice is a no-op: $fake")
         assertFalse("settings" in fake, "Mock mode's engine writes no setting: $fake")
     }
@@ -131,7 +135,7 @@ class BackendWiringGuardTest {
         val real = Regex("""is Backend\.Real\s*->\s*\{([^}]*)}""").find(container)?.groupValues?.get(1)
         assertTrue(real != null && Regex("""repairForced\s*=\s*settings::collectionsForceRepair\b""").containsMatchIn(real), "Backend.Real's flag: $real")
         assertTrue(real != null && Regex("""clearRepairForced\s*=\s*settings::clearCollectionsForceRepair\b""").containsMatchIn(real), "Backend.Real's clear: $real")
-        val fake = container.substringAfter("is Backend.Fake ->").substringBefore("is Backend.Real ->")
+        val fake = syncEngineFakeBranch(container)
         assertTrue(Regex("""repairForced\s*=\s*\{\s*false\s*}""").containsMatchIn(fake), "Backend.Fake is never forced: $fake")
         assertTrue(Regex("""clearRepairForced\s*=\s*\{\s*}""").containsMatchIn(fake), "Backend.Fake clears nothing: $fake")
         assertFalse("settings" in fake, "Mock mode's engine reads no setting: $fake")
@@ -351,6 +355,108 @@ class BackendWiringGuardTest {
         assertTrue(Regex("""libraryAccount\s*=\s*libraryAccount\b""").containsMatchIn(engine), "the engine's account: $engine")
         val definition = container.lines().single { Regex("""val libraryAccount\b""").containsMatchIn(it) }
         assertTrue(Regex("""StoredLibraryAccount\(\s*settings\s*,\s*SyncWorker\.kindOf\(usesFake\)\s*\)""").containsMatchIn(definition), definition)
+    }
+
+    /**
+     * Spec 2026-10-12 §3.3: a carousel's fill or renewal is the same `mediaInfo` as a reel's link renewal, under the same gates.
+     * The real one goes through the one Conservative Pacer with the session's signals and readiness check (R76/R79); Mock mode's
+     * through the fake backend's own client and Pacer, with no session at all, so it can never reach Instagram or the real budget
+     * (R3). Neither gets the transport. `InstagramTransportWiringTest` runs Mock mode's.
+     */
+    @Test
+    fun theCarouselsRequestPassesTheVideoLinksGatesAndMockModesNeverReachesInstagram() {
+        val container = main("di/AppContainer.kt")
+        val infos = callArguments(container, "PacedMediaInfo(")
+        assertEquals(2, infos.size, "one PacedMediaInfo per backend in AppContainer: $infos")
+        assertTrue(
+            Regex("""is Backend\.Fake\s*->\s*PacedMediaInfo\(\s*backend\.client\s*,\s*backend\.pacer\s*,\s*SessionSignals\.None\s*,\s*isSessionReady\s*=\s*\{\s*true\s*}\s*\)""")
+                .containsMatchIn(container),
+            "Mock mode's: PacedMediaInfo(backend.client, backend.pacer, SessionSignals.None, isSessionReady = { true }): $infos",
+        )
+        val real = Regex("""is Backend\.Real\s*->\s*PacedMediaInfo\(""").find(container)
+        assertTrue(real != null, "the real backend's carousel request: $infos")
+        val realArguments = callArguments(container.substring(real.range.first), "PacedMediaInfo(").first()
+        assertTrue(Regex("""^\s*backend\.client\s*,\s*instagramPacer\s*,\s*session\s*,""").containsMatchIn(realArguments), "the real one: $realArguments")
+        assertTrue(
+            Regex("""isSessionReady\s*=\s*\{\s*session\.state\.first\(\)\s+is\s+SessionState\.Valid\s*}""").containsMatchIn(realArguments),
+            "the real one needs isSessionReady = { session.state.first() is SessionState.Valid }: $realArguments",
+        )
+        for (arguments in infos) {
+            assertTrue(Regex("""\b[iI]nstagramTransport\b|cdnHttp|Pacer\(""").find(arguments) == null, "no transport, CDN client or Pacer of its own: $arguments")
+        }
+
+        val repository = callArguments(container, "CarouselRepository(").single()
+        assertTrue(
+            Regex("""^\s*db\.carouselItemDao\(\)\s*,\s*db\.mediaDao\(\)\s*,\s*info\s*,\s*backend\.fetcher\s*,\s*carouselImages\s*,\s*backend\.pacer\s*,""")
+                .containsMatchIn(repository),
+            "the repository's DAOs, request, CDN fetcher (and its Pacer's CDN lane) and image store: $repository",
+        )
+        assertTrue(Regex("""isVideoCached\s*=\s*\{\s*key\s*->\s*videoCache\.isFullyCached\(\s*key\s*\)\s*}""").containsMatchIn(repository), repository)
+        assertTrue(Regex("""sampleClip\s*=\s*if\s*\(\s*usesFake\s*\)\s*sampleClipUri\(\s*context\.packageName\s*\)\s*else\s+null\b""").containsMatchIn(repository), repository)
+        assertTrue(Regex("""\blog\s*=\s*debugLog\b""").containsMatchIn(repository), "the debug-only sink: $repository")
+        assertTrue(Regex("""\b[iI]nstagramTransport\b|cdnHttp|HttpMediaFetcher\(""").find(repository) == null, "only the backend's fetcher: $repository")
+
+        // Each library keeps its own images, like its thumbnails: Mock mode's must never answer for a real item.
+        val images = container.lines().single { Regex("""val carouselImages\b""").containsMatchIn(it) }
+        assertTrue(Regex("""CarouselImageStore\(File\(context\.filesDir,\s*if \(usesFake\) "fake-carousel" else "carousel"\)\)""").containsMatchIn(images), images)
+    }
+
+    /** The carousel's request and repository are built in one place, so the pins above see every one (the video resolver builds its own). */
+    @Test
+    fun theCarouselRequestAndRepositoryAreConstructedOnlyByTheContainer() {
+        val sources = allMain()
+        for ((name, builders) in listOf(
+            "PacedMediaInfo" to setOf("di/AppContainer.kt", "data/media/RealVideoSourceResolver.kt"),
+            "CarouselRepository" to setOf("di/AppContainer.kt"),
+        )) {
+            val construction = Regex("""(?<!class )(?<!\w)$name\s*\(|::\s*$name\b""")
+            val users = sources.mapValues { (_, text) -> text.lines().filterNot { it.trimStart().startsWith("import ") }.joinToString("\n") }
+                .filterValues { construction.containsMatchIn(it) }.keys
+            assertEquals(builders, users, "$name is constructed only by $builders")
+        }
+        val resolver = callArguments(main("data/media/RealVideoSourceResolver.kt"), "PacedMediaInfo(").single()
+        assertEquals("client, pacer, signals, isSessionReady", resolver.trim(), "the resolver's request is built from what the container gave it")
+    }
+
+    /**
+     * A post the sync finds unsaved loses its cached video, its carousel items' cached videos (R6, keyed `{pk}_{position}`:
+     * `VideoCacheTest` runs `removeCarouselItems`) and its downloaded carousel images; Delete library removes them all.
+     */
+    @Test
+    fun unsavingAndDeleteLibraryRemoveTheCarouselImagesAndVideos() {
+        val container = main("di/AppContainer.kt")
+        val engine = callArguments(container, "SyncEngine(").single()
+        // Each step on its own (`MediaEvictionTest` runs eachStep): one that fails skips nothing else.
+        assertTrue(Regex("""eviction\s*=\s*MediaEviction\.eachStep\(""").containsMatchIn(engine), "the engine's eviction: $engine")
+        val steps = callArguments(engine, "MediaEviction.eachStep(").single()
+        for (call in listOf("videoCache.remove", "videoCache.removeCarouselItems", "carouselImages.deleteFor")) {
+            assertTrue(
+                Regex("""\{\s*${Regex.escape(call)}\(\s*it\s*\)\s*}""").containsMatchIn(steps),
+                "the eviction must have the step { $call(it) }: $steps",
+            )
+        }
+        val library = callArguments(container, "LibraryRepository(").single()
+        assertTrue(Regex("""\bcarouselImages\s*=\s*carouselImages\b""").containsMatchIn(library), "Delete library: $library")
+    }
+
+    /**
+     * R20: a carousel whose items changed shape loses its item images and its items' cached videos, never the post's own
+     * video, and the sync and a renewal drop the same things (`SyncEngineTest`, `CarouselRepositoryTest` run the rule).
+     */
+    @Test
+    fun aReshapedCarouselDropsItsItemMediaInTheSyncAndOnARenewal() {
+        val container = main("di/AppContainer.kt")
+        val declaration = Regex("""val carouselItemEviction\b[^=]*=\s*MediaEviction\.eachStep\(""").find(container)
+        assertTrue(declaration != null, "carouselItemEviction is one MediaEviction.eachStep")
+        val steps = callArguments(container.substring(declaration.range.first), "MediaEviction.eachStep(").first()
+        for (call in listOf("videoCache.removeCarouselItems", "carouselImages.deleteFor")) {
+            assertTrue(Regex("""\{\s*${Regex.escape(call)}\(\s*it\s*\)\s*}""").containsMatchIn(steps), "the drop must have { $call(it) }: $steps")
+        }
+        assertFalse(Regex("""videoCache\.remove\(""").containsMatchIn(steps), "never the post's own video: $steps")
+        val engine = callArguments(container, "SyncEngine(").single()
+        assertTrue(Regex("""\bcarouselEviction\s*=\s*carouselItemEviction\b""").containsMatchIn(engine), "the sync: $engine")
+        val repository = callArguments(container, "CarouselRepository(").single()
+        assertTrue(Regex("""\bitemEviction\s*=\s*carouselItemEviction\b""").containsMatchIn(repository), "a renewal: $repository")
     }
 
     @Test

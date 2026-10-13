@@ -34,7 +34,7 @@ class VideoWiringGuardTest {
     fun theRealResolverIsGivenTheSessionReadinessCheck() {
         val arguments = callArguments(main("di/AppContainer.kt"), "RealVideoSourceResolver(").single()
         assertTrue(
-            Regex("""isSessionReady\s*=\s*\{[^}]*session\.state\.first\(\)\s+is\s+SessionState\.Valid""").containsMatchIn(arguments),
+            Regex("""isSessionReady\s*=\s*\{\s*session\.state\.first\(\)\s+is\s+SessionState\.Valid\s*}""").containsMatchIn(arguments),
             "the resolver needs isSessionReady = { session.state.first() is SessionState.Valid }: $arguments",
         )
     }
@@ -58,11 +58,18 @@ class VideoWiringGuardTest {
         assertTrue("clearVideoCache" in libraries.single() && "videoCache.clear()" in libraries.single(), "Delete library: ${libraries.single()}")
     }
 
-    /** A video request carries no cookies (spec 8.3): nothing on the video path may touch the jar or Instagram's API client. */
+    /**
+     * A video request carries no cookies (spec 8.3), and neither does a carousel image (spec 2026-10-12 §4): nothing on the
+     * video or carousel path may touch the jar or Instagram's API client. Its one request goes through the client it is given.
+     */
     @Test
     fun theVideoPathNeverTouchesACookieJar() {
         val forbidden = Regex("""CookieHandler|CookieManager|CookieStore|cookieStore|CookieJar|instagramHttp|instagramTransport|InstagramTransport|WebViewTransport|setDefaultRequestProperties|"Cookie"""")
-        for (path in listOf("data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt", "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt")) {
+        for (path in listOf(
+            "data/media/VideoCache.kt", "data/media/RealVideoSourceResolver.kt", "data/media/VideoSourceResolver.kt", "ui/viewer/ViewerScreen.kt",
+            "ui/viewer/ViewerViewModel.kt", "ui/viewer/ViewerPlayback.kt", "ui/viewer/CarouselPager.kt",
+            "data/media/PacedMediaInfo.kt", "data/media/CarouselRepository.kt", "data/media/CarouselImageStore.kt",
+        )) {
             val hit = forbidden.find(main(path))
             assertTrue(hit == null, "$path must not use a cookie jar or the API client: ${hit?.value}")
         }
@@ -96,5 +103,8 @@ class VideoWiringGuardTest {
         val frames = callArguments(main("ui/viewer/ViewerScreen.kt"), "ContentFrame(")
         assertEquals(1, frames.size, "expected exactly one ContentFrame in the viewer: $frames")
         assertTrue("SURFACE_TYPE_TEXTURE_VIEW" in frames.single(), "the viewer's ContentFrame must use a TextureView: ${frames.single()}")
+        // A carousel's video item draws through that same frame (VideoFrame), never a ContentFrame of its own.
+        assertTrue("ContentFrame(" !in main("ui/viewer/CarouselPager.kt"), "the carousel must draw video through VideoFrame")
+        assertTrue("VideoFrame(" in main("ui/viewer/CarouselPager.kt"), "the carousel's video item uses VideoFrame")
     }
 }

@@ -19,6 +19,7 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.MediaGrid
+import io.github.yuriimurha.reels.ui.common.revealTile
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,7 +37,7 @@ fun GridScreen(
     val gridState = rememberLazyStaggeredGridState()
     LaunchedEffect(returnedIndex) {
         if (returnedIndex != null) {
-            gridState.scrollToItem(returnedIndex)
+            gridState.revealTile(returnedIndex)
             // Consume it once, so a recreation of this entry doesn't jump back to a stale index.
             onReturnedIndexConsumed()
         }
