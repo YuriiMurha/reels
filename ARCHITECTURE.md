@@ -6,55 +6,40 @@ this file describes only what exists.
 
 ## Status
 
-The code for M0 to M6 is complete and unit-tested, with fakes and MockWebServer only. No agent has logged in to
-Instagram or sent it a request, and the emulator only ever ran the debug build in Mock mode or the release build logged
-out (once also on the fake backend, through a temporary local edit), plus the hidden page's and the repair page's own
-tests, which load only local servers. What is still unconfirmed needs the owner's phone (the README's checklist, `TODO.md`):
+The code for M0 to M6 and the viewer update is complete and unit-tested with fakes, MockWebServer and the emulator in Mock
+mode. Agents never log in to Instagram or send it a request; everything below that says "on the phone" was checked by
+the owner on their own phone with a throwaway account, from 2026-10-08 to 2026-10-14 (`PROGRESS.md` has each run).
 
-- **The WebView transport.** The first two API requests the app made on the owner's phone, sent by OkHttp before this
-  change, were answered HTTP 429. Every API call now runs inside a hidden instagram.com page ([Transport](#transport)),
-  which has never met Instagram. First on the phone: the hidden page loads and one request answers 200, Who am I if
-  Logged in, otherwise the login check (R102) (README section 5, "After an update that changes how the app talks to
-  Instagram").
-- **Collection names.** The website answers the first design's collections-list call with a 404. The names now come
-  from the website's own GraphQL query, sent by the same hidden page, and when Instagram changes that query's id the app
-  learns the new one from the site itself, on the phone ([Collection names](#collection-names)). Built and tested with
-  fakes, MockWebServer and the emulator's local server only: the query and the repair have never met Instagram. Three facts
-  about the query are the plan's stated defaults, marked "assumed" in the code, until the phone confirms them: how a
-  rejected id is answered (STALE), the name of the page-2 cursor variable, `after` (CURSOR), and that the owner's own
-  collections have digits-only ids while the automatic ones ("All posts", audio) do not (AUTO). First on the phone: the
-  README box "After the collection names update". It settles AUTO (no "All posts" or audio card) and shows a real repair
-  (Forget, then a Sync), but not every fact: Forget no longer sends a wrong id (R18), so STALE stays assumed until Instagram
-  really changes the id. CURSOR held on the phone on 2026-10-11 (run 6, a Sync, DONE): it stored 41 collections of the
-  owner's with no "Collection N" placeholder, and with 12 a page every names page from the second on was asked for with the
-  page before's `page_info.end_cursor` as `after`.
-- **M2:** the WebView login itself.
-- **M3:** the endpoints, headers and JSON shapes. They are candidates from instaloader and instagrapi, pinned by
-  synthetic fixtures, until the Adapter lab shows the real responses. The login check's endpoint
-  (`accounts/edit/web_form_data/`) and the mobile web app id (`1217981644879628`, from a capture of the mobile site) are
-  as new as the transport. Spike question 2 is answered: every saved item lists its collections in
-  `saved_collection_ids` (2026-10-09).
-- **M4:** a real Sync and Full sync, the budgets, the cooldown display and the challenge stop.
-- **M5:** playing real reels, link renewal and the cache.
-- **M6:** the release build's hidden-page transport, real client, CDN fetcher and WebView login under R8.
-- **The viewer update (2026-10-12): carousels, icon buttons, the app icon and motion.** Built and tested on fakes, in
-  JVM and Compose tests, and on the emulator in Mock mode (the swipe, the icon buttons, the grow and shrink and the
-  back gesture were seen there); no agent has met a real carousel. Its final review (2026-10-13) added R16 to R22 (spec
-  §6), each fix with a test, and R23 (2026-10-13) fetches an open carousel's other pictures ahead, one at a time, on the CDN
-  lane; R25, from its review, lets a refused link ahead spend the visit's one renewal; R26 (2026-10-13, after the owner found
-  carousel videos still slow to start on the phone) shows a video item's poster until its first frame and writes the first
-  megabyte of each video item ahead, after the pictures, on the same queue; R27, from its review, keeps a start refused with
-  anything but a 403 or 410 from changing what the item's play costs. Its database is version 2, and
-  `versionCode` follows it (R21): a build from before it is refused instead of installed. Still unconfirmed, on the owner's phone (README section 8, "The viewer update"):
-  - that a real carousel's `carousel_media` reads as parsed (one more of the M3 shape candidates, pinned by a synthetic
-    fixture only), that its images load and its video items play, and that an expired link is renewed by the one
-    `mediaInfo` a visit may send ([Carousels](#carousels));
-  - that a real carousel's video item shows its poster and starts quickly when the owner swipes to it (R26): the poster, the
-    start written ahead and the player's 1 s start buffer have met only fakes and a local test server ([Viewer](#viewer));
-  - the launcher icon and its themed layer ([App icon](#app-icon));
-  - the page push (R24), which replaced the shared axis after the owner's first look at the motion on the phone
-    (2026-10-13: the grow and shrink and the gestures were fine there), and whether a debug build's first open after a
-    cold start only fades ([Motion](#motion)).
+**Confirmed on the phone:**
+
+- **The WebView transport.** The hidden instagram.com page loads, the login check and the saved feed answer 200, and every
+  sync since has run through it ([Transport](#transport)).
+- **M2, the WebView login.** Logging in through Instagram's own page works, and the session is read from the WebView's
+  cookie store.
+- **Collection names.** The website's own GraphQL query names the collections, and a forced repair learned the id from
+  the real desktop Saved page ([Collection names](#collection-names)). Two of the three assumed facts held: AUTO (the
+  owner's collections have digits-only ids and the automatic ones are left out, with no placeholder) and CURSOR (41
+  collections at 12 a page, each page from the second on asked with the page before's `page_info.end_cursor` as `after`,
+  2026-10-11).
+- **M4, real sync.** A Sync stored 1,393 items in 72 requests (2026-10-11), and a Full sync saw 1,416 in 73 requests,
+  with 26 new and 3 removed (2026-10-13). A cooldown armed by a 429 showed on Sync with its minutes left (2026-10-11).
+- **M5, video.** A reel plays, loops and replays offline from the cache.
+- **The viewer update.** The Room 1 to 2 upgrade kept the library; carousels swipe, and their pictures (R23) and video
+  starts (R26) load ahead; an unviewed picture offline says so (R16); the icon buttons, the launcher icon and its themed
+  layer, the grow and shrink, the back gesture and the page push (R24) all work. With fresh links a carousel visit sends no
+  API request.
+
+**Still open** (`TODO.md`, and the checklists in [`docs/GUIDE.md`](docs/GUIDE.md) section 8):
+
+- **M3:** the Adapter lab's answers to the spike questions other than question 2 (answered 2026-10-09: every saved item
+  lists its collections in `saved_collection_ids`). Until then the endpoints and JSON shapes are the candidates from
+  instaloader and instagrapi, pinned by synthetic fixtures, plus what the syncs above have shown to parse.
+- **STALE:** how Instagram answers a names-query id it no longer runs stays assumed until it really changes the id.
+- **Link renewal:** an expired reel or carousel link renewed by the one `mediaInfo` a visit may send, and a 403/410
+  recovered.
+- **A carousel video item offline,** and the challenge stop, which only a real challenge can show.
+- **M6:** the release build on the phone (the hidden-page transport, the real client, the CDN fetcher and the WebView
+  login under R8), and its first open after a cold start growing from the tile.
 
 A debug build starts in Mock mode (the fake library); a release build always uses the real one.
 
@@ -155,7 +140,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
   - **Not exercised under R8** (it needs Instagram, which no agent contacts): the real client (the hidden-page transport
     with its `ig_fetch.js` asset and `androidx.webkit` message listener, and the JSON parsing in `:instagram`), the CDN
     fetcher (OkHttp) and the WebView login.
-- **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, README "Automated smoke tests"):
+- **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, `docs/GUIDE.md` section 3, "Automated smoke tests"):
   `SmokeTest` drives the debug app through its real UI on the emulator, in Mock mode: Home, Sync (logged-out session, the
   Developer section, a fake Sync to the end), grid, viewer, video playback, a carousel swiped to its second item (`t6`), back
   from a post far down the list to that post's tile (`t7`) and Search, with a screenshot per step in the
@@ -181,8 +166,8 @@ A debug build starts in Mock mode (the fake library); a release build always use
   `SchemaBuildGuardTest` fails when a schema bump leaves it behind. So a build from before a schema change has a lower code and
   Android refuses it (`INSTALL_FAILED_VERSION_DOWNGRADE`) instead of installing over the upgraded library, where Room, with no
   way back and no destructive fallback (there must be none: it would wipe the library and the request log), would fail at
-  every start. The README tells the owner never to uninstall or clear data to get past the refusal, but to install a current
-  build.
+  every start. The guide (`docs/GUIDE.md`) tells the owner never to uninstall or clear data to get past the refusal, but to install a
+  current build.
 - **Manifest.** `android:enableOnBackInvokedCallback="true"` on the application (predictive back, [Motion](#motion)), with
   `tools:targetApi="33"` (the attribute is read from API 33 on; minSdk is 29), and `android:icon` / `android:roundIcon` ([App
   icon](#app-icon)); `ManifestGuardTest` and `AppIconGuardTest` pin them, and no activity may name an icon of its own.
@@ -1599,8 +1584,8 @@ renewal and the cache are in [Video](#video).
   composition after a cold start stalls the main thread (class loading, JIT, building ExoPlayer: 200 to 500 ms for a debug
   build on a software emulator). The 300 ms fade can then finish first, and the media appears in place at full size, never
   flying in from a tile that is gone (`MotionTest.aPageThatShowsAfterTheTransitionShowsInPlace`). So a first open after a cold
-  start on a slow device may just fade, while warm opens grow. The owner's phone, on the release build, is the judge (README
-  section 8). A follow-up, if it looks late there: show the tapped post in the viewer's first frame, before Paging's first load.
+  start on a slow device may just fade, while warm opens grow. The owner's phone, on the release build, is the judge
+  (`docs/GUIDE.md` section 8). A follow-up, if it looks late there: show the tapped post in the viewer's first frame, before Paging's first load.
 - **Pacing.** Motion adds no request, rate or concurrency.
 
 ## App icon
@@ -1899,7 +1884,7 @@ Mock mode switch.
   `composable<AdapterLabRoute>` in `ReelsNavHost.kt` each sit inside an `if (BuildConfig.DEBUG)` block, `adapterLab` is
   referenced only from `di/AppContainer.kt` and `ui/lab/`, and `AdapterLabScreen` paces with `container.instagramPacer` and
   never touches the backend (whose pacer is the fast fake one in Mock mode).
-- The README's "Adapter lab" section is the owner's procedure.
+- `docs/GUIDE.md` section 7, "Adapter lab and the spike handback", is the owner's procedure.
 
 ## Session
 

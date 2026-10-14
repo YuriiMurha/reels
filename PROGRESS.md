@@ -708,3 +708,46 @@ with the request log captured live (`adb logcat -s InstagramHttp`) and the libra
   cursor was used and works (recorded in #14).
 - **Still open** (TODO): an expired carousel link renewed once, a video item offline, the first open after a cold start on
   the release build, the release build itself, the Adapter lab answers, STALE, an expired reel link and a 403/410 recovered.
+
+## 2026-10-14: a README for visitors; the owner's manual moves to `docs/GUIDE.md`
+
+The repo is public, and its README was the owner's 1,145-line operating manual (setup on a Mac, phone checklists, rollout
+boxes, troubleshooting), with a "What works today" table that still said nothing had met Instagram. Someone who finds the
+repo could not tell quickly what it is, whether to use it, or how to try it.
+
+- **The manual moved** (`git mv`) to `docs/GUIDE.md`, its content kept, with the same section numbers and headings, so
+  "section N" and every anchor still lead to the same place. Its intro now says it is the detailed guide for running the
+  app on a real phone; its links are fixed for the new folder; "What works today" now gives the status as of this date,
+  from `TODO.md` and the entries above (the phone checks of 2026-10-08, 2026-10-11 and 2026-10-13/14, and what is still
+  open); and the two rollout boxes and the viewer update's checklist each start with a one-line status.
+- **The new `README.md`** (about 250 lines) is for visitors: what the app is and does not do; a warning (Instagram's
+  Terms of Service, a throwaway account only, no store and no support, everything on the phone, the real pacing numbers
+  from `PacingPolicy.Conservative` and `Cooldowns`); the features; how it works, with a small diagram; Mock mode on an
+  emulator and the test commands; the requirements (Android Studio's JDK, API 37 to compile, minSdk 29, targetSdk 36,
+  `JAVA_HOME` and `ANDROID_HOME` with placeholder paths); a short summary of real use that links to the guide; the
+  project layout; a map of the docs; the rules for forks; the license.
+- **Screenshots.** Three from the emulator smoke suite's own run in Mock mode (generated data only): the Saved screen,
+  a grid and a carousel in the viewer, downscaled to 450 × 1000 with their metadata chunks removed, in `docs/images/`.
+- **References.** `TODO.md`, `ARCHITECTURE.md`, `gradle.properties`, `app/build.gradle.kts`, two test comments
+  (`CarouselRepositoryTest`, `SyncEngineTest`) and the viewer update spec's R21 now point at `docs/GUIDE.md`; the four
+  plans that edited the README carry a note where it went (their steps are left as they were run). No test or guard reads
+  `README.md`: the secret guard's own test only writes one into its throwaway repository. Past entries here are unchanged.
+- **Checked.** `./gradlew assembleDebug`, `:instagram:test :app:testDebugUnitTest`, `connectedDebugAndroidTest` on the
+  emulator (54 tests, none failed or skipped), `scripts/test-secret-guard.sh` and `./gradlew check`; every relative link
+  and anchor in the edited docs resolves.
+- **Pacing.** Nothing changed: docs and comments only. **Safety.** Nothing contacted Instagram, and the phone was not
+  touched.
+
+## 2026-10-14: two phone facts recorded late, and the status brought up to date
+
+Read from the phone's library (the `sync_run` table, counts only) and the owner's own reports, for `ARCHITECTURE.md`'s new
+status section:
+
+- **The 2026-10-11 evening Sync** (run 6, QUICK, DONE): 72 requests, 1,393 new items, 1,392 thumbnails cached, one failure
+  (a thumbnail). The account's library had grown since the first Sync that afternoon (3 requests, 10 items).
+- **The 2026-10-13 Full sync** (run 7, DONE): 73 requests, 1,416 items seen, 26 new, 3 removed.
+- **A cooldown on Sync** (2026-10-11): Sync showed a cooldown with its minutes left (1,440), armed by a 429 an earlier build had
+  received; the owner cleared it by hand (a throwaway account). The budget display and the
+  challenge stop are still not reported.
+- `ARCHITECTURE.md`'s Status section now lists what the phone confirmed and what is still open; `CLAUDE.md` names the
+  README and `docs/GUIDE.md` among the docs to keep current.

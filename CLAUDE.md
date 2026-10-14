@@ -10,6 +10,8 @@ never distributed.
 - `PROGRESS.md`: append-only history. Add a dated entry per meaningful step; never edit or delete past entries.
 - `ARCHITECTURE.md`: the app as it exists now (modules, data flow, decisions). Update it in the same commit
   as the code that changes it.
+- `README.md`: the front page for visitors to the public repo (what it is, the disclaimer, how to try it). Keep it short;
+  the step-by-step phone guide, checklists and troubleshooting live in `docs/GUIDE.md`.
 
 ## Hard rules
 
