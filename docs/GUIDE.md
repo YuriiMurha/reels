@@ -533,7 +533,9 @@ A carousel post keeps all its items, and the viewer shows them on demand, as it 
 - **When a carousel changes.** If the poster deletes a slide (or swaps an image for a video), the next sync or link renewal
   drops that post's downloaded images and cached videos, so a shifted item never shows the old picture; they download again
   when viewed. The app also keeps each slide's own Instagram id (the database is version 3 now), so a reorder of slides of
-  the same kind drops them too, and the viewer shows the new pictures at once, not ones it still held in memory. Carousels
+  the same kind drops them too, and the viewer shows the new pictures at once, not ones it still held in memory. The
+  first slide is the exception: item 0 and the grid tile show the post's stored cover, which a sync writes only once, so
+  after a change to slide 0 they keep the old cover (a known gap, in `TODO.md`). Carousels
   stored before version 3 get their slides' ids from the next sync that reaches them, or the next renewal of their links,
   with nothing dropped; a reorder made before then can still show the old pictures at the moved positions until the post
   is unsaved or **Delete library** runs. The slides' ids have only met made-up test data so far: if a real carousel's
