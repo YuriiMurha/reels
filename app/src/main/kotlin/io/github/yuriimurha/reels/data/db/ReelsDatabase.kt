@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MediaEntity::class, MediaFts::class, CollectionEntity::class, CollectionMediaEntity::class,
         SyncRunEntity::class, SyncCursorEntity::class, ApiRequestEntity::class, CarouselItemEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class ReelsDatabase : RoomDatabase() {
@@ -42,7 +42,7 @@ abstract class ReelsDatabase : RoomDatabase() {
          */
         fun build(context: Context, name: String, callback: RoomDatabase.Callback? = null): ReelsDatabase =
             Room.databaseBuilder(context, ReelsDatabase::class.java, name)
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .apply { if (callback != null) addCallback(callback) }
                 .build()
     }
@@ -61,5 +61,16 @@ val MIGRATION_1_2: Migration = object : Migration(1, 2) {
                 "PRIMARY KEY(`parentPk`, `position`), " +
                 "FOREIGN KEY(`parentPk`) REFERENCES `media`(`pk`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         )
+    }
+}
+
+/**
+ * Version 3 (R28) adds `carousel_item.childPk`, a nullable text column, and changes nothing else: every row stays, its new
+ * column null ("unknown", which never drops anything, [itemShapeChanged]) until the next sync or renewal stores the item again.
+ * An `ADD COLUMN` puts it last, where `3.json` has it too.
+ */
+val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `carousel_item` ADD COLUMN `childPk` TEXT")
     }
 }

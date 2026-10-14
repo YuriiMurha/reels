@@ -40,6 +40,11 @@ the owner on their own phone with a throwaway account, from 2026-10-08 to 2026-1
 - **A carousel video item offline,** and the challenge stop, which only a real challenge can show.
 - **M6:** the release build on the phone (the hidden-page transport, the real client, the CDN fetcher and the WebView
   login under R8), and its first open after a cold start growing from the tile.
+- **R28, a carousel child's own id (2026-10-14).** The database is version 3 now, and `versionCode` 3 follows it (R21): a
+  build from before it is refused instead of installed. The 2 to 3 upgrade has run only on the emulator, and the child id
+  has met only a synthetic fixture: whether a real carousel's children carry a readable `pk` (or `id`) shows in the Adapter
+  lab's Media info shape for a carousel ([`docs/GUIDE.md`](docs/GUIDE.md) section 7). If they do not, R28 silently does
+  nothing and R20's count and type rule still applies ([Carousels](#carousels)).
 
 A debug build starts in Mock mode (the fake library); a release build always uses the real one.
 
@@ -84,7 +89,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Adapter lab (core) | `instagram/.../lab/` | One request per call; a redacted shape and a scrubbed copy of the answer (spec 6.3). [Details](#adapter-lab-core). |
 | `:app` | `app/` | Android app. Backup and device transfer are disabled (`data_extraction_rules.xml`). |
 | Secret guard | `.githooks/pre-commit`, `scripts/test-secret-guard.sh` | Blocks staged HAR, session, cookie and signing files (`keystore.properties`, `*.jks`, `*.keystore`, `*.p12`, `*.pfx`; compared in lower case), `sessionid` values, `Cookie:` headers, exported cookie dumps and `csrftoken` values. Enable per clone with `git config core.hooksPath .githooks`. |
-| Database | `app/.../data/db/` | Room v2: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `carousel_item` (a carousel post's items, a foreign key to `media` with cascade delete), `sync_run`, `sync_cursor`, `api_request`. Schemas `1.json` and `2.json` exported to `app/schemas/`. `deleteLibrary()` keeps `api_request`. [Details](#carousels). |
+| Database | `app/.../data/db/` | Room v3: `media` (+ FTS4 `media_fts`, unicode61), `collection` (with the `__all__` pseudo-collection), `collection_media` (`sortKey`), `carousel_item` (a carousel post's items, each with its child's own Instagram id when known, R28; a foreign key to `media` with cascade delete), `sync_run`, `sync_cursor`, `api_request`. Schemas `1.json`, `2.json` and `3.json` exported to `app/schemas/`; migrations 1 to 2 and 2 to 3. `deleteLibrary()` keeps `api_request`. [Details](#carousels). |
 | Library | `app/.../data/library/` | `LibraryRepository` (home cards, Paging 3 per `MediaSource`, `deleteLibrary()` which also forgets the library's Instagram account through an injected `forgetAccount` (R84; after the rows are gone; a failure there does not stop the rest and does not escape: `deleteLibrary()` answers `LibraryDeletion.ACCOUNT_RECORD_KEPT`, or `CACHED_FILES_KEPT` when a thumbnail, a carousel image or the video cache could not be emptied (`ThumbnailStore.deleteAll()` and `CarouselImageStore.deleteAll()` throw once they have tried every file), or both, and `SyncViewModel` says so under the Delete library button), then clears "Couldn't refresh collection names" through an injected `clearNamesStale` (C-M5: the real library's container passes `settings.setCollectionNamesStale(false)`, Mock mode's nothing; a failure is swallowed, only the notice would be wrong), and clears the thumbnails, the carousel images (an injected `CarouselImageStore`) and the cached videos (through an injected `clearVideoCache`); no failure of these fails the delete, the rows are already gone, and each is reported), `FtsQuery` (sanitises search input into prefix terms), `MediaSource` (serialisable grid/viewer source). |
 | Media files | `app/.../data/media/` | `ThumbnailStore` (`{pk}.jpg` in `filesDir/thumbs` for the fake library or `filesDir/library-thumbs` for the real one, chosen by `AppContainer`; atomic writes, key validation), `CarouselImageStore` (`{pk}_{position}.jpg` in `filesDir/fake-carousel` or `filesDir/carousel`, the same rules), the `MediaFetcher` contract, `FakeMediaFetcher` (placeholder JPEGs) and `HttpMediaFetcher` (the real backend's CDN downloads, see [Wiring](#wiring)). |
 | Carousels | `app/.../data/media/CarouselRepository.kt`, `PacedMediaInfo.kt`, `CarouselImageStore.kt`, `data/db/CarouselItemDao.kt`, `ui/viewer/CarouselPager.kt` | A carousel post's items, read from the saved feed the sync already downloads, shown in the viewer on demand: images through the CDN lane (an open post's other pictures fetched ahead, one at a time, R23, its video items' posters among them, then the first megabyte of each video item, R26), video items through the video cache, at most one `mediaInfo` a visit. [Details](#carousels). |
@@ -96,7 +101,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
 | Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 home loads per user action (counted again after an idle close), plus at most one repair page view of the owner's Saved page per 24 h or per Forget. [Details](#wiring). |
-| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages push, the new page sliding in over the last (R24), and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
+| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Every picture is a local file shown by `Thumbnail` through Coil's one loader, which `ReelsApp` provides and which keys a file by its path, time and size ([Carousels](#carousels), R28's review). Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages push, the new page sliding in over the last (R24), and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
 | App icon | `app/src/main/res/mipmap-anydpi-v26/`, `drawable/ic_launcher_*.xml` | An adaptive icon, all vectors, with a monochrome layer. [Details](#app-icon). |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list, and inside a carousel post a horizontal pager of its items ([Viewer](#viewer)); one reused ExoPlayer (Media3 `ContentFrame` in `VideoFrame`, the thumbnail, or a carousel video item's poster (R26), as shutter until the first frame; 1 s start buffer, R26), loop, remembered mute, author/caption/collection overlay, and two icon buttons: "Open on Instagram" at the start (via `Permalinks`, an `ACTION_VIEW` intent, so whichever app handles the link) and Mute/Unmute at the end, for a video, or a carousel while its settled item is one. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
@@ -155,14 +160,14 @@ A debug build starts in Mock mode (the fake library); a release build always use
   (and its data) after the run.
 - **Room schemas ship as debug assets (R5).** `app/build.gradle.kts` adds `app/schemas` to the debug variant's assets, and
   `androidx.room:room-testing` (catalog entry `androidx-room-testing`) is a test dependency, so `MigrationTestHelper` can build
-  version 1 from `1.json` in a Robolectric test (`ReelsDatabaseMigrationTest`). They are debug assets, not test assets,
+  versions 1 and 2 from `1.json` and `2.json` in a Robolectric test (`ReelsDatabaseMigrationTest`). They are debug assets, not test assets,
   because AGP 9.4.1 merges no assets of the `test` source set for unit tests (Robolectric reads the debug variant's). The
   files hold table definitions only, no data and no secrets; a release build carries none, a debug APK about 30 KB of them
   (under 5 KB compressed). Switching the migration test to open a version-1 file through `ReelsDatabase.build` would let them
   go. `mergeDebugAssets` depends on `copyRoomSchemas` (D4), so the first build after a schema change merges the schema Room
   has just written, not the old one (`./gradlew :app:mergeDebugAssets --dry-run` lists `copyRoomSchemas` first;
   `SchemaBuildGuardTest` pins the line).
-- **`versionCode` tracks the schema (R21).** `versionCode` is at least the Room database version (2 now), and
+- **`versionCode` tracks the schema (R21).** `versionCode` is at least the Room database version (both are 3 now, R28), and
   `SchemaBuildGuardTest` fails when a schema bump leaves it behind. So a build from before a schema change has a lower code and
   Android refuses it (`INSTALL_FAILED_VERSION_DOWNGRADE`) instead of installing over the upgraded library, where Room, with no
   way back and no destructive fallback (there must be none: it would wipe the library and the request log), would fail at
@@ -295,7 +300,11 @@ Pure Kotlin/JVM.
     `RemoteMedia.carouselItems`: one `RemoteCarouselItem` per child, in order (`media_type` 1 is an image, 2 a video), with the
     image `MediaLinks.chooseThumbnail` picks from the child's own `image_versions2` (empty when it has none), the first
     `video_versions` url of a video child and its `oe` expiry, and a width and height from `original_width` and
-    `original_height`, else the chosen candidate's, else 0 (they may be 0 or mixed, so nothing may divide by them). The list is
+    `original_height`, else the chosen candidate's, else 0 (they may be 0 or mixed, so nothing may divide by them), and the
+    child's own id (`childPk`, R28): its `pk`, a JSON number or a string of digits, or, only when it has no `pk` (or a null
+    one), its `id`, plain digits or Instagram's `{pk}_{owner pk}` form (both parts digits), whose first part is taken. A child pk that is missing
+    or unreadable (a `pk` of `3.1E18` or text is not replaced by the `id`) is null, which means unknown: it is never a
+    `ShapeChanged` and never makes the post's items null, since nothing but R20's drop hangs on it. The list is
     `null` when the post is not a carousel or the reply has no `carousel_media`, and also when ANY child cannot be read (R4: an
     unknown or missing `media_type`, a child that is not an object, a null): the post's items are then unknown, never a
     `ShapeChanged`, because stopping a whole sync for an enhancement would be a regression (before the update such a carousel
@@ -982,7 +991,8 @@ page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
   QUICK run stops at the first known post, so carousels synced before this update get their items from a FULL run, or on
   their first open ([Carousels](#carousels)). A post only soft-removed (`markRemoved`, an UPDATE) keeps its items; the
   cascade fires on a real DELETE only. Before the replace, the stored items are read: when the new ones differ in count or in
-  the type at some position (`itemShapeChanged`, R20), the page's outcome names the post.
+  the type at some position (`itemShapeChanged`, R20), or hold another child at some position by a child pk known on both
+  sides (R28), the page's outcome names the post.
 - **Eviction.** The removed pks of a reconcile are handed to a `MediaEviction` (default none), so their cached videos, their
   carousel items' cached videos and their carousel images go with their thumbnails: `MediaEviction.eachStep` runs each step
   for each pk on its own, so one that fails (a disk error, a key it refuses) skips no other step and no later pk (the
@@ -1184,16 +1194,24 @@ are shown in the viewer on demand.
 - **Data.** `WebParsers` turns each child of `carousel_media` into a `RemoteCarouselItem` ([`:instagram`](#instagram)), and
   the sync stores them in `carousel_item` (`CarouselItemEntity`): `parentPk`, `position` (0-based), `type` (IMAGE or VIDEO),
   `width`, `height`, `imageUrl` (empty when Instagram sent none), `videoUrl` and `videoUrlExpiresAt` (epoch ms, like the media
-  row's). The primary key is `(parentPk, position)`, and a foreign key to `media.pk` cascades a delete, so items go with their
-  post. There is no separate `parentPk` index: the key's leading column is one.
+  row's), and `childPk` (R28, version 3: the child's own Instagram id, digits, or null when unknown). The primary key is
+  `(parentPk, position)`, and a foreign key to `media.pk` cascades a delete, so items go with their post. There is no
+  separate `parentPk` index: the key's leading column is one.
   - **Mock mode.** `FakeLibrary` derives a carousel's items from its pk alone, `carouselCount` of them: positions 2, 5, 8 and
-    so on are videos, the rest images (`fake://thumb/{pk}-{position}`, `fake://video/{pk}-{position}`). Nothing is drawn from
-    its random source, so the rest of the library is what it was. `FakeInstagramClient`'s saved pages and `mediaInfo` carry them.
-- **Room v2.** `MIGRATION_1_2` only creates the table (`2.json`'s statement verbatim), so every existing row stays. It is
-  registered in `ReelsDatabase.build`, so both library files (`reels.db`, `library.db`) upgrade, and there is still no
-  destructive fallback: a lost library costs a full, paced re-sync. `ReelsDatabaseMigrationTest` builds version 1 from
-  `1.json`, adds rows, migrates, and checks the rows and the table; it also opens a version-1 file of either library through
-  `build`.
+    so on are videos, the rest images (`fake://thumb/{pk}-{position}`, `fake://video/{pk}-{position}`), each with its own
+    synthetic child pk, `{pk}{position in two digits}` (nine digits: no post's pk, which has seven, and no other child's).
+    Nothing is drawn from its random source, so the rest of the library is what it was. `FakeInstagramClient`'s saved pages
+    and `mediaInfo` carry them.
+- **The migrations.** Each only adds, so every existing row stays; both are registered in `ReelsDatabase.build`, so both
+  library files (`reels.db`, `library.db`) upgrade, from version 1 through both, and there is still no destructive fallback:
+  a lost library costs a full, paced re-sync.
+  - `MIGRATION_1_2` (version 2) only creates `carousel_item` (`2.json`'s statement verbatim).
+  - `MIGRATION_2_3` (version 3, R28) only adds `carousel_item.childPk`, a nullable `TEXT` (an `ADD COLUMN`, so last, as in
+    `3.json`). Every stored item keeps its row with its child pk null, which means unknown and never drops anything (R20,
+    below), until the next sync that walks its page, or its post's next renewal, stores the item again with its child pk.
+  - `ReelsDatabaseMigrationTest` builds version 1 from `1.json` and version 2 from `2.json`, adds rows, migrates 1 to 2, 2 to
+    3 and 1 to 3 through both, and checks the rows and the tables against the exported schema; it also opens a version-1
+    and a version-2 file of either library through `build`.
   - **Foreign keys are enforced now.** Room switches `PRAGMA foreign_keys` on as soon as one entity declares a foreign key,
     and `carousel_item` is the first and only one. Deleting a `media` row now deletes its items. That makes the way a post is
     written matter: `MediaDao.upsert` must stay an in-place `@Upsert` (an update when the row exists, as it is). An
@@ -1205,8 +1223,8 @@ are shown in the viewer on demand.
 - **Sync.** A page's carousel items are replaced in the page's own transaction ([Sync engine](#sync-engine)). A `null` list
   or an empty one keeps the stored items (R2), and an unreadable child leaves a post's items unknown (R4, `null`, no
   `ShapeChanged`: [`:instagram`](#instagram)). Posts synced before this update have no items until a FULL run or the first
-  open of the post (below). A page that stores items of another shape for a carousel (R20, below) names that post in its
-  outcome, and once the page is committed the engine's `carouselEviction` drops the post's cached item media.
+  open of the post (below). A page that stores items of another shape for a carousel (R20 with R28, below) names that post
+  in its outcome, and once the page is committed the engine's `carouselEviction` drops the post's cached item media.
 - **`PacedMediaInfo`** (`data/media/`) is the viewer's one way of asking Instagram about an item: one `mediaInfo` on the
   Pacer's interactive lane, under the session gates of R76 and R79. It was cut out of `RealVideoSourceResolver` (whose answers
   are unchanged) so that a reel's link renewal and a carousel's fill ask the same way.
@@ -1272,15 +1290,19 @@ are shown in the viewer on demand.
       download again.
     - **The item's play waits for a start of another link (N-M1).** The start out is kept by the repository, not the visit
       (`startsOut`, by its key `{pk}_{position}`: its link, and a job done once the write has stopped and been checked), and
-      its entry goes only then, whether the write finished or was cancelled: a visit that ends (the owner left the post) does
+      its entry goes only then, in a `finally`, however the write ended: finished, cancelled, or with a failure nothing
+      foresaw (a throw, which `preloadVideo` answers `Stop`); a key left there would have its later starts skipped and its
+      play held for ever, and a test pins that a throwing write leaves neither. A visit that ends (the owner left the post) does
       not wait for its write to stop, so the post's next visit can meet it. `video` hands out a `Play` of the item only once a
       start of it from another link than the one it plays is done, in this visit or an earlier one: that write may commit the
       other link's bytes under the item's key when it stops, which can be after the viewer's 300 ms wait ([Viewer](#viewer))
       or after the owner came back to the post, and a player already reading the key past the write's lock would meet them at
       its next look at the cache, in the middle of its own video. The check drops them first. A start of the very link played
-      is the same video, so its play is not held, and neither is anything that is not a `Play` (a reel, an image item). The
-      wait ends with the caller (leaving the post ends it at once). While a start of a key is out, `preloadVideo` writes no
-      other start of it (`Skipped`, no request): two writes of one key would contend for its lock.
+      is the same video, so its play is not held, and neither is anything that is not a `Play` (a reel, an image item). Only
+      the item's own key holds it: a start out for another item of the post, or for the same position of another post, never
+      does (pinned with a stalled start under another key). The wait ends with the caller (leaving the post ends it at once);
+      how long it can last otherwise is in [Viewer](#viewer). While a start of a key is out, `preloadVideo` writes no other
+      start of it (`Skipped`, no request): two writes of one key would contend for its lock.
   - **One download of an item at a time (R23).** `Visit` keeps a lock per item position (`downloadOf`), apart from its request:
     `image` and `prefetchImage` both hold it, so an item asked for while its picture is being fetched ahead waits for that
     download and then serves its file, or, if it stored none, loads as before. Another item's call never waits for it.
@@ -1314,15 +1336,23 @@ are shown in the viewer on demand.
   - A renewal's items replace the stored ones (`CarouselItemDao.replace`). A video link that names no expiry is stored with the
     fetch time plus one hour, the assumed lifetime of R78 (`RealVideoSourceResolver.ASSUMED_LIFETIME_MS`), so it costs no
     request on every visit; a renewal that brings no items stores nothing and the stored ones stay.
-  - **R20: items of another shape drop the post's cached item media.** Images and item videos are keyed by position, so when
-    a renewal stores items whose count, or whose type at some position, differs from the stored ones (`itemShapeChanged`: a
-    slide deleted, an image swapped for a video), the post's downloaded item images and its `{pk}_*` item videos go, once the
-    items are stored (`itemEviction`, the container's `carouselItemEviction`, which the sync uses too). The same items with
-    renewed links keep everything, so what the owner viewed still shows offline. A fill has nothing stored to compare with. A
-    known gap: a reorder that keeps every position's type is not seen, and the moved positions show the old picture until the
-    post is unsaved or Delete library runs (`TODO.md`). Telling it would mean comparing links, which rests on CDN paths staying
-    the same when Instagram signs them again: that cannot be checked without contacting Instagram, and if wrong it would wipe
-    every carousel's offline images on each sync.
+  - **R20 and R28: items of another shape drop the post's cached item media.** Images, posters and item video starts and
+    videos are keyed by position, so when a renewal stores items whose count, or whose type at some position, differs from
+    the stored ones (a slide deleted, an image swapped for a video), or that hold another child at some position by its own
+    id (R28: `childPk` known on both sides and different, a reorder of slides of one type), the post's downloaded item images
+    and its `{pk}_*` item videos go, once the items are stored (`itemShapeChanged`; `itemEviction`, the container's
+    `carouselItemEviction`, which the sync uses too, after its page commits). A child pk that is null on either side means
+    unknown and never drops: items stored before version 3 fill theirs in with no drop, and a reply that carries none stores
+    them unknown again with no drop. The same items with renewed links keep everything, so what the owner viewed still shows
+    offline. A fill has nothing stored to compare with. Links are never compared: that would rest on CDN paths staying the
+    same when Instagram signs them again, which cannot be checked without contacting Instagram, and if wrong it would wipe
+    every carousel's offline images on each sync; a child's pk is its identity. What R28 leaves: a reorder made while a
+    post's stored child pks are unknown (before the first sync or renewal that stores them after the update, or across a reply
+    without them) is not seen, and the moved positions show the old picture until the post is unsaved or Delete library runs.
+    The pictures the viewer holds in memory follow the files: Coil keys a local file by its path, last-modified time and
+    size (`LocalFileKeyer`, below), so a picture downloaded again under the same `{pk}_{position}.jpg` after a drop is drawn
+    anew, never the dropped one from memory. R28 has met only a synthetic fixture: if a real carousel's children carry no
+    readable `pk` or `id`, every child pk is null, R28 does nothing and R20's count and type rule is what applies (Status).
   - **A post gone or unsaved.** Delete library can run while a request or a download is out, and so can a FULL sync's
     reconcile, which only marks a post removed (its row stays) and has already evicted its files. So no request is sent and no
     image file is written for a post that is no longer stored or is marked removed (`isLive`; every viewer list shows only
@@ -1347,14 +1377,29 @@ are shown in the viewer on demand.
     client, or the placeholder fetcher in Mock mode) into this store, and Coil only shows the local file
     (`Thumbnail(path)`), as it does a grid thumbnail. Files also behave like thumbnails: offline after the first view, removed
     with the post.
+  - **Coil's memory cache follows the files (R28's review).** `ReelsApp` is Coil's `SingletonImageLoader.Factory`, so every
+    `Thumbnail` uses one loader, `reelsImageLoader` (`ui/common/ImageLoading.kt`): Coil's defaults (still no network fetcher:
+    a link fails to load and nothing is requested) plus `LocalFileKeyer`, which keys a `file:` picture by its path,
+    last-modified time and size. Coil 3.6.3's own key is the path alone, so a picture rewritten under the same name (R20 and
+    R28 drop a post's pictures, and the new slides download under the same `{pk}_{position}.jpg`) was drawn from memory with
+    the old bitmap until the process died. Every store writes a new file and renames it into place, so a rewrite has a new
+    time and, all but always, a new size; either makes another key. A file that is not there fails the load at the key (Okio's
+    metadata throws, as Coil's own last-modified key would), so a dropped picture is never drawn from memory. Thumbnails
+    (`{pk}.jpg`) follow the same rule. The key costs one file stat per load, which Coil makes on the thread it computes the
+    key on. Robolectric tests run with `android.app.Application` and so with Coil's default loader; `ImageLoadingTest` builds
+    the app's loader through `ReelsApp` itself.
 - **Eviction.** The sync's `MediaEviction.eachStep` drops, for each removed pk, its cached video (`VideoCache.remove`), its
   carousel items' cached videos (`removeCarouselItems`, R6) and its carousel images (`CarouselImageStore.deleteFor`); Delete
-  library removes every image and clears the whole video cache. A reshaped carousel (R20) loses only the last two, through
+  library removes every image and clears the whole video cache. A reshaped carousel (R20, R28) loses only the last two, through
   the container's `carouselItemEviction` (`eachStep` too), which the sync runs after the page's commit and a renewal after its
   store; never the post's own video or its thumbnail.
 - **Pacing.**
   - **The sync is unchanged and sends no new request.** The items come in the replies it already downloads. R20's drop
-    deletes local files and cache keys only; a dropped image downloads again only when the owner views that item.
+    deletes local files and cache keys only; a dropped image downloads again only when the owner views that item (or the
+    open post's queue fetches it ahead, R23).
+  - **R28 sends nothing new.** A child's own id is one more field of the replies the sync and a visit's one `mediaInfo`
+    already download, and the drop it can now also trigger (a reorder of slides of one type) is the same local deletion; what
+    it drops is downloaded again as before, by a view or the queue ahead of an open post, never by the sync.
   - **A carousel visit sends at most one `mediaInfo`,** on the interactive lane (a 2 s minimum gap, counted in the 24 h budget
     and the cooldown), under the same session gates as a reel's link renewal. That one request is the fill and any renewal
     together: swiping through the items adds no request beyond it, and never starts the next post's prefetch (R11).
@@ -1456,7 +1501,10 @@ renewal and the cache are in [Video](#video).
     written), the bytes are another video's, so the repository's `video` holds the item's source until the write has stopped
     and its bytes were dropped (N-M1), however long that takes (a write cancelled during its handshake can take the connect
     and then the answer's headers, each with its 8 s timeout: about 16 s); the player meets neither a lock nor those bytes,
-    also when the owner left the post and came back while the write was stopping.
+    also when the owner left the post and came back while the write was stopping. That "about 16 s" counts one connect and
+    one headers wait: the write's stack follows redirects (`DefaultHttpDataSource` cannot refuse them, [Video](#video)), and
+    each redirect the CDN answers with is another request with its own connect and headers, so it can add as much again.
+    The hold has no cap of its own; it ends when the write has stopped, or at once when the owner leaves the post.
 
   The same post settling again in place (the list moved under it) keeps its visit and takes the newer row: a sync may have
   stored its cover since. `CarouselUiState(items, settled, coverOnlyMessage, loading)` is what the pager shows.
@@ -1614,16 +1662,25 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
 
 - **`:instagram`.** `WebParsersTest` (children in order, a mixed carousel, a child's own size or its image's, a video child
   without or an image child with `video_versions`, no `carousel_media` and a non-carousel giving `null`, an unreadable child
-  giving `null` (R4), an empty array giving an empty list, twenty children, a child with no image candidate), `FakeLibraryTest`
-  and `FakeInstagramClientTest` (the fake carousel's items, the same for the same seed, on the saved pages and in `mediaInfo`).
-- **Room.** `ReelsDatabaseMigrationTest` (a row in each of version 1's six data tables survives), `CarouselItemDaoTest`
-  (replace, position order, the cascade, the upsert that must not cascade, Delete library), `SchemaBuildGuardTest` (R21's
-  `versionCode`, D4's asset merge). `SyncEngineTest` (items stored with the page, replaced on a re-sync, kept when the reply has
-  none or an empty list, written in the page's transaction; R20's drop for a deleted slide and a type swap, none for the same
-  items or a page that rolls back, and a failing drop that does not stop the run).
+  giving `null` (R4), an empty array giving an empty list, twenty children, a child with no image candidate; R28: the child pk
+  from a numeric or string `pk`, the `pk` over the `id`, the `id` without a `pk` in both its forms, and a missing or unreadable
+  one null with the post's items kept, an `id` of `{pk}_` included), `FakeLibraryTest` and `FakeInstagramClientTest` (the fake
+  carousel's items, the same for the same seed, on the saved pages and in `mediaInfo`; every fake child with its own child pk,
+  `{pk}{position in two digits}`, and a digest of the seed-42 library showing the children draw nothing from its random source).
+- **Room.** `ReelsDatabaseMigrationTest` (a row in each of version 1's six data tables survives 1 to 2; R28: 2 to 3 keeps every
+  row and the items with a null child pk, 1 to 3 goes through both, and `build` opens a version-1 or version-2 file of either
+  library at version 3), `CarouselItemDaoTest` (replace, position order, the cascade, the upsert that must not cascade, Delete
+  library; R28: the child pk stored and mapped, and R20's rule case by case, a reorder of video items included), `SchemaBuildGuardTest` (R21's `versionCode`, D4's
+  asset merge). `SyncEngineTest` (items stored with the page, replaced on a re-sync, kept when the reply has none or an empty
+  list, written in the page's transaction; R20's drop for a deleted slide and a type swap, none for the same items or a page
+  that rolls back, and a failing drop that does not stop the run; R28: a drop for two slides of one type swapped, none for
+  the same children with renewed links, and none for a child pk unknown on either side; the drop outside the page's
+  transaction).
 - **Data layer.** `PacedMediaInfoTest` (every outcome and gate), `CarouselRepositoryTest` (the fill, once per visit including a
   cancelled call, the CDN lane, renewals, R2 on both paths, the cached-video table of R9, R20's drop with a real image store
-  and video cache, a post marked removed mid-download, log lines with no link, host or pk, Mock mode's clip, Delete library;
+  and video cache, and R28's at a renewal (two slides of one type swapped drop, the same children with new links keep
+  everything, a child pk unknown on either side drops nothing, the drop only once the new items are stored), a post marked
+  removed mid-download, log lines with no link, host or pk, Mock mode's clip, Delete library;
   R23's `prefetchImage`: the CDN lane and a later load that serves its file, nothing for the cover, a video item, past the
   last item, a post unsaved, deleted (before or while it downloads), not a carousel or without stored items, an on-demand
   load that waits for the item's download ahead (and renews when that stored nothing), another item's that does not; P1:
@@ -1643,8 +1700,10 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   player as the app builds it then reading none of them, and not held for a start of the very link it plays (N-M1, the
   re-review's probe); across visits too: a new visit's play held by an earlier visit's write still stopping, its player
   reading none of the old bytes even when they commit while the repository cannot drop them yet (the review's cross-visit
-  probe), no second write of a key while one is out and a write again once it has gone, and a held play ending with the
-  visit at once while a reel or an image item is never held, a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
+  probe), no second write of a key while one is out and a write again once it has gone, a held play ending with the
+  visit at once while a reel or an image item is never held, a write that throws leaving its key neither skipped nor held
+  and releasing a play it already holds, and a play held only by a start of its own key, never by another item's, another
+  post's or one whose key begins with its own (`{pk}_20` and item 2) (N-M1's last review and R28's), a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
   poster and a start written by the real writer, R16 still saying offline with only a start cached, every R26 log line
   labelled and naming no link, host or pk, and every path of a visit together sending one `mediaInfo`),
   `CarouselImageStoreTest`, `VideoCacheTest` (`removeCarouselItems`), `MediaEvictionTest` (`eachStep`), `VideoStartsTest`
@@ -1691,6 +1750,9 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   event when told: a video item's poster until its first frame, the next video item's own poster until its own first frame
   (never the item before's), the poster kept under a failure, an image item's picture never tagged a poster, a single
   surface mid-swipe between two video items, and a video item 0's cover as its shutter,
+  `ImageLoadingTest` (R28's review: through the loader `ReelsApp` gives Coil, with real PNGs under native graphics, a picture
+  rewritten at the same path loads anew, told by its time when the size is the same and by its size when the time is, a
+  dropped one is a failed load, a thumbnail likewise, an unchanged one still comes from memory, and a link loads nothing),
   `ViewerOverlayTest` (the icon buttons: labels, tooltips, which button when, no text button left), `ViewerPageTest`, `AppIconGuardTest` (the layers, the safe zone, no stroke, no activity icon, each glyph's own outline,
   the helper drawing the glyph it is given, the notice and its licence terms, the notice kept, no extended icon library).
 - **Motion.** `MotionTest` (the transitions, scale 0, an unset scale, the nav host's use of every factory, the shared key, a
@@ -2023,7 +2085,7 @@ Mock mode switch.
 | Instagram access | Private web endpoints, isolated in the `:instagram` JVM module | No official API exposes saved items, and the endpoints change without notice. |
 | API transport | Every API call is a same-origin `fetch()` in a hidden instagram.com WebView page (`WebViewTransport`); the OkHttp client stays only for the cookieless CDN and as the JVM-test transport | OkHttp's first two requests got HTTP 429, and copying headers cannot copy Chromium's TLS and HTTP/2 fingerprint. The page's cookies, client hints and Sec-Fetch headers are the browser's own. |
 | Video | Streamed on demand with per-item link refresh; LRU cache keyed by media `pk` | Gigabytes saved, and no bulk-download pattern. |
-| Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore` (and, while a post is open, its other pictures one at a time ahead of the swipe, R23, its video items' posters among them, then the first megabyte of each video item, R26), video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). Swiping on the phone showed each new picture's download as a black placeholder, so an open post fetches its pictures ahead (R23): CDN downloads one at a time, stopped by a 429 or offline, and with old links the visit's one renewal (R25). Video items still started dark and late, so they get a poster until their first frame and their first megabyte ahead, on the same queue and never with a request to Instagram of their own (R26, R27). |
+| Carousels | A carousel post's items are read from the saved feed the sync already downloads and stored; the viewer swipes them and loads on demand: images through the CDN lane into `CarouselImageStore` (and, while a post is open, its other pictures one at a time ahead of the swipe, R23, its video items' posters among them, then the first megabyte of each video item, R26), video items through the video cache, at most one `mediaInfo` per visit | The owner chose on-demand loading: no bulk media download, no new sync request. Coil 3 here has no network fetcher, so its network layer would mean a new dependency and a second HTTP client (R1). Swiping on the phone showed each new picture's download as a black placeholder, so an open post fetches its pictures ahead (R23): CDN downloads one at a time, stopped by a 429 or offline, and with old links the visit's one renewal (R25). Video items still started dark and late, so they get a poster until their first frame and their first megabyte ahead, on the same queue and never with a request to Instagram of their own (R26, R27). Cached item media are keyed by position, so a changed carousel drops them: by count and type (R20), and by each child's own Instagram id, which tells a reorder of slides of one type (R28), never by links, whose CDN paths may change when they are signed again. |
 | Motion | A post grows from and shrinks back into its grid tile (shared bounds, scale-to-bounds, key `media-<pk>`); every other page pushes, sliding in over the last, with no fade (R24); predictive back; nothing animates when the animator duration scale is 0 | `sharedElement` zoomed visibly on the emulator and cut a playing video to the cover (R14); Navigation 2.10's own predictive transitions scale the page out, so the NavHost names its own (R15); the owner did not like the shared axis's short slide and fade on the phone and asked for Instagram's slide (R24). |
 | Unsaves and moves | Mirrored only by a manual Full sync; a quick Sync only adds (an older item newly added to a collection included) | Detecting removals needs a full walk, so it stays an explicit, paced action. |
 | Collection names | The website's own GraphQL query, sent by the hidden page; when its doc id goes stale a second, desktop-mode hidden page learns the current one from the site (at most once per 24 h); the last names are kept when that fails | The website answers the first design's collections-list call with a 404. A query id changes with every site deploy, and the owner wants the names to keep working with no computer: no rebuild, no reinstall. |

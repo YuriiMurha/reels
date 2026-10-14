@@ -55,6 +55,12 @@ data class CarouselItemEntity(
     val videoUrl: String?,
     /** Epoch millis, like [MediaEntity.videoUrlExpiresAt]. */
     val videoUrlExpiresAt: Long?,
+    /**
+     * R28 (version 3): the child's own Instagram id, digits only, or null when unknown (a reply without a readable one, or a
+     * row stored before version 3, until the next sync or renewal stores the item again). It tells R20 which slide is at
+     * [position]: [itemShapeChanged].
+     */
+    val childPk: String? = null,
 )
 
 /** This item's row, as an item of the post [parentPk]. */
@@ -67,6 +73,7 @@ fun RemoteCarouselItem.toEntity(parentPk: String) = CarouselItemEntity(
     imageUrl = imageUrl,
     videoUrl = videoUrl,
     videoUrlExpiresAt = videoUrlExpiresAt?.toEpochMilli(),
+    childPk = childPk,
 )
 
 @Fts4(contentEntity = MediaEntity::class, tokenizer = FtsOptions.TOKENIZER_UNICODE61)

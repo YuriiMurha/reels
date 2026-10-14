@@ -24,6 +24,13 @@ data class RemoteCarouselItem(
     /** The first `video_versions` url of a [MediaType.VIDEO] child, else null. */
     val videoUrl: String?,
     val videoUrlExpiresAt: Instant?,
+    /**
+     * R28: the child's own Instagram id, a string of digits: its `pk`, or, only when the `pk` is missing or JSON null, its
+     * `id` (plain digits, or the pk part of `{pk}_{owner pk}`); null when the reply does not carry a readable one (a `pk`
+     * that is there but unreadable is not replaced by the `id`). Null means unknown, never "another child": it tells which
+     * slide sits at [position] (a reorder that keeps every position's type), and nothing else hangs on it.
+     */
+    val childPk: String? = null,
 )
 
 data class RemoteMedia(

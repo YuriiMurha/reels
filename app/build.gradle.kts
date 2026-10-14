@@ -26,7 +26,7 @@ android {
         targetSdk = 36
         // R21: at least the Room schema version (SchemaBuildGuardTest), so a build from before a schema change is refused
         // (INSTALL_FAILED_VERSION_DOWNGRADE) instead of installing over the upgraded library and failing at every start.
-        versionCode = 2
+        versionCode = 3
         versionName = "0.1.0"
         // The on-device smoke suite (src/androidTest); it runs on the emulator only, in Mock mode (docs/GUIDE.md, section 3).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

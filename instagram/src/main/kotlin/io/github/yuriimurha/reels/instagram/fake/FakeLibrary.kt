@@ -107,7 +107,8 @@ class FakeLibrary(seed: Long = 42, itemCount: Int = 2_000, collectionCount: Int 
 
     /**
      * A carousel's children: every third one (positions 2, 5, ...) a video, the rest images. Derived from [pk] alone, so it draws
-     * nothing from [random] and the rest of the library stays what it was.
+     * nothing from [random] and the rest of the library stays what it was. Each has its own synthetic child pk (R28),
+     * `{pk}{position in two digits}`: nine digits, so it is no post's pk (seven) and no other child's (a carousel has ten at most).
      */
     private fun carouselItems(pk: String, count: Int): List<RemoteCarouselItem> = List(count) { position ->
         val video = position % 3 == 2
@@ -119,6 +120,7 @@ class FakeLibrary(seed: Long = 42, itemCount: Int = 2_000, collectionCount: Int 
             imageUrl = "fake://thumb/$pk-$position",
             videoUrl = if (video) "fake://video/$pk-$position" else null,
             videoUrlExpiresAt = null,
+            childPk = pk + position.toString().padStart(2, '0'),
         )
     }
 

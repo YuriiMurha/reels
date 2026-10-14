@@ -24,7 +24,7 @@ As of 2026-10-14. `TODO.md` keeps the live list of what is still open.
 | M0 Skeleton, M1 Mock app | Done. Home, grid, viewer, search and sync work on a built-in fake library of 2,000 items in 8 collections. |
 | M2 Session | Works on the owner's phone: the session check through the hidden page answered 200 (2026-10-08), and every real sync since has run on that login. Still open from [section 8](#8-on-phone-checklist), "M2: session": Check now twice, log out and in, the paste fallback, and whether the `sessionid` changes during a checkpoint. |
 | Collection names | Confirmed on the owner's phone (2026-10-11): the collections show under their Instagram names and hold the right posts, with no "All posts" or audio card (AUTO); a forced repair learned the query's id from the real desktop Saved page and the next Sync used it; a library of more than 12 collections read every names page through the cursor (CURSOR). Still open: STALE, how Instagram answers an id it no longer runs, which shows only when Instagram really changes the id. The box [After the collection names update](#after-the-collection-names-update) is done. |
-| Viewer update | Checked on the owner's phone on 2026-10-13 and 2026-10-14 (debug build, gesture navigation): the upgrade kept the library; real carousels fill, swipe, load their pictures ahead and start their video items quickly behind a poster; viewed pictures show offline; the icon buttons, the launcher icon and its themed layer, the grow and shrink, the back gesture and the page push all work. Still open from [The viewer update](#the-viewer-update-carousels-icon-buttons-the-app-icon-motion): an expired carousel link renewed once, a video item never watched through while offline, and the first open after a cold start on the release build. |
+| Viewer update | Checked on the owner's phone on 2026-10-13 and 2026-10-14 (debug build, gesture navigation): the upgrade kept the library; real carousels fill, swipe, load their pictures ahead and start their video items quickly behind a poster; viewed pictures show offline; the icon buttons, the launcher icon and its themed layer, the grow and shrink, the back gesture and the page push all work. Still open from [The viewer update](#the-viewer-update-carousels-icon-buttons-the-app-icon-motion): an expired carousel link renewed once, a video item never watched through while offline, the first open after a cold start on the release build, and whether a real carousel's slides carry their own id (step 9: the database is version 3 now, and that id has met only made-up test data). |
 | M3 Adapter lab | Code done. A debug-only lab sends one request per endpoint and saves scrubbed copies of the answers. Real syncs show the parsers read the session check, the names query, the saved feed and a carousel's media info; spike question 2 is answered (2026-10-09). Still open: running the lab once and handing back the other answers ([section 7](#7-adapter-lab-and-the-spike-handback)). |
 | M4 Real sync | The first real Sync and the first Full sync are done (2026-10-11), and a later Full sync (2026-10-13) stored the items of every carousel; the collections hold the right posts, and the first Sync cached every thumbnail. A cooldown showed on Sync with its minutes left (2026-10-11). Not reported yet from [section 8](#8-on-phone-checklist), "M4: real sync": Cancel and Resume during a run, the budget display, and the challenge stop, which only an Instagram check can show (never provoke one). |
 | M5 Video | Partly checked (2026-10-11): a reel plays, loops and replays offline from the cache, and a reel Instagram no longer has does not play. Still open: an expired link renewed once, and a 403/410 recovered ([section 6](#6-watching-videos)). |
@@ -532,8 +532,15 @@ A carousel post keeps all its items, and the viewer shows them on demand, as it 
   small stored list of its items' addresses stays with the removed post), and **Delete library** removes everything.
 - **When a carousel changes.** If the poster deletes a slide (or swaps an image for a video), the next sync or link renewal
   drops that post's downloaded images and cached videos, so a shifted item never shows the old picture; they download again
-  when viewed. If the poster only reorders slides of the same kind, the old pictures can still show at the moved positions
-  until the post is unsaved or **Delete library** runs (a known gap, `TODO.md`).
+  when viewed. The app also keeps each slide's own Instagram id (the database is version 3 now), so a reorder of slides of
+  the same kind drops them too, and the viewer shows the new pictures at once, not ones it still held in memory. The
+  first slide is the exception: item 0 and the grid tile show the post's stored cover, which a sync writes only once, so
+  after a change to slide 0 they keep the old cover (a known gap, in `TODO.md`). Carousels
+  stored before version 3 get their slides' ids from the next sync that reaches them, or the next renewal of their links,
+  with nothing dropped; a reorder made before then can still show the old pictures at the moved positions until the post
+  is unsaved or **Delete library** runs. The slides' ids have only met made-up test data so far: if a real carousel's
+  slides carry none, a same-kind reorder is not seen ([section 8](#the-viewer-update-carousels-icon-buttons-the-app-icon-motion),
+  step 9).
 - **Messages** over an item are in [Troubleshooting](#the-viewer-messages-over-a-video-or-a-carousel-item).
 - In Mock mode the fake carousels show placeholder pictures and the bundled clip for their video items, and nothing is
   requested.
@@ -805,7 +812,7 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 
 > **Status:** checked on the owner's phone on 2026-10-13 and 2026-10-14, except an expired carousel link renewed once,
 > a video item never watched through while offline (step 4), and the first open after a cold start on the
-> release build (step 7).
+> release build (step 7). Step 9 (a carousel slide's own id, R28) was added on 2026-10-14 and is not done yet.
 
 The update that added carousel swiping, icon buttons, the app's own icon and the grow-and-shrink motion. It was built and tested
 on fakes and on the emulator in Mock mode. No agent has seen a real carousel, a real expired link or your launcher, so these
@@ -841,8 +848,9 @@ adb -d logcat -c
 adb -d logcat -s InstagramHttp
 ```
 
-1. **Install over the app you have.** Your data is kept: the database adds one table on its first open and changes nothing
-   else.
+1. **Install over the app you have.** Your data is kept. The database is version 3 now: from version 1 it adds one table on
+   its first open, and from version 2 (the build of 2026-10-13/14) one column in that table, each carousel slide's own id
+   (R28); nothing else changes.
 
    ```bash
    SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
@@ -903,6 +911,16 @@ adb -d logcat -s InstagramHttp
    leaving stays on top the whole way. Let go early and it slides back and stays open; go all the way and it slides off to
    the right. **Report:** a pass, or what looked wrong (does the slide feel too fast or too slow, and should the page
    underneath darken a little, as in Instagram?).
+9. **Check that a carousel's slides carry their own id (R28).** The app now tells a reorder of slides of the same kind by
+   each slide's own Instagram id, but that id has only met made-up test data. This is read in the Adapter lab
+   ([section 7](#7-adapter-lab-and-the-spike-handback)), not seen in the viewer: save a carousel last on the account, so it
+   is your most recently saved post, then in the lab tap **All Saved (page 1)** and **Media info (first saved item)** (two
+   requests, paced as every lab tap; you can do this as part of the lab's one run). **Look for:** in the Media info shape,
+   under `items`, then `carousel_media`, the first child has a `pk` that reads `number(N digits)` or
+   `string(len N, digits)`; with no `pk` (or one that reads `null`), an `id` that reads `string(len N, digits)`, or
+   `string(len N, base64url)` for Instagram's `{pk}_{owner}` form. **Report:** what the child's `pk` and `id` read. If it has neither, a reorder of slides
+   of the same kind is still not seen (the app then behaves as before this change: a deleted slide or a swapped type is
+   still handled).
 
 With animations switched off (Settings, Developer options, Animator duration scale: off), nothing animates: pages and posts
 change at once. Switch it back on afterwards.
@@ -990,10 +1008,11 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
   ```
 
 - **`INSTALL_FAILED_VERSION_DOWNGRADE`**: the build you are installing is older than the one on the phone (a checkout or a
-  branch from before the viewer update, whose database the installed app has already upgraded). Android refuses it because
-  that build could not open the upgraded library and would close at every start. Never uninstall or clear the app's data to
-  get past this: on the phone that deletes the library, the login and the request log. Pull or rebase the checkout and install
-  the current build. (On the emulator, in Mock mode, an uninstall loses only fake data.)
+  branch from before the last database change, whose database the installed app has already upgraded: the database is
+  version 3 now, since the carousel slides' ids of 2026-10-14, and version 2 came with the viewer update). Android refuses
+  it because that build could not open the upgraded library and would close at every start. Never uninstall or clear the
+  app's data to get past this: on the phone that deletes the library, the login and the request log. Pull or rebase the
+  checkout and install the current build. (On the emulator, in Mock mode, an uninstall loses only fake data.)
 - **`keystore.properties has no (or an empty) '...'`**: that key is missing or blank in the file (section 9).
 - **A commit is refused with `pre-commit: ... session material`, `... sessionid value` or `... release signing
   material`**: the secret guard found something that looks like a cookie, a session id or a signing file. Remove it;
