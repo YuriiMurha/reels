@@ -395,6 +395,67 @@ class WebParsersTest {
         assertEquals("https://cdn.example.invalid/v/t51/402.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", items[1].imageUrl)
     }
 
+    // R28: each child's own id, so that a reorder keeping every position's type is seen.
+
+    /** [child] with [fields] added (or replaced), as the only child of the carousel; its child pk. */
+    private fun childPkOf(child: JsonElement, vararg fields: Pair<String, JsonElement>): String? =
+        assertNotNull(carouselOf(listOf(JsonObject((child as JsonObject) + fields))).carouselItems).single().childPk
+
+    /** The fixture's children carry their `pk` as a JSON number, and an `id` in the `{pk}_{owner pk}` form: the pk is read. */
+    @Test
+    fun aChildsOwnPkIsRead() {
+        val children = assertNotNull(mediaOf("saved_page_more.json", 2).carouselItems)
+        assertEquals(listOf("3100000000000000031", "3100000000000000032", "3100000000000000033"), children.map { it.childPk })
+        assertEquals("3100000000000000041", childPkOf(imageChild, "pk" to JsonPrimitive("3100000000000000041")), "a string")
+        assertEquals("3100000000000000042", childPkOf(videoChild, "pk" to num("3100000000000000042")), "a video child's")
+        assertEquals(
+            "3100000000000000043",
+            childPkOf(imageChild, "pk" to num("3100000000000000043"), "id" to JsonPrimitive("3100000000000000049_42")),
+            "the pk, not the id",
+        )
+    }
+
+    /** Without a `pk` (or with a null one) the child's `id` is read: plain digits, or the pk part of `{pk}_{owner pk}`. */
+    @Test
+    fun aChildWithoutAPkFallsBackToItsId() {
+        assertEquals("3100000000000000051", childPkOf(imageChild, "id" to JsonPrimitive("3100000000000000051_42")))
+        assertEquals("3100000000000000052", childPkOf(imageChild, "id" to JsonPrimitive("3100000000000000052")))
+        assertEquals("3100000000000000053", childPkOf(imageChild, "id" to num("3100000000000000053")))
+        assertEquals("3100000000000000054", childPkOf(imageChild, "pk" to JsonNull, "id" to JsonPrimitive("3100000000000000054_42")))
+    }
+
+    /**
+     * A child pk that is missing or unreadable is null, and only that: the child and the post's other items are read as
+     * before (R4's unknown items are for the type, not for this), and nothing is a shape change.
+     */
+    @Test
+    fun aMissingOrUnreadableChildPkIsNullAndKeepsThePostsItems() {
+        val unreadable: List<List<Pair<String, JsonElement>>> = listOf(
+            emptyList(), // neither a pk nor an id
+            listOf("pk" to num("3.1E18")),
+            listOf("pk" to JsonPrimitive("abc")),
+            listOf("pk" to JsonPrimitive("")),
+            listOf("pk" to JsonPrimitive(true)),
+            listOf("pk" to JsonObject(emptyMap())),
+            listOf("pk" to JsonPrimitive("-31")),
+            // A pk that is there but unreadable is not replaced by the id.
+            listOf("pk" to JsonPrimitive("abc"), "id" to JsonPrimitive("3100000000000000061_42")),
+            listOf("id" to JsonPrimitive("abc")),
+            listOf("id" to JsonPrimitive("3100000000000000062_owner")),
+            listOf("id" to JsonPrimitive("_42")),
+            listOf("id" to JsonPrimitive("3100000000000000063_42_7")),
+            listOf("id" to JsonNull),
+        )
+        val known = (imageChild as JsonObject).with("pk", JsonPrimitive("3100000000000000071"))
+        for (fields in unreadable) {
+            val odd = JsonObject((squareChild as JsonObject) + fields)
+            val items = assertNotNull(carouselOf(listOf(known, odd)).carouselItems, "$fields: the post's items are kept")
+            assertEquals(listOf("3100000000000000071", null), items.map { it.childPk }, "$fields")
+            assertEquals(listOf(MediaType.IMAGE, MediaType.IMAGE), items.map { it.type }, "$fields")
+            assertEquals("https://cdn.example.invalid/v/t51/422.jpg?stp=x&oe=6720A3F0&_nc_ht=cdn", items[1].imageUrl, "$fields")
+        }
+    }
+
     @Test
     fun unknownMediaTypeIsAShapeChange() {
         val json = fixture("saved_page_more.json").withMedia(0) { it.with("media_type", JsonPrimitive(5)) }

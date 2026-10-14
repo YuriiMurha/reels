@@ -115,15 +115,48 @@ class CarouselItemDaoTest {
         val remote = RemoteCarouselItem(
             position = 2, type = MediaType.VIDEO, width = 720, height = 1280,
             imageUrl = "fake://thumb/m1-2", videoUrl = "fake://video/m1-2", videoUrlExpiresAt = Instant.ofEpochSecond(1_700_000_000),
+            childPk = "3100000000000000032",
         )
 
         assertEquals(
             CarouselItemEntity(
                 parentPk = "m1", position = 2, type = MediaType.VIDEO, width = 720, height = 1280,
                 imageUrl = "fake://thumb/m1-2", videoUrl = "fake://video/m1-2", videoUrlExpiresAt = 1_700_000_000_000,
+                childPk = "3100000000000000032",
             ),
             remote.toEntity("m1"),
         )
         assertNull(remote.copy(videoUrl = null, videoUrlExpiresAt = null).toEntity("m1").videoUrlExpiresAt)
+        assertNull(remote.copy(childPk = null).toEntity("m1").childPk, "unknown stays unknown")
+    }
+
+    /** R28's version-3 column is stored and read back, null included. */
+    @Test
+    fun theChildPkIsStoredWithTheItem() = runTest {
+        givenCarousels("m1")
+        items.replace("m1", listOf(item("m1", 0).copy(childPk = "3100000000000000031"), item("m1", 1)))
+
+        assertEquals(listOf("3100000000000000031", null), items.items("m1").map { it.childPk })
+    }
+
+    /**
+     * R20 with R28, the rule itself: a change of count, of a position's type, or of the child at a position when both sides
+     * know it drops; renewed links never do, and a child pk unknown on either side never does.
+     */
+    @Test
+    fun itemShapeChangedTellsAnotherChildOnlyWhenBothSidesKnowIt() {
+        fun of(vararg children: Pair<MediaType, String?>) =
+            children.mapIndexed { position, (type, childPk) -> item("m1", position, type).copy(childPk = childPk) }
+        val stored = of(MediaType.IMAGE to "11", MediaType.IMAGE to "12", MediaType.VIDEO to "13")
+
+        assertEquals(false, itemShapeChanged(emptyList(), stored), "nothing stored, nothing to drop")
+        assertEquals(false, itemShapeChanged(stored, stored.map { it.copy(imageUrl = "${it.imageUrl}-renewed", videoUrl = it.videoUrl?.let { url -> "$url-renewed" }) }), "renewed links")
+        assertEquals(true, itemShapeChanged(stored, stored.dropLast(1)), "a slide fewer")
+        assertEquals(true, itemShapeChanged(stored, of(MediaType.IMAGE to "11", MediaType.VIDEO to "12", MediaType.VIDEO to "13")), "a type")
+        assertEquals(true, itemShapeChanged(stored, of(MediaType.IMAGE to "12", MediaType.IMAGE to "11", MediaType.VIDEO to "13")), "a same-type swap")
+        assertEquals(true, itemShapeChanged(stored, of(MediaType.IMAGE to "11", MediaType.IMAGE to "14", MediaType.VIDEO to "13")), "a slide replaced")
+        assertEquals(false, itemShapeChanged(of(MediaType.IMAGE to null, MediaType.IMAGE to null, MediaType.VIDEO to null), stored), "null to a value")
+        assertEquals(false, itemShapeChanged(stored, of(MediaType.IMAGE to null, MediaType.IMAGE to null, MediaType.VIDEO to null)), "a value to null")
+        assertEquals(true, itemShapeChanged(stored, of(MediaType.IMAGE to null, MediaType.IMAGE to "11", MediaType.VIDEO to "13")), "one known position that changed is enough")
     }
 }

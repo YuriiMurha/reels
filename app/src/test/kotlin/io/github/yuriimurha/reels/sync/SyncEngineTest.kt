@@ -2379,7 +2379,50 @@ class SyncEngineTest {
         assertEquals(SyncStatus.DONE, runSync(recordingReshapes(CarouselItemsOf(fake, carousel.pk, renewed)), SyncMode.FULL).status)
 
         assertEquals(renewed.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: the renewed links are stored")
+        assertTrue(storedItems(carousel.pk).all { it.childPk != null }, "precondition: the same children, their child pks known (R28)")
         assertEquals(emptyList(), reshaped, "nothing dropped: no post's items changed shape")
+    }
+
+    /**
+     * R28: the poster swapped slides 0 and 1, two images. Every position keeps its type, so the shape alone cannot see it, but
+     * each holds another child now (its child pk moved with it): the post's cached item media go.
+     */
+    @Test
+    fun aCarouselWhoseSlidesOfOneTypeSwappedDropsItsCachedItemMedia() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val items = carousel.carouselItems!!
+        assertEquals(listOf(MediaType.IMAGE, MediaType.IMAGE), items.take(2).map { it.type }, "precondition: two images first")
+        val swapped = listOf(items[1].copy(position = 0), items[0].copy(position = 1)) + items.drop(2)
+
+        assertEquals(SyncStatus.DONE, runSync(recordingReshapes(CarouselItemsOf(fake, carousel.pk, swapped)), SyncMode.FULL).status)
+
+        assertEquals(swapped.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: the swapped set is stored")
+        assertEquals(listOf(items[1].childPk, items[0].childPk), storedItems(carousel.pk).take(2).map { it.childPk })
+        assertEquals(listOf(carousel.pk), reshaped, "exactly that post")
+    }
+
+    /**
+     * R28: a null child pk means unknown, on either side, and never drops. Rows stored before version 3 (null) get the child
+     * pks from the next sync with nothing dropped; a reply without them drops nothing either.
+     */
+    @Test
+    fun anUnknownChildPkOnEitherSideDropsNothingAtASync() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val known = carousel.carouselItems!!
+        // As the migration to version 3 left them: the same items, their child pks unknown.
+        db.carouselItemDao().replace(carousel.pk, known.map { it.toEntity(carousel.pk).copy(childPk = null) })
+
+        assertEquals(SyncStatus.DONE, runSync(recordingReshapes(fake), SyncMode.FULL).status)
+        assertEquals(known.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: filled in")
+        assertTrue(storedItems(carousel.pk).all { it.childPk != null }, "precondition: known now")
+        assertEquals(emptyList(), reshaped, "null to a value drops nothing")
+
+        val unknown = known.map { it.copy(childPk = null) }
+        assertEquals(SyncStatus.DONE, runSync(recordingReshapes(CarouselItemsOf(fake, carousel.pk, unknown)), SyncMode.FULL).status)
+        assertEquals(unknown.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: unknown again")
+        assertEquals(emptyList(), reshaped, "a value to null drops nothing either")
     }
 
     /** The same count with an image where a video was: that position's cached media is another item's, so they go. */

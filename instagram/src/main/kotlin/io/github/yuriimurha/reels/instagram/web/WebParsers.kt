@@ -263,7 +263,22 @@ internal object WebParsers {
             imageUrl = image?.url.orEmpty(),
             videoUrl = videoUrl,
             videoUrlExpiresAt = videoUrl?.let(MediaLinks::expiresAt),
+            childPk = childPk(c),
         )
+    }
+
+    /**
+     * R28: a carousel child's own id, as digits: its `pk` (a JSON number or a string), or, only when the child has no `pk`
+     * (or a null one), its `id`, plain digits or Instagram's `{pk}_{owner pk}` form, whose first part is the pk. Null when it
+     * is missing or unreadable (a `pk` that is not plain digits, `3.1E18` or text included, is not replaced by the `id`).
+     * Never a [ShapeChanged] and never a reason to drop the post's items (R4 stays for the type and links): null only means
+     * the app cannot tell this child from another, so it never drops anything on its account.
+     */
+    private fun childPk(c: JsonObject): String? {
+        val pk = c["pk"]
+        if (pk != null && pk !is JsonNull) return c.idString("pk")?.takeIf(::isPk)
+        val id = c.idString("id") ?: return null
+        return id.takeIf(::isPk) ?: OWNED_ID.matchEntire(id)?.groupValues?.get(1)
     }
 
     /** The url of the first of [o]'s `video_versions`, or null when it has none. */
@@ -273,6 +288,9 @@ internal object WebParsers {
     private val PK = Regex("[0-9]{1,30}")
 
     private fun isPk(value: String): Boolean = PK.matches(value)
+
+    /** A media `id` in Instagram's `{pk}_{owner pk}` form; group 1 is the pk. */
+    private val OWNED_ID = Regex("([0-9]{1,30})_[0-9]{1,30}")
 
     /** Null ("the response doesn't say") unless every entry is a string: a shorter list would read as "not saved there". */
     private fun savedCollectionIds(o: JsonObject): List<String>? {

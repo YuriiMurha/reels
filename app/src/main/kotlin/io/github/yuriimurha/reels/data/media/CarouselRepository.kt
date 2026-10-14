@@ -112,8 +112,9 @@ class CarouselRepository(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val log: ((String) -> Unit)? = null,
     /**
-     * R20: told the post whose renewal stored items of another shape ([itemShapeChanged]), once they are stored, so its
-     * downloaded item images and cached item videos (keyed by position) go. The container's is the sync's own.
+     * R20: told the post whose renewal stored items of another shape ([itemShapeChanged]: a count, a type, or, R28, another
+     * child at a position by its known child pk), once they are stored, so its downloaded item images and cached item videos
+     * (keyed by position) go. The container's is the sync's own.
      */
     private val itemEviction: MediaEviction = MediaEviction { },
     /** R26: writes a video item's start into the video cache, through the player's own cookieless stack. Its writes run on [pacer]'s CDN lane. */
@@ -376,6 +377,7 @@ class CarouselRepository(
         try {
             return writeStart(pk, position, url, key, visit)
         } finally {
+            // However the write ends, a cancel or a throw included: a key left here would skip its starts and hold its play.
             startsOut.remove(key, out)
             out.checked.complete()
         }
@@ -517,7 +519,7 @@ class CarouselRepository(
      * The post's fresh items, in place of whatever was stored. A reply without them stores nothing and keeps the stored ones.
      * When the post's row went while the request was out (Delete library), the foreign key refuses the write: that throws, into
      * the public call's guard, which answers "Can't load this item"; the visit stays spent. Items of another shape than the
-     * stored ones (R20) take the post's cached item media with them, once they are stored.
+     * stored ones (R20, with R28's child pks) take the post's cached item media with them, once they are stored.
      */
     private suspend fun store(pk: String, remote: List<RemoteCarouselItem>?): Renewal {
         // R2 and R4: the reply does not say what the items are (no carousel_media, an empty one, an unreadable child). An empty

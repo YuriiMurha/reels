@@ -708,3 +708,49 @@ with the request log captured live (`adb logcat -s InstagramHttp`) and the libra
   cursor was used and works (recorded in #14).
 - **Still open** (TODO): an expired carousel link renewed once, a video item offline, the first open after a cold start on
   the release build, the release build itself, the Adapter lab answers, STALE, an expired reel link and a 403/410 recovered.
+
+## 2026-10-14: a carousel child's own id (R28), and the N-M1 hold's two test pins
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6: R28 closes R20's known gap, and the two test pins N-M1's
+last review asked for are in. Both were open in `TODO.md`.
+
+- **R20's gap.** A carousel's downloaded pictures, posters and video starts are keyed by `{pk}_{position}`, and R20 dropped
+  them only when a new item list changed the count or a position's type. A poster who reordered slides of the same type
+  left the moved positions showing (or starting) each other's old media until the post was unsaved or Delete library ran.
+- **R28, the parse.** `:instagram` reads each `carousel_media` child's own id into `RemoteCarouselItem.childPk`: its `pk` (a
+  number or a string of digits), or, only when it has none, its `id`, plain digits or Instagram's `{pk}_{owner pk}` form. A
+  child pk that is missing or unreadable is null: no shape change, and the post's items stay (R4 is for the type). The
+  saved-page fixture's children already carried synthetic pks; the fake library's children now get distinct synthetic ones.
+- **R28, the store.** Room version 3: `MIGRATION_2_3` only adds the nullable `carousel_item.childPk TEXT`, so every row
+  survives with an unknown child pk; `3.json` is exported (a debug asset, merged after Room writes it, D4); `versionCode` is
+  3 (R21's guard requires it), so a build from before this is refused on a phone that has it.
+- **R28, the rule.** R20 now also drops a post's cached item media when a position's child pk changed while both the
+  stored and the new one are known. Null on either side means unknown and never drops: the rows the migration leaves get
+  their child pks from the next sync that walks their page, or the next renewal, with nothing dropped. Both replace sites
+  apply it after their commit, as before; the same children with renewed links keep everything, so viewed items still show
+  offline. Links are still never compared. What is left: a reorder made while a post's child pks are unknown is not seen.
+- **The N-M1 pins (no code change, only a comment).** A start write that throws (not a cancel) still takes its key out of
+  the repository's starts out, so the key is neither skipped by later starts nor holding the item's play; and the hold
+  waits only on the item's own `{pk}_{position}` start, never on another item's of the post or the same position's of
+  another post. TODO's note that the hold's "about 16 s" counts one connect and one headers wait, and that each redirect
+  the CDN answers with can add as much again, is now in ARCHITECTURE (Viewer).
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1263 app tests in 94 classes and 386 `:instagram` tests, 0
+  failures, lint with no errors and the same 16 warnings; `connectedDebugAndroidTest` on the emulator in Mock mode, installed
+  over its versionCode 2 build: 54 tests, 0 failures. New: three `WebParsersTest` (a child's own pk, the `id` without a `pk`,
+  a missing or unreadable one null with the post's items kept), one `FakeLibraryTest`, two `CarouselItemDaoTest` (the column,
+  and the rule case by case), three `ReelsDatabaseMigrationTest` (2 to 3, 1 to 3 through both, and a version-2 file of either
+  library through `build`), two `SyncEngineTest` and three `CarouselRepositoryTest` for R28 (two slides of one type swapped
+  drop; a child pk unknown on either side drops nothing; at a renewal, the same children with new links keep everything; the
+  sync's test of renewed links now also asserts the child pks are known), and two `CarouselRepositoryTest` for the pins.
+  Mutation-checked in a scratch export: 26 mutants, all killed. The parser (7: no child pk, no `id` fallback, an unchecked
+  `pk`, an unreadable `pk` falling to the `id`, the `{pk}_{owner pk}` form dropped or loosened, a missing child pk making the
+  items null), the fake (2), the entity mapping, the rule (4: R20's old rule, null counted as a change, either null guard
+  alone), each replace site ignoring the child pk (2), the migration (3: not registered, `NOT NULL`, a no-op), `versionCode`
+  2, the starts out's removal (3: out of the `finally`, skipped on a throw only, removal and completion both out) and the
+  hold (3: on any entry, by position across posts, by post across items). The "throw only" and "any entry" mutants pass every
+  other `CarouselRepositoryTest`: only the new pins kill them.
+- **Pacing.** Nothing new is sent and nothing is raised. The child pk is a field of the replies the sync and a visit's one
+  `mediaInfo` already download; R28's drop is the same local deletion as R20's, and what it drops downloads again only as
+  before (a view, or the open post's queue ahead), never from the sync. The test pins change no code path.
+- **Safety.** Nothing contacted Instagram or touched the owner's phone: fakes, synthetic fixtures and local data only, and
+  the emulator in Mock mode.

@@ -523,8 +523,10 @@ A carousel post keeps all its items, and the viewer shows them on demand, as it 
   small stored list of its items' addresses stays with the removed post), and **Delete library** removes everything.
 - **When a carousel changes.** If the poster deletes a slide (or swaps an image for a video), the next sync or link renewal
   drops that post's downloaded images and cached videos, so a shifted item never shows the old picture; they download again
-  when viewed. If the poster only reorders slides of the same kind, the old pictures can still show at the moved positions
-  until the post is unsaved or **Delete library** runs (a known gap, `TODO.md`).
+  when viewed. The app also keeps each slide's own Instagram id, so a reorder of slides of the same kind drops them too.
+  Carousels stored before that (2026-10-14) get their slides' ids from the next sync that reaches them, or the next renewal
+  of their links, with nothing dropped; a reorder made before then can still show the old pictures at the moved positions
+  until the post is unsaved or **Delete library** runs.
 - **Messages** over an item are in [Troubleshooting](#the-viewer-messages-over-a-video-or-a-carousel-item).
 - In Mock mode the fake carousels show placeholder pictures and the bundled clip for their video items, and nothing is
   requested.
@@ -829,7 +831,8 @@ adb -d logcat -s InstagramHttp
 ```
 
 1. **Install over the app you have.** Your data is kept: the database adds one table on its first open and changes nothing
-   else.
+   else. (A build from 2026-10-14 on also adds one column to that table, each carousel slide's own id: the same, nothing
+   else changes.)
 
    ```bash
    SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
@@ -977,7 +980,8 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
   ```
 
 - **`INSTALL_FAILED_VERSION_DOWNGRADE`**: the build you are installing is older than the one on the phone (a checkout or a
-  branch from before the viewer update, whose database the installed app has already upgraded). Android refuses it because
+  branch from before the last database change, the viewer update or the carousel slides' ids of 2026-10-14, whose database
+  the installed app has already upgraded). Android refuses it because
   that build could not open the upgraded library and would close at every start. Never uninstall or clear the app's data to
   get past this: on the phone that deletes the library, the login and the request log. Pull or rebase the checkout and install
   the current build. (On the emulator, in Mock mode, an uninstall loses only fake data.)

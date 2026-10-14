@@ -140,22 +140,29 @@ class CarouselRepositoryTest {
 
     private suspend fun storePost() = db.mediaDao().upsert(listOf(media))
 
-    /** The post and three items with links from an earlier sync: two images, then a video whose link expires at [videoExpiresAt]. */
+    /**
+     * The post and three items with links from an earlier sync: two images, then a video whose link expires at [videoExpiresAt].
+     * Their child pks are [childPks]: unknown by default, as a row stored before version 3 (R28).
+     */
     private suspend fun storeOldItems(
         videoExpiresAt: Long? = START + 3_600_000,
         firstImageUrl: String = oldImage(0),
         videoUrl: String? = OLD_VIDEO,
+        childPks: List<String?> = listOf(null, null, null),
     ) {
         storePost()
         db.carouselItemDao().replace(
             pk,
             listOf(
-                CarouselItemEntity(pk, 0, MediaType.IMAGE, 1080, 1350, firstImageUrl, null, null),
-                CarouselItemEntity(pk, 1, MediaType.IMAGE, 1080, 1350, oldImage(1), null, null),
-                CarouselItemEntity(pk, 2, MediaType.VIDEO, 1080, 1920, oldImage(2), videoUrl, videoExpiresAt),
+                CarouselItemEntity(pk, 0, MediaType.IMAGE, 1080, 1350, firstImageUrl, null, null, childPks[0]),
+                CarouselItemEntity(pk, 1, MediaType.IMAGE, 1080, 1350, oldImage(1), null, null, childPks[1]),
+                CarouselItemEntity(pk, 2, MediaType.VIDEO, 1080, 1920, oldImage(2), videoUrl, videoExpiresAt, childPks[2]),
             ),
         )
     }
+
+    /** R28: the child pks the fake sends for the post's first three items: what an earlier sync stored since version 3. */
+    private val fakeChildPks: List<String?> get() = post.carouselItems!!.take(3).map { it.childPk }
 
     private suspend fun rows() = db.carouselItemDao().items(pk)
 
@@ -1252,6 +1259,60 @@ class CarouselRepositoryTest {
         assertTrue(images.path(pk, 0) != null)
     }
 
+    // --- R28: a child's own id tells a reorder that keeps every position's type ---
+
+    /**
+     * The poster swapped slides 0 and 1, two images: every position keeps its type, so R20's shape alone cannot see it, but
+     * positions 0 and 1 hold other children now (their child pks moved with them). Their cached pictures would show the old
+     * slides: the post's cached item media go.
+     */
+    @Test
+    fun aRenewalThatSwappedTwoSlidesOfOneTypeDropsTheCachedItemMedia() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        cacheEveryItem()
+        replyWithFirstThree { items -> listOf(items[1].copy(position = 0), items[0].copy(position = 1), items[2]) }
+
+        repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+
+        assertEquals(listOf(MediaType.IMAGE, MediaType.IMAGE, MediaType.VIDEO), rows().map { it.type }, "precondition: the same shape")
+        assertEquals(listOf(fakeChildPks[1], fakeChildPks[0], fakeChildPks[2]), rows().map { it.childPk }, "precondition: swapped")
+        assertEquals(listOf(false, false, false), cachedItems(), "every image and video of the post's items went")
+    }
+
+    /** The usual renewal, with the child pks known on both sides: the same children with new links keep everything (offline). */
+    @Test
+    fun aRenewalWithTheSameChildrenAndNewLinksKeepsTheCachedItemMedia() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        cacheEveryItem()
+        replyWithFirstThree()
+
+        assertEquals(VideoSource.Play(Uri.parse(newVideo(2)), "${pk}_2"), repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true))
+
+        assertEquals(List(3) { newImage(it) }, rows().map { it.imageUrl }, "precondition: the renewed links are stored")
+        assertEquals(fakeChildPks, rows().map { it.childPk }, "precondition: the same children, known")
+        assertTrue(fakeChildPks.all { it != null }, "precondition: known")
+        assertEquals(listOf(true, true, true), cachedItems(), "nothing dropped")
+    }
+
+    /**
+     * Null means unknown on either side, and never drops: rows stored before version 3 get their child pks from the next
+     * renewal with nothing dropped, and a reply without them later drops nothing either (and stores them unknown).
+     */
+    @Test
+    fun anUnknownChildPkOnEitherSideDropsNothingAtARenewal() = runTest {
+        storeOldItems()
+        cacheEveryItem()
+        replyWithFirstThree()
+        repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+        assertEquals(fakeChildPks, rows().map { it.childPk }, "precondition: filled in")
+        assertEquals(listOf(true, true, true), cachedItems(), "null to a value drops nothing")
+
+        replyWithFirstThree { items -> items.map { it.copy(childPk = null) } }
+        repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+        assertEquals(listOf(null, null, null), rows().map { it.childPk }, "precondition: unknown again")
+        assertEquals(listOf(true, true, true), cachedItems(), "a value to null drops nothing either")
+    }
+
     // --- Delete library ---
 
     /** Review Focus 5: Delete library removes the downloaded item images with the rows. */
@@ -1733,6 +1794,84 @@ class CarouselRepositoryTest {
     }
 
     /**
+     * N-M1's entry goes however the write ends. A write that throws (not a cancel: a writer or a cache failing in a way
+     * nothing foresaw) still takes its key out of the starts out, so the key is neither left skipped (a later start of it is
+     * written) nor held (the item's play from another link is handed out at once, not after a check that never comes).
+     */
+    @Test
+    fun aStartWriteThatThrowsLeavesItsKeyNeitherSkippedNorHeld() = runTest {
+        storeOldItems()
+        val repository = repository()
+        starts.answer = { _, _ -> throw IllegalStateException("the writer failed") }
+
+        assertEquals(StartAhead.Stop, repository.preloadVideo(media, 2, CarouselRepository.Visit()), "unforeseen: the queue stops")
+
+        // The item has another link now: a start of the old one still out would hold its play.
+        db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { NEW_LINK }) })
+        val play = async { repository.video(media, 2, CarouselRepository.Visit()) }
+        assertEquals(
+            VideoSource.Play(Uri.parse(NEW_LINK), "${pk}_2"),
+            withContext(Dispatchers.Default) { withTimeoutOrNull(2_000) { play.await() } },
+            "not held",
+        )
+        starts.answer = { _, _ -> StartWrite.WRITTEN }
+        assertEquals(StartAhead.Cached, repository.preloadVideo(media, 2, CarouselRepository.Visit()), "not skipped: written again")
+        assertEquals(listOf("${pk}_2 $OLD_VIDEO ${1 shl 20}", "${pk}_2 $NEW_LINK ${1 shl 20}"), starts.writes.toList())
+    }
+
+    /**
+     * N-M1 holds a play only on a start of its own key, `{pk}_{position}`. With a start of another link stalled under item 3
+     * of the post (its link replaced meanwhile), item 3's own play is held, while the post's other video item and item 3 of
+     * another post play at once.
+     */
+    @Test
+    fun aPlayIsHeldOnlyByAStartOfItsOwnItem() = runTest {
+        val oldVideo3 = "https://cdn.example.test/old/v3.mp4?oe=1"
+        val newVideo3 = "https://cdn.example.test/new/v3.mp4?oe=1"
+        storeOldItems()
+        db.carouselItemDao().replace(pk, rows() + CarouselItemEntity(pk, 3, MediaType.VIDEO, 1080, 1920, oldImage(3), oldVideo3, START + 3_600_000))
+        val other = mediaEntity(OTHER_PK, MediaType.CAROUSEL)
+        db.mediaDao().upsert(listOf(other))
+        // Its own links: a hold told by the link alone, or by the position alone, would show here.
+        db.carouselItemDao().replace(OTHER_PK, rows().map { it.copy(parentPk = OTHER_PK, videoUrl = it.videoUrl?.replace("/old/", "/other/")) })
+        val stall = Stall()
+        val repository = repository(starts = stallingWriter(videoOf(OLD_BYTE), stall))
+        val writing = async { repository.preloadVideo(media, 3, CarouselRepository.Visit()) }
+        try {
+            stall.awaitReached()
+            db.carouselItemDao().replace(pk, rows().map { if (it.position == 3) it.copy(videoUrl = newVideo3) else it })
+            val visit = CarouselRepository.Visit()
+
+            val own = async { repository.video(media, 3, visit) }
+            withContext(Dispatchers.Default) { delay(300) }
+            assertFalse(own.isCompleted, "precondition: item 3's own play is held by its start of another link")
+
+            val sameVisit = async { repository.video(media, 2, visit) }
+            val otherPost = async { repository.video(other, 3, CarouselRepository.Visit()) }
+            assertEquals(
+                VideoSource.Play(Uri.parse(OLD_VIDEO), "${pk}_2"),
+                withContext(Dispatchers.Default) { withTimeoutOrNull(2_000) { sameVisit.await() } },
+                "the post's other video item: not held",
+            )
+            assertEquals(
+                VideoSource.Play(Uri.parse(oldVideo3.replace("/old/", "/other/")), "${OTHER_PK}_3"),
+                withContext(Dispatchers.Default) { withTimeoutOrNull(2_000) { otherPost.await() } },
+                "another post's item 3: not held",
+            )
+            assertFalse(own.isCompleted, "item 3's play still waits")
+
+            stall.release()
+            assertEquals(
+                VideoSource.Play(Uri.parse(newVideo3), "${pk}_3"),
+                withContext(Dispatchers.Default) { withTimeout(10_000) { own.await() } },
+            )
+            withContext(Dispatchers.Default) { withTimeout(10_000) { writing.join() } }
+        } finally {
+            stall.release()
+        }
+    }
+
+    /**
      * M4: a video item Instagram sent no preview frame for has no poster. Ahead it is passed (not a stop: the queue goes on to
      * the starts), and its own load fails quietly; neither spends the visit's `mediaInfo`, on any visit. Its start still comes.
      */
@@ -2117,6 +2256,9 @@ class CarouselRepositoryTest {
 
         /** Item 2's link after a reshape or a renewal (N-M1): another video. */
         const val NEW_LINK = "https://cdn.example.test/new/v2.mp4?oe=1"
+
+        /** Another carousel post, digits only as every pk is. */
+        const val OTHER_PK = "2000001"
         const val OLD_BYTE: Byte = 0x0A
         const val NEW_BYTE: Byte = 0x0B
         const val CANT_LOAD = "Can't load this item"

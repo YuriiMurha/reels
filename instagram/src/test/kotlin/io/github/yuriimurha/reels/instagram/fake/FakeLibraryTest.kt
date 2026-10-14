@@ -52,6 +52,18 @@ class FakeLibraryTest {
         assertTrue(items.filter { it.type != MediaType.CAROUSEL }.all { it.carouselItems == null })
     }
 
+    /** R28: every fake child has its own synthetic child pk, digits only, that is no other child's and no post's. */
+    @Test
+    fun everyFakeChildHasItsOwnChildPk() {
+        val items = FakeLibrary().allSaved()
+        val childPks = items.flatMap { it.carouselItems.orEmpty() }.map { assertNotNull(it.childPk) }
+        assertTrue(childPks.size > 100, "precondition: many children (${childPks.size})")
+        assertTrue(childPks.all { it.matches(Regex("[0-9]{1,30}")) }, "digits only")
+        assertEquals(childPks.size, childPks.toSet().size, "no two children share one")
+        val postPks = items.map { it.pk }.toSet()
+        assertTrue(childPks.none { it in postPks }, "and none is a post's pk")
+    }
+
     @Test
     fun theSameSeedGivesTheSameCarouselItems() {
         assertEquals(

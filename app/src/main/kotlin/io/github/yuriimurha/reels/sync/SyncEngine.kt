@@ -50,9 +50,9 @@ class SyncEngine(
     /** Told which items a reconcile removed, so their cached videos go with their thumbnails (spec 8.3). */
     private val eviction: MediaEviction = MediaEviction { },
     /**
-     * R20: told which carousels a page stored items of another shape for ([itemShapeChanged]: a slide deleted, a type swapped),
-     * once that page is committed, so their downloaded item images and cached item videos (keyed by position) go. Never the
-     * post itself: its row, cover and items stay.
+     * R20: told which carousels a page stored items of another shape for ([itemShapeChanged]: a slide deleted, a type swapped,
+     * or, R28, another child at a position by its known child pk), once that page is committed, so their downloaded item
+     * images and cached item videos (keyed by position) go. Never the post itself: its row, cover and items stay.
      */
     private val carouselEviction: MediaEviction = MediaEviction { },
     /**

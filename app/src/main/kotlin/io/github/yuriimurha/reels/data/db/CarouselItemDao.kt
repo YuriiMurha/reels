@@ -33,13 +33,24 @@ interface CarouselItemDao {
 }
 
 /**
- * R20: whether [new], in place of [old], puts something else at a position: the count changed, or the type at some position
- * did (a slide deleted, an image and a video swapped). A carousel's downloaded images and cached item videos are keyed by
- * position (`{pk}_{position}`), so they must go then, or the shifted positions would show the old ones. Nothing stored before
- * ([old] empty) has nothing cached to go stale. A reorder that keeps every position's type is not seen: a known gap, since
- * telling it would mean comparing links, whose CDN paths may not stay the same when Instagram signs them again.
+ * R20, with R28: whether [new], in place of [old], puts something else at a position: the count changed, or the type at some
+ * position did (a slide deleted, an image and a video swapped), or the child at some position is another one, by its own
+ * Instagram id (`childPk`, R28: the poster reordered slides of the same type). A carousel's downloaded images and cached item
+ * videos are keyed by position (`{pk}_{position}`), so they must go then, or the shifted positions would show the old ones.
+ *
+ * A null `childPk` on either side means unknown and never counts as a change: rows stored before version 3 have none (the
+ * next sync fills them in without a drop), and a reply may not carry one. Links are never compared, so the same items with
+ * renewed links keep everything (a CDN path may not stay the same when Instagram signs it again). Nothing stored before ([old]
+ * empty) has nothing cached to go stale.
  */
-fun itemShapeChanged(old: List<CarouselItemEntity>, new: List<CarouselItemEntity>): Boolean =
-    old.isNotEmpty() && old.shape() != new.shape()
+fun itemShapeChanged(old: List<CarouselItemEntity>, new: List<CarouselItemEntity>): Boolean {
+    if (old.isEmpty()) return false
+    if (old.shape() != new.shape()) return true
+    val before = old.associateBy { it.position }
+    return new.any { item ->
+        val was = before[item.position]?.childPk
+        was != null && item.childPk != null && was != item.childPk
+    }
+}
 
 private fun List<CarouselItemEntity>.shape() = map { it.position to it.type }.sortedBy { it.first }
