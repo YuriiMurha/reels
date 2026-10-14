@@ -8,7 +8,7 @@ plugins {
     alias(libs.plugins.room)
 }
 
-// Release signing (P10). keystore.properties is gitignored and written by the owner (see README, "Release build"); without it
+// Release signing (P10). keystore.properties is gitignored and written by the owner (see docs/GUIDE.md, section 9); without it
 // the release build is signed with the debug key.
 val keystoreProperties = rootProject.file("keystore.properties").takeIf { it.isFile }?.let { file ->
     Properties().apply { file.inputStream().use(::load) }
@@ -28,7 +28,7 @@ android {
         // (INSTALL_FAILED_VERSION_DOWNGRADE) instead of installing over the upgraded library and failing at every start.
         versionCode = 3
         versionName = "0.1.0"
-        // The on-device smoke suite (src/androidTest); it runs on the emulator only, in Mock mode (README, "Automated smoke tests").
+        // The on-device smoke suite (src/androidTest); it runs on the emulator only, in Mock mode (docs/GUIDE.md, section 3).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
