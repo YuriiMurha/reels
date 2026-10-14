@@ -915,8 +915,8 @@ adb -d logcat -s InstagramHttp
    is your most recently saved post, then in the lab tap **All Saved (page 1)** and **Media info (first saved item)** (two
    requests, paced as every lab tap; you can do this as part of the lab's one run). **Look for:** in the Media info shape,
    under `items`, then `carousel_media`, the first child has a `pk` that reads `number(N digits)` or
-   `string(len N, digits)`; with no `pk`, an `id` that reads `string(len N, digits)`, or `string(len N, base64url)` for
-   Instagram's `{pk}_{owner}` form. **Report:** what the child's `pk` and `id` read. If it has neither, a reorder of slides
+   `string(len N, digits)`; with no `pk` (or one that reads `null`), an `id` that reads `string(len N, digits)`, or
+   `string(len N, base64url)` for Instagram's `{pk}_{owner}` form. **Report:** what the child's `pk` and `id` read. If it has neither, a reorder of slides
    of the same kind is still not seen (the app then behaves as before this change: a deleted slide or a swapped type is
    still handled).
 
@@ -1007,10 +1007,10 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
 
 - **`INSTALL_FAILED_VERSION_DOWNGRADE`**: the build you are installing is older than the one on the phone (a checkout or a
   branch from before the last database change, whose database the installed app has already upgraded: the database is
-  version 3 now, since the carousel slides' ids of 2026-10-14, and version 2 came with the viewer update). Android refuses it because
-  that build could not open the upgraded library and would close at every start. Never uninstall or clear the app's data to
-  get past this: on the phone that deletes the library, the login and the request log. Pull or rebase the checkout and install
-  the current build. (On the emulator, in Mock mode, an uninstall loses only fake data.)
+  version 3 now, since the carousel slides' ids of 2026-10-14, and version 2 came with the viewer update). Android refuses
+  it because that build could not open the upgraded library and would close at every start. Never uninstall or clear the
+  app's data to get past this: on the phone that deletes the library, the login and the request log. Pull or rebase the
+  checkout and install the current build. (On the emulator, in Mock mode, an uninstall loses only fake data.)
 - **`keystore.properties has no (or an empty) '...'`**: that key is missing or blank in the file (section 9).
 - **A commit is refused with `pre-commit: ... session material`, `... sessionid value` or `... release signing
   material`**: the secret guard found something that looks like a cookie, a session id or a signing file. Remove it;

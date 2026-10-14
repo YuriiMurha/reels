@@ -2454,6 +2454,25 @@ class SyncEngineTest {
         assertEquals(emptyList(), reshaped)
     }
 
+    /**
+     * The drop runs outside the page's transaction, wherever in the page the reshape was seen: before the commit a viewer
+     * could still read the old rows and write an old slide's picture back after the drop, or the commit could fail.
+     */
+    @Test
+    fun theCarouselDropRunsOutsideThePagesTransaction() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val items = carousel.carouselItems!!
+        val swapped = listOf(items[1].copy(position = 0), items[0].copy(position = 1)) + items.drop(2)
+        val inside = mutableListOf<Boolean>()
+        val engine = engine(CarouselItemsOf(fake, carousel.pk, swapped), carouselEviction = { inside += db.inTransaction(); reshaped += it })
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+
+        assertEquals(listOf(carousel.pk), reshaped, "precondition: dropped")
+        assertEquals(listOf(false), inside, "after the commit")
+    }
+
     /** A failing drop must not strand the run: the items are already committed. */
     @Test
     fun aFailingCarouselDropDoesNotStopTheRun() = runTest {

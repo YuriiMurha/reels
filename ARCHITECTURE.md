@@ -101,7 +101,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Sync engine | `app/.../sync/SyncEngine.kt` | One run: session check, collection list, scope walks, reconcile, thumbnails. [Details](#sync-engine). |
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
 | Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 home loads per user action (counted again after an idle close), plus at most one repair page view of the owner's Saved page per 24 h or per Forget. [Details](#wiring). |
-| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages push, the new page sliding in over the last (R24), and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
+| UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Every picture is a local file shown by `Thumbnail` through Coil's one loader, which `ReelsApp` provides and which keys a file by its path, time and size ([Carousels](#carousels), R28's review). Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages push, the new page sliding in over the last (R24), and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
 | App icon | `app/src/main/res/mipmap-anydpi-v26/`, `drawable/ic_launcher_*.xml` | An adaptive icon, all vectors, with a monochrome layer. [Details](#app-icon). |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list, and inside a carousel post a horizontal pager of its items ([Viewer](#viewer)); one reused ExoPlayer (Media3 `ContentFrame` in `VideoFrame`, the thumbnail, or a carousel video item's poster (R26), as shutter until the first frame; 1 s start buffer, R26), loop, remembered mute, author/caption/collection overlay, and two icon buttons: "Open on Instagram" at the start (via `Permalinks`, an `ACTION_VIEW` intent, so whichever app handles the link) and Mute/Unmute at the end, for a video, or a carousel while its settled item is one. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
@@ -302,7 +302,7 @@ Pure Kotlin/JVM.
     `video_versions` url of a video child and its `oe` expiry, and a width and height from `original_width` and
     `original_height`, else the chosen candidate's, else 0 (they may be 0 or mixed, so nothing may divide by them), and the
     child's own id (`childPk`, R28): its `pk`, a JSON number or a string of digits, or, only when it has no `pk` (or a null
-    one), its `id`, plain digits or Instagram's `{pk}_{owner pk}` form, whose first part is taken. A child pk that is missing
+    one), its `id`, plain digits or Instagram's `{pk}_{owner pk}` form (both parts digits), whose first part is taken. A child pk that is missing
     or unreadable (a `pk` of `3.1E18` or text is not replaced by the `id`) is null, which means unknown: it is never a
     `ShapeChanged` and never makes the post's items null, since nothing but R20's drop hangs on it. The list is
     `null` when the post is not a carousel or the reply has no `carousel_media`, and also when ANY child cannot be read (R4: an
@@ -1349,6 +1349,10 @@ are shown in the viewer on demand.
     every carousel's offline images on each sync; a child's pk is its identity. What R28 leaves: a reorder made while a
     post's stored child pks are unknown (before the first sync or renewal that stores them after the update, or across a reply
     without them) is not seen, and the moved positions show the old picture until the post is unsaved or Delete library runs.
+    The pictures the viewer holds in memory follow the files: Coil keys a local file by its path, last-modified time and
+    size (`LocalFileKeyer`, below), so a picture downloaded again under the same `{pk}_{position}.jpg` after a drop is drawn
+    anew, never the dropped one from memory. R28 has met only a synthetic fixture: if a real carousel's children carry no
+    readable `pk` or `id`, every child pk is null, R28 does nothing and R20's count and type rule is what applies (Status).
   - **A post gone or unsaved.** Delete library can run while a request or a download is out, and so can a FULL sync's
     reconcile, which only marks a post removed (its row stays) and has already evicted its files. So no request is sent and no
     image file is written for a post that is no longer stored or is marked removed (`isLive`; every viewer list shows only
@@ -1373,6 +1377,17 @@ are shown in the viewer on demand.
     client, or the placeholder fetcher in Mock mode) into this store, and Coil only shows the local file
     (`Thumbnail(path)`), as it does a grid thumbnail. Files also behave like thumbnails: offline after the first view, removed
     with the post.
+  - **Coil's memory cache follows the files (R28's review).** `ReelsApp` is Coil's `SingletonImageLoader.Factory`, so every
+    `Thumbnail` uses one loader, `reelsImageLoader` (`ui/common/ImageLoading.kt`): Coil's defaults (still no network fetcher:
+    a link fails to load and nothing is requested) plus `LocalFileKeyer`, which keys a `file:` picture by its path,
+    last-modified time and size. Coil 3.6.3's own key is the path alone, so a picture rewritten under the same name (R20 and
+    R28 drop a post's pictures, and the new slides download under the same `{pk}_{position}.jpg`) was drawn from memory with
+    the old bitmap until the process died. Every store writes a new file and renames it into place, so a rewrite has a new
+    time and, all but always, a new size; either makes another key. A file that is not there fails the load at the key (Okio's
+    metadata throws, as Coil's own last-modified key would), so a dropped picture is never drawn from memory. Thumbnails
+    (`{pk}.jpg`) follow the same rule. The key costs one file stat per load, which Coil makes on the thread it computes the
+    key on. Robolectric tests run with `android.app.Application` and so with Coil's default loader; `ImageLoadingTest` builds
+    the app's loader through `ReelsApp` itself.
 - **Eviction.** The sync's `MediaEviction.eachStep` drops, for each removed pk, its cached video (`VideoCache.remove`), its
   carousel items' cached videos (`removeCarouselItems`, R6) and its carousel images (`CarouselImageStore.deleteFor`); Delete
   library removes every image and clears the whole video cache. A reshaped carousel (R20, R28) loses only the last two, through
@@ -1649,20 +1664,23 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   without or an image child with `video_versions`, no `carousel_media` and a non-carousel giving `null`, an unreadable child
   giving `null` (R4), an empty array giving an empty list, twenty children, a child with no image candidate; R28: the child pk
   from a numeric or string `pk`, the `pk` over the `id`, the `id` without a `pk` in both its forms, and a missing or unreadable
-  one null with the post's items kept), `FakeLibraryTest` and `FakeInstagramClientTest` (the fake carousel's items, the same
-  for the same seed, on the saved pages and in `mediaInfo`; every fake child with its own digits-only child pk).
+  one null with the post's items kept, an `id` of `{pk}_` included), `FakeLibraryTest` and `FakeInstagramClientTest` (the fake
+  carousel's items, the same for the same seed, on the saved pages and in `mediaInfo`; every fake child with its own child pk,
+  `{pk}{position in two digits}`, and a digest of the seed-42 library showing the children draw nothing from its random source).
 - **Room.** `ReelsDatabaseMigrationTest` (a row in each of version 1's six data tables survives 1 to 2; R28: 2 to 3 keeps every
   row and the items with a null child pk, 1 to 3 goes through both, and `build` opens a version-1 or version-2 file of either
   library at version 3), `CarouselItemDaoTest` (replace, position order, the cascade, the upsert that must not cascade, Delete
-  library; R28: the child pk stored and mapped, and R20's rule case by case), `SchemaBuildGuardTest` (R21's `versionCode`, D4's
+  library; R28: the child pk stored and mapped, and R20's rule case by case, a reorder of video items included), `SchemaBuildGuardTest` (R21's `versionCode`, D4's
   asset merge). `SyncEngineTest` (items stored with the page, replaced on a re-sync, kept when the reply has none or an empty
   list, written in the page's transaction; R20's drop for a deleted slide and a type swap, none for the same items or a page
   that rolls back, and a failing drop that does not stop the run; R28: a drop for two slides of one type swapped, none for
-  the same children with renewed links, and none for a child pk unknown on either side).
+  the same children with renewed links, and none for a child pk unknown on either side; the drop outside the page's
+  transaction).
 - **Data layer.** `PacedMediaInfoTest` (every outcome and gate), `CarouselRepositoryTest` (the fill, once per visit including a
   cancelled call, the CDN lane, renewals, R2 on both paths, the cached-video table of R9, R20's drop with a real image store
   and video cache, and R28's at a renewal (two slides of one type swapped drop, the same children with new links keep
-  everything, a child pk unknown on either side drops nothing), a post marked removed mid-download, log lines with no link, host or pk, Mock mode's clip, Delete library;
+  everything, a child pk unknown on either side drops nothing, the drop only once the new items are stored), a post marked
+  removed mid-download, log lines with no link, host or pk, Mock mode's clip, Delete library;
   R23's `prefetchImage`: the CDN lane and a later load that serves its file, nothing for the cover, a video item, past the
   last item, a post unsaved, deleted (before or while it downloads), not a carousel or without stored items, an on-demand
   load that waits for the item's download ahead (and renews when that stored nothing), another item's that does not; P1:
@@ -1683,8 +1701,9 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   re-review's probe); across visits too: a new visit's play held by an earlier visit's write still stopping, its player
   reading none of the old bytes even when they commit while the repository cannot drop them yet (the review's cross-visit
   probe), no second write of a key while one is out and a write again once it has gone, a held play ending with the
-  visit at once while a reel or an image item is never held, a write that throws leaving its key neither skipped nor held,
-  and a play held only by a start of its own key, never by another item's or another post's (N-M1's last review), a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
+  visit at once while a reel or an image item is never held, a write that throws leaving its key neither skipped nor held
+  and releasing a play it already holds, and a play held only by a start of its own key, never by another item's, another
+  post's or one whose key begins with its own (`{pk}_20` and item 2) (N-M1's last review and R28's), a video item with no preview frame asking nothing for a poster on any visit (M4), R20's drop taking a
   poster and a start written by the real writer, R16 still saying offline with only a start cached, every R26 log line
   labelled and naming no link, host or pk, and every path of a visit together sending one `mediaInfo`),
   `CarouselImageStoreTest`, `VideoCacheTest` (`removeCarouselItems`), `MediaEvictionTest` (`eachStep`), `VideoStartsTest`
@@ -1731,6 +1750,9 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   event when told: a video item's poster until its first frame, the next video item's own poster until its own first frame
   (never the item before's), the poster kept under a failure, an image item's picture never tagged a poster, a single
   surface mid-swipe between two video items, and a video item 0's cover as its shutter,
+  `ImageLoadingTest` (R28's review: through the loader `ReelsApp` gives Coil, with real PNGs under native graphics, a picture
+  rewritten at the same path loads anew, told by its time when the size is the same and by its size when the time is, a
+  dropped one is a failed load, a thumbnail likewise, an unchanged one still comes from memory, and a link loads nothing),
   `ViewerOverlayTest` (the icon buttons: labels, tooltips, which button when, no text button left), `ViewerPageTest`, `AppIconGuardTest` (the layers, the safe zone, no stroke, no activity icon, each glyph's own outline,
   the helper drawing the glyph it is given, the notice and its licence terms, the notice kept, no extended icon library).
 - **Motion.** `MotionTest` (the transitions, scale 0, an unset scale, the nav host's use of every factory, the shared key, a

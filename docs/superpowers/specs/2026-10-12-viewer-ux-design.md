@@ -268,9 +268,10 @@ R28 closes R20's known gap (2026-10-14). It changes the code, with tests that fa
   every position's type as it was, so the moved positions kept each other's old pictures and starts until the post was
   unsaved or Delete library ran. The decision:
   1. **Parse.** `:instagram` reads each `carousel_media` child's own id into `RemoteCarouselItem.childPk`: its `pk` (a JSON
-     number or a string of digits), or, only when the child has no `pk`, its `id`, plain digits or Instagram's
-     `{pk}_{owner pk}` form, whose first part is taken. A child pk that is missing or unreadable is null. That is not a
-     shape change and does not make the post's items unknown: R4 stays for an unreadable type or child.
+     number or a string of digits), or, only when the child's `pk` is missing or JSON null, its `id`, plain digits or
+     Instagram's `{pk}_{owner pk}` form (both parts digits), whose first part is taken. A `pk` that is there but unreadable
+     (`3.1E18`, text) is not replaced by the `id`: the child pk is null. So is one that is missing with no readable `id`.
+     That is not a shape change and does not make the post's items unknown: R4 stays for an unreadable type or child.
   2. **Store.** Room goes to version 3: `carousel_item` gains a nullable `childPk TEXT`, and `MIGRATION_2_3` only adds the
      column, so every row stays, its child pk unknown. `versionCode` is 3 (R21), so a build from before this is refused
      instead of installed over the upgraded library. The fake library gives each child a distinct synthetic child pk.
@@ -286,4 +287,20 @@ R28 closes R20's known gap (2026-10-14). It changes the code, with tests that fa
   Pacing: nothing new is sent. The child pk is a field of the replies the sync and the visit's one `mediaInfo` already
   download, and the drop is local only. Cost: a reorder made before the first sync or renewal that stores a post's child
   pks is still not seen (those rows say unknown); so is one across a reply that carries no child pks, which stores them
-  unknown again; and one more database version, so older builds are refused (R21).
+  unknown again; and one more database version, so older builds are refused (R21). The child pk has met only a synthetic
+  fixture: whether a real carousel's children carry a readable `pk` or `id` shows in the Adapter lab's Media info shape for
+  a carousel. If they do not, R28 silently does nothing and R20's count and type rule still applies.
+
+Smaller changes from R28's review (2026-10-14), none of which sends anything or raises a rate:
+
+- **The memory cache follows the files (data lens, Important).** Coil 3.6.3 keyed a local file's picture in its memory
+  cache by its path alone (its own last-modified key is off by default). R20 and R28 drop a post's pictures and download the
+  new slides under the same `{pk}_{position}.jpg` names, so the viewer kept drawing the old pictures from memory until the
+  process died. The app now gives Coil its own loader (the Application is Coil's singleton factory), whose key for a local
+  file is its path, last-modified time and size: every store writes a new file and renames it into place, so a rewritten
+  picture is another key and loads anew, and a dropped file is a failed load, never a picture from memory. Thumbnails
+  follow the same rule. The loader is otherwise Coil's default, still with no network fetcher (R1).
+- **Test gaps (tests lens).** Pinned: a reorder of video slides drops too; a throwing start write releases a play it
+  already holds; the sync's drop runs outside the page's transaction and a renewal's only once the new items are stored;
+  a start under `{pk}_20` never holds item 2's play; an `id` of `{pk}_` with no owner digits is unreadable; the fake
+  children draw nothing from the library's random source, and their pks have the documented nine digits.

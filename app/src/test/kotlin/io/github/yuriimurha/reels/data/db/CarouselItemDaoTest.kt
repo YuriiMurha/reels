@@ -159,4 +159,19 @@ class CarouselItemDaoTest {
         assertEquals(false, itemShapeChanged(stored, of(MediaType.IMAGE to null, MediaType.IMAGE to null, MediaType.VIDEO to null)), "a value to null")
         assertEquals(true, itemShapeChanged(stored, of(MediaType.IMAGE to null, MediaType.IMAGE to "11", MediaType.VIDEO to "13")), "one known position that changed is enough")
     }
+
+    /**
+     * R28 compares the child at every position, video items included: their fully cached bytes play with no request (R78), so
+     * two video slides swapped would otherwise play each other's video, with each other's poster, online and offline.
+     */
+    @Test
+    fun itemShapeChangedTellsAReorderOfVideoItemsToo() {
+        fun of(vararg children: Pair<MediaType, String?>) =
+            children.mapIndexed { position, (type, childPk) -> item("m1", position, type).copy(childPk = childPk) }
+        val stored = of(MediaType.VIDEO to "21", MediaType.VIDEO to "22", MediaType.IMAGE to "23")
+
+        assertEquals(true, itemShapeChanged(stored, of(MediaType.VIDEO to "22", MediaType.VIDEO to "21", MediaType.IMAGE to "23")), "a video swap")
+        assertEquals(true, itemShapeChanged(stored, of(MediaType.VIDEO to "21", MediaType.VIDEO to "24", MediaType.IMAGE to "23")), "a video replaced")
+        assertEquals(false, itemShapeChanged(stored, stored.map { it.copy(videoUrl = it.videoUrl?.let { url -> "$url-renewed" }) }), "renewed links")
+    }
 }

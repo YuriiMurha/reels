@@ -761,9 +761,10 @@ last review asked for are in. Both were open in `TODO.md`.
   them only when a new item list changed the count or a position's type. A poster who reordered slides of the same type
   left the moved positions showing (or starting) each other's old media until the post was unsaved or Delete library ran.
 - **R28, the parse.** `:instagram` reads each `carousel_media` child's own id into `RemoteCarouselItem.childPk`: its `pk` (a
-  number or a string of digits), or, only when it has none, its `id`, plain digits or Instagram's `{pk}_{owner pk}` form. A
-  child pk that is missing or unreadable is null: no shape change, and the post's items stay (R4 is for the type). The
-  saved-page fixture's children already carried synthetic pks; the fake library's children now get distinct synthetic ones.
+  number or a string of digits), or, only when the `pk` is missing or JSON null, its `id`, plain digits or Instagram's
+  `{pk}_{owner pk}` form. A `pk` that is there but unreadable is not replaced by the `id`. A child pk that is missing or
+  unreadable is null: no shape change, and the post's items stay (R4 is for the type). The saved-page fixture's children
+  already carried synthetic pks; the fake library's children now get distinct synthetic ones.
 - **R28, the store.** Room version 3: `MIGRATION_2_3` only adds the nullable `carousel_item.childPk TEXT`, so every row
   survives with an unknown child pk; `3.json` is exported (a debug asset, merged after Room writes it, D4); `versionCode` is
   3 (R21's guard requires it), so a build from before this is refused on a phone that has it.
@@ -792,8 +793,41 @@ last review asked for are in. Both were open in `TODO.md`.
   2, the starts out's removal (3: out of the `finally`, skipped on a throw only, removal and completion both out) and the
   hold (3: on any entry, by position across posts, by post across items). The "throw only" and "any entry" mutants pass every
   other `CarouselRepositoryTest`: only the new pins kill them.
+- **The review (2026-10-14), and the merge of main.** `origin/main` (#18, the README for visitors and `docs/GUIDE.md`) was
+  merged in: the owner's manual edits of this entry now live in `docs/GUIDE.md` (Carousels, the viewer update's step 1 and a
+  new step 9, the `INSTALL_FAILED_VERSION_DOWNGRADE` entry), and ARCHITECTURE keeps main's Status with one "Still open"
+  bullet for R28. Two reviews then found:
+  - **Important (data lens): Coil's memory cache kept the old pictures.** Coil 3.6.3 keys a local file by its path alone,
+    so after R20 or R28 dropped a post's pictures and the new slides downloaded under the same `{pk}_{position}.jpg`, the
+    viewer drew the old pictures from memory until the process died (the reviewer's Robolectric probe saw `MEMORY_CACHE`
+    and the old picture). `ReelsApp` is now Coil's `SingletonImageLoader.Factory`, and its loader (`reelsImageLoader`, Coil's
+    defaults, still no network fetcher) keys a local file by its path, last-modified time and size (`LocalFileKeyer`):
+    every store renames a new file into place, so a rewrite is another key, and a missing file fails to load rather than
+    coming from memory. Thumbnails follow the same rule.
+  - **Tests lens: 8 survivors (4 Minor, 4 Nit), no defect.** Each now has a test: a reorder of video slides drops (F1); a
+    throwing write releases a play it already holds (F2); the sync's drop runs outside the page's transaction (F3) and a
+    renewal's only once the new items are stored (F4); a start under `{pk}_20` never holds item 2's play (F5); an `id` of
+    `{pk}_` is unreadable (F6); the fake children draw nothing from the library's random source (F7, a digest of the
+    seed-42 library) and their pks are `{pk}{position in two digits}` (F8).
+  - **Docs.** R28's `id` fallback is described as the code has it (a missing or null `pk`), and R28's open phone check
+    (a real carousel's children carrying a readable `pk` or `id`, read in the Adapter lab's Media info shape) is in TODO,
+    ARCHITECTURE and the guide's step 9.
+  - **Tests and mutants of the review round.** `./gradlew check --no-build-cache --rerun-tasks`: 1276 app tests in 95
+    classes and 388 `:instagram` tests, 0 failures, lint with no errors and the same 16 warnings; `connectedDebugAndroidTest`
+    on the emulator in Mock mode, through the app's own loader: 54 tests, 0 failures (the grow and shrink and the grid's
+    thumbnails among them). New: eight `ImageLoadingTest` (through the loader `ReelsApp` gives Coil, with real PNGs: a
+    rewrite at the same path loads the new picture, told by its time when the size is the same and by its size when the time
+    is; a dropped picture is a failed load; a thumbnail likewise; an unchanged one still comes from memory; a link loads
+    nothing; `ReelsApp` is Coil's factory), and the tests lens's eight pins (one `CarouselItemDaoTest`, three
+    `CarouselRepositoryTest`, one `SyncEngineTest`, two `FakeLibraryTest` and one more case in a `WebParsersTest`).
+    Mutation-checked in a new scratch export: 15 mutants, all killed. The loader (7: no keyer, the default loader from
+    `ReelsApp`, no size, no time, the path alone, a keyer that never answers, and Coil's own last-modified flag in its place,
+    which the same-time rewrite kills), and the tests lens's eight survivors re-applied (RX2, AX1, AX3, SX2, SX3, PX4, FX1,
+    FX2), each killed by its new test only. A check, not a mutant: with `FakeLibrary.kt` as it was before R28 (main at
+    6edb4be), the new digest test passes, so the digest is the library from before the children had pks.
 - **Pacing.** Nothing new is sent and nothing is raised. The child pk is a field of the replies the sync and a visit's one
   `mediaInfo` already download; R28's drop is the same local deletion as R20's, and what it drops downloads again only as
-  before (a view, or the open post's queue ahead), never from the sync. The test pins change no code path.
+  before (a view, or the open post's queue ahead), never from the sync. The test pins change no code path. The image
+  loader's key adds a file stat per picture load, on the device only, as Coil's own last-modified key would.
 - **Safety.** Nothing contacted Instagram or touched the owner's phone: fakes, synthetic fixtures and local data only, and
   the emulator in Mock mode.

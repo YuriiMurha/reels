@@ -42,6 +42,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
@@ -121,6 +122,8 @@ class CarouselRepositoryTest {
         cooldowns: InMemoryCooldownStore = InMemoryCooldownStore(),
         log: ((String) -> Unit)? = null,
         starts: VideoStarts = this@CarouselRepositoryTest.starts,
+        // The container's R20 steps, over this test's own cache and image store.
+        itemEviction: MediaEviction = MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { images.deleteFor(it) }),
     ): CarouselRepository {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
@@ -132,8 +135,7 @@ class CarouselRepositoryTest {
             isVideoCached = { key -> cacheKeysAsked += key; videoCache.isFullyCached(key) },
             sampleClip = sampleClip,
             log = log,
-            // The container's R20 steps, over this test's own cache and image store.
-            itemEviction = MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { images.deleteFor(it) }),
+            itemEviction = itemEviction,
             starts = starts,
         )
     }
@@ -1313,6 +1315,23 @@ class CarouselRepositoryTest {
         assertEquals(listOf(true, true, true), cachedItems(), "a value to null drops nothing either")
     }
 
+    /**
+     * A renewal drops the post's cached item media once the new items are stored, never before: a download that finished
+     * between a drop and the store would pass its link check against the old row and write the old slide back under
+     * `{pk}_{position}`, where it would outlive the drop. The eviction reads the rows as they are when it runs.
+     */
+    @Test
+    fun aRenewalDropsOnlyOnceTheNewItemsAreStored() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        val seen = Collections.synchronizedList(mutableListOf<List<String?>>())
+        val repository = repository(itemEviction = { _ -> seen += runBlocking { rows().map { it.childPk } } })
+        replyWithFirstThree { items -> listOf(items[1].copy(position = 0), items[0].copy(position = 1), items[2]) }
+
+        repository.video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+
+        assertEquals(listOf(listOf(fakeChildPks[1], fakeChildPks[0], fakeChildPks[2])), seen.toList(), "dropped once, after the store")
+    }
+
     // --- Delete library ---
 
     /** Review Focus 5: Delete library removes the downloaded item images with the rows. */
@@ -1869,6 +1888,66 @@ class CarouselRepositoryTest {
         } finally {
             stall.release()
         }
+    }
+
+    /**
+     * The hold's key is the item's whole `{pk}_{position}`: a start of item 20 (Instagram allows 20 slides) is out under
+     * `{pk}_20`, which begins with item 2's `{pk}_2`, and item 2's play is not held by it.
+     */
+    @Test
+    fun aPlayIsNotHeldByAStartWhoseKeyBeginsWithItsOwn() = runTest {
+        val video20 = "https://cdn.example.test/old/v20.mp4?oe=1"
+        storeOldItems()
+        db.carouselItemDao().replace(pk, rows() + CarouselItemEntity(pk, 20, MediaType.VIDEO, 1080, 1920, oldImage(20), video20, START + 3_600_000))
+        val stall = Stall()
+        val repository = repository(starts = stallingWriter(videoOf(OLD_BYTE), stall))
+        val writing = async { repository.preloadVideo(media, 20, CarouselRepository.Visit()) }
+        try {
+            stall.awaitReached()
+            val play = async { repository.video(media, 2, CarouselRepository.Visit()) }
+
+            assertEquals(
+                VideoSource.Play(Uri.parse(OLD_VIDEO), "${pk}_2"),
+                withContext(Dispatchers.Default) { withTimeoutOrNull(2_000) { play.await() } },
+                "item 2: not held by item 20's start",
+            )
+            stall.release()
+            withContext(Dispatchers.Default) { withTimeout(10_000) { writing.join() } }
+        } finally {
+            stall.release()
+        }
+    }
+
+    /**
+     * The throw pin's other half: a play already held by a start of another link is released when that write throws (not a
+     * cancel), at once, not when the owner leaves the post. The write is failed only once the play is waiting on it.
+     */
+    @Test
+    fun aStartWriteThatThrowsReleasesAPlayItAlreadyHolds() = runTest {
+        storeOldItems()
+        val repository = repository()
+        val reached = CompletableDeferred<Unit>()
+        val fail = CompletableDeferred<Unit>()
+        starts.answer = { _, _ ->
+            reached.complete(Unit)
+            fail.await()
+            throw IllegalStateException("the writer failed")
+        }
+        val writing = async { repository.preloadVideo(media, 2, CarouselRepository.Visit()) }
+        withContext(Dispatchers.Default) { withTimeout(10_000) { reached.await() } }
+        db.carouselItemDao().replace(pk, rows().map { item -> item.copy(videoUrl = item.videoUrl?.let { NEW_LINK }) })
+
+        val play = async { repository.video(media, 2, CarouselRepository.Visit()) }
+        withContext(Dispatchers.Default) { delay(300) }
+        assertFalse(play.isCompleted, "precondition: held by the start of the old link")
+        fail.complete(Unit)
+
+        assertEquals(StartAhead.Stop, withContext(Dispatchers.Default) { withTimeout(10_000) { writing.await() } })
+        assertEquals(
+            VideoSource.Play(Uri.parse(NEW_LINK), "${pk}_2"),
+            withContext(Dispatchers.Default) { withTimeoutOrNull(2_000) { play.await() } },
+            "released by the throw",
+        )
     }
 
     /**

@@ -444,6 +444,7 @@ class WebParsersTest {
             listOf("id" to JsonPrimitive("3100000000000000062_owner")),
             listOf("id" to JsonPrimitive("_42")),
             listOf("id" to JsonPrimitive("3100000000000000063_42_7")),
+            listOf("id" to JsonPrimitive("3100000000000000064_")), // an owner part, if there is an underscore, is digits
             listOf("id" to JsonNull),
         )
         val known = (imageChild as JsonObject).with("pk", JsonPrimitive("3100000000000000071"))

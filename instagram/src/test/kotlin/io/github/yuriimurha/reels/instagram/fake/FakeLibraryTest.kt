@@ -64,6 +64,35 @@ class FakeLibraryTest {
         assertTrue(childPks.none { it in postPks }, "and none is a post's pk")
     }
 
+    /** The documented form, `{pk}{position in two digits}`: nine digits for the fake's seven-digit pks. */
+    @Test
+    fun aFakeChildPkIsItsPostsPkAndItsPositionInTwoDigits() {
+        val carousels = FakeLibrary().allSaved().filter { it.carouselItems != null }
+        assertTrue(carousels.isNotEmpty(), "precondition")
+        for (carousel in carousels) {
+            for (child in carousel.carouselItems!!) {
+                assertEquals(carousel.pk + child.position.toString().padStart(2, '0'), child.childPk, carousel.pk)
+                assertEquals(9, child.childPk!!.length, carousel.pk)
+            }
+        }
+    }
+
+    /**
+     * The children draw nothing from the library's random source, so adding them (or changing them) left every post, author,
+     * caption and collection of the Mock-mode library as it was. The digest is of the library before R28 changed the children
+     * (seed 42, 300 items) and still holds; a change that means to reshuffle the library updates it here, on purpose.
+     */
+    @Test
+    fun theChildrenDrawNothingFromTheLibrarysRandom() {
+        val library = FakeLibrary(itemCount = 300)
+        val posts = library.allSaved().joinToString("\n") { "${it.pk} ${it.type.name} ${it.author} ${it.caption} ${it.carouselCount}" }
+        val members = (1..8).joinToString("\n") { c -> library.itemsIn("c$c").joinToString(",") { it.pk } }
+        assertEquals("69a7a68ad9f162f86dbf76986e947e3e5abe1d9f4f10b140614046b1c428a1dc", sha256(posts + "\n--\n" + members))
+    }
+
+    private fun sha256(text: String): String =
+        java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray()).joinToString("") { "%02x".format(it) }
+
     @Test
     fun theSameSeedGivesTheSameCarouselItems() {
         assertEquals(
