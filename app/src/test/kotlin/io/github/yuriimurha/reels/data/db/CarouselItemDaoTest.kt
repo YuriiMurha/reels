@@ -174,4 +174,32 @@ class CarouselItemDaoTest {
         assertEquals(true, itemShapeChanged(stored, of(MediaType.VIDEO to "21", MediaType.VIDEO to "24", MediaType.IMAGE to "23")), "a video replaced")
         assertEquals(false, itemShapeChanged(stored, stored.map { it.copy(videoUrl = it.videoUrl?.let { url -> "$url-renewed" }) }), "renewed links")
     }
+
+    /**
+     * R29, the rule itself: the cover goes only when another slide is first, by its type or by its child pk known on both
+     * sides. A change further on keeps it, and so do renewed links; a child pk unknown on either side tells nothing.
+     */
+    @Test
+    fun firstSlideChangedTellsOnlyAnotherFirstSlide() {
+        fun of(vararg children: Pair<MediaType, String?>) =
+            children.mapIndexed { position, (type, childPk) -> item("m1", position, type).copy(childPk = childPk) }
+        val stored = of(MediaType.IMAGE to "11", MediaType.IMAGE to "12", MediaType.VIDEO to "13")
+        val unknown = stored.map { it.copy(childPk = null) }
+
+        assertEquals(true, firstSlideChanged(stored, of(MediaType.IMAGE to "12", MediaType.IMAGE to "11", MediaType.VIDEO to "13")), "slides 0 and 1 swapped")
+        assertEquals(true, firstSlideChanged(stored, of(MediaType.IMAGE to "12", MediaType.VIDEO to "13")), "slide 0 deleted")
+        assertEquals(true, firstSlideChanged(stored, of(MediaType.IMAGE to "14", MediaType.IMAGE to "12", MediaType.VIDEO to "13")), "slide 0 replaced")
+        assertEquals(true, firstSlideChanged(stored, of(MediaType.VIDEO to "11", MediaType.IMAGE to "12", MediaType.VIDEO to "13")), "slide 0's type")
+        assertEquals(true, firstSlideChanged(unknown, of(MediaType.VIDEO to null, MediaType.IMAGE to null)), "a type tells it with no child pks")
+        assertEquals(true, firstSlideChanged(stored, of(MediaType.IMAGE to "12").map { it.copy(position = 1) }), "no slide 0 at all")
+
+        assertEquals(false, firstSlideChanged(stored, stored.map { it.copy(imageUrl = "${it.imageUrl}-renewed") }), "renewed links")
+        assertEquals(false, firstSlideChanged(stored, of(MediaType.IMAGE to "11", MediaType.VIDEO to "13")), "slide 1 deleted")
+        assertEquals(false, firstSlideChanged(stored, of(MediaType.IMAGE to "11", MediaType.VIDEO to "13", MediaType.IMAGE to "12")), "slides 1 and 2 swapped")
+        assertEquals(false, firstSlideChanged(stored, of(MediaType.IMAGE to "11", MediaType.IMAGE to "12", MediaType.IMAGE to "13")), "slide 2's type")
+        assertEquals(false, firstSlideChanged(stored, stored + item("m1", 3).copy(childPk = "14")), "a slide added at the end")
+        assertEquals(false, firstSlideChanged(unknown, of(MediaType.IMAGE to "12", MediaType.VIDEO to "13")), "unknown before")
+        assertEquals(false, firstSlideChanged(stored, of(MediaType.IMAGE to null, MediaType.VIDEO to "13")), "unknown now")
+        assertEquals(false, firstSlideChanged(emptyList(), stored), "nothing stored, no cover to tell from")
+    }
 }

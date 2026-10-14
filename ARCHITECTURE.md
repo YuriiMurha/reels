@@ -983,6 +983,10 @@ page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
   - A thumbnail failure (network, decode or disk) is counted and the sync goes on. A page is committed before its
     thumbnails are cached, so a resumed scope first retries the thumbnails of items the run already saw without one.
   - None of this adds a request, a rate or a concurrency: the gates only stop work.
+  - **R29: a cover the page dropped.** A page that put another slide first in a carousel (below) drops that post's cover once
+    it is committed, and the post goes to the page's own thumbnail step with the posts that have none: the new cover is
+    fetched at once, from the post's cover link, exactly as for a new post. If that fails (a 429, offline), the post has no
+    cover, and the next sync that reaches it (or a resume, which retries the thumbnails of what the run saw) fetches it.
 - **Carousel items.** In the page's transaction, right after the media upsert, a carousel post's items are replaced with the
   ones its reply carried (`CarouselItemDao.replace`), so a failed page rolls them back with the post. A `null` or EMPTY list
   says nothing about them (R2) and the stored items stay: an empty array is more likely a shape blip than a carousel without
@@ -992,13 +996,17 @@ page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
   their first open ([Carousels](#carousels)). A post only soft-removed (`markRemoved`, an UPDATE) keeps its items; the
   cascade fires on a real DELETE only. Before the replace, the stored items are read: when the new ones differ in count or in
   the type at some position (`itemShapeChanged`, R20), or hold another child at some position by a child pk known on both
-  sides (R28), the page's outcome names the post.
+  sides (R28), the page's outcome names the post. When the new items also put another slide first (`firstSlideChanged`, R29:
+  the type at position 0 changed, or its child pk did while known on both sides), it names the post among the new covers too.
 - **Eviction.** The removed pks of a reconcile are handed to a `MediaEviction` (default none), so their cached videos, their
   carousel items' cached videos and their carousel images go with their thumbnails: `MediaEviction.eachStep` runs each step
   for each pk on its own, so one that fails (a disk error, a key it refuses) skips no other step and no later pk (the
   reconcile is already committed, and what a failed step leaves only takes space). The same way, after the commit, the
   carousels a page reshaped go to `carouselEviction` (R20: their item images and item videos only), and a failing drop does not
-  stop the run. Files are never touched inside the page's transaction, so a page that rolls back drops nothing.
+  stop the run. Then the carousels whose first slide changed lose their cover (R29, `dropCovers`): `thumbPath` cleared, then
+  `{pk}.jpg` deleted, each step on its own, before the page's thumbnail step fetches the new one. That drop is not
+  cancellable: a Cancel between the commit and it would leave the old cover for good, since the next sync stores the same
+  items and sees no change. Files are never touched inside the page's transaction, so a page that rolls back drops nothing.
 - **Session signals.** `run` reads `signals.epoch()` first thing inside its try (a session layer that cannot answer ends the
   run PAUSED "Unexpected error", never RUNNING), tells the session layer `sessionOk(username, epoch)` once
   `currentUser()` has succeeded, and passes the same epoch with `loginRequired` and `challengeRequired`; a failing receiver
@@ -1224,7 +1232,8 @@ are shown in the viewer on demand.
   or an empty one keeps the stored items (R2), and an unreadable child leaves a post's items unknown (R4, `null`, no
   `ShapeChanged`: [`:instagram`](#instagram)). Posts synced before this update have no items until a FULL run or the first
   open of the post (below). A page that stores items of another shape for a carousel (R20 with R28, below) names that post
-  in its outcome, and once the page is committed the engine's `carouselEviction` drops the post's cached item media.
+  in its outcome, and once the page is committed the engine's `carouselEviction` drops the post's cached item media; when
+  the first slide is another one, the engine also drops the post's cover and its page fetches the new one (R29, below).
 - **`PacedMediaInfo`** (`data/media/`) is the viewer's one way of asking Instagram about an item: one `mediaInfo` on the
   Pacer's interactive lane, under the session gates of R76 and R79. It was cut out of `RealVideoSourceResolver` (whose answers
   are unchanged) so that a reel's link renewal and a carousel's fill ask the same way.
@@ -1247,9 +1256,10 @@ are shown in the viewer on demand.
     with no link, renews the post's links, and only a link that differs from the refused one is downloaded. An `IOException` is
     "Offline: this item isn't cached yet". The CDN's own 429 (`CdnRateLimited`) is "Can't load this item" and renews nothing.
   - `prefetchImage(media, position, visit)` (R23, R25): the same download of the item's STORED link, through the same fetcher,
-    CDN lane and store, ahead of the swipe. Only an IMAGE item past item 0 (the cover, R10) with stored items, of a post still
-    live; it never fills. It answers an `ImageAhead`: `Shown(path)` (the file, already there or just downloaded), `Skipped`
-    (nothing to fetch for this item) or `Stop` (fetch nothing more ahead in this visit). A refused link, or none, takes the
+    CDN lane and store, ahead of the swipe. Only an IMAGE item with stored items, of a post still live, and never item 0 while
+    the cover shows it (R10; `Visit.coverShows`, R29 below: without a cover item 0 is fetched like any other); it never
+    fills. It answers an `ImageAhead`: `Shown(path)` (the file, already there or just downloaded), `Skipped` (nothing to
+    fetch for this item) or `Stop` (fetch nothing more ahead in this visit). A refused link, or none, takes the
     visit's one renewal by the same rule as `image` (R25: the first call that needs it sends it, every later one shares what
     it brought) and loads the item's renewed link; a renewal that brings no other link (spent already on the links stored now)
     or that failed answers `Stop`, and so do the CDN's 429, offline, a post gone and anything unforeseen (P1). A failure never
@@ -1259,7 +1269,8 @@ are shown in the viewer on demand.
     (a video item has no other picture, so nothing else is kept under its position; R20 drops it with the post's other item
     media), the same per-item lock, R25's renewal, P1's stops, P2's re-read and D3's guard; it logs "carousel poster failed
     (<reason>)". Only an item stored as a video: `prefetchImage` passes a video item and `prefetchPoster` an image item, so a
-    page the pager shows as one type never gets the other type's picture after a reshape. Item 0 gets none (the cover).
+    page the pager shows as one type never gets the other type's picture after a reshape. Item 0 gets none while the cover
+    shows it (R29).
     A video item Instagram sent no preview frame for (an empty `imageUrl`) has no poster: `Skipped`, with no renewal and no
     stop, and its own load (`image`) fails quietly without asking (M4); before, it spent the visit's `mediaInfo` on every
     visit and its stop ended the starts.
@@ -1353,6 +1364,17 @@ are shown in the viewer on demand.
     size (`LocalFileKeyer`, below), so a picture downloaded again under the same `{pk}_{position}.jpg` after a drop is drawn
     anew, never the dropped one from memory. R28 has met only a synthetic fixture: if a real carousel's children carry no
     readable `pk` or `id`, every child pk is null, R28 does nothing and R20's count and type rule is what applies (Status).
+  - **R29: another first slide takes the cover with it.** Item 0 and the grid tile show the post's stored cover (`{pk}.jpg`),
+    the first slide's picture, which a sync writes only while the post has none. So when a renewal's drop fires and slide 0 is
+    another one (`firstSlideChanged`: the type at position 0 changed, or its child pk did while known on both sides, or there
+    is no position 0), once the items are stored the post's `thumbPath` is cleared and its cover file goes (`coverEviction`,
+    the container's `{ thumbnails.delete(it) }`), not cancellably, and the visit says so (`Visit.coverDropped`, a
+    `StateFlow`). Nothing here downloads the cover: the grid tile shows its placeholder until the next sync that reaches the
+    post writes it ([Sync engine](#sync-engine)). `Visit.coverShows(media)` (the row has a cover, and the visit dropped none)
+    is the one rule for item 0: while it holds, item 0's own picture is never downloaded, ahead or on demand; once it does
+    not, item 0 loads like any other item (`image`, and `prefetchImage` or `prefetchPoster` for position 0). A change further
+    on, and renewed links, keep the cover, so it still shows offline. What R29 leaves: a first slide deleted or swapped for
+    one of the same type while the child pks are unknown is not seen (R28's unknowns).
   - **A post gone or unsaved.** Delete library can run while a request or a download is out, and so can a FULL sync's
     reconcile, which only marks a post removed (its row stays) and has already evicted its files. So no request is sent and no
     image file is written for a post that is no longer stored or is marked removed (`isLive`; every viewer list shows only
@@ -1392,7 +1414,8 @@ are shown in the viewer on demand.
   carousel items' cached videos (`removeCarouselItems`, R6) and its carousel images (`CarouselImageStore.deleteFor`); Delete
   library removes every image and clears the whole video cache. A reshaped carousel (R20, R28) loses only the last two, through
   the container's `carouselItemEviction` (`eachStep` too), which the sync runs after the page's commit and a renewal after its
-  store; never the post's own video or its thumbnail.
+  store; never the post's own video, and its thumbnail only when the first slide changed (R29: the sync through its own
+  `ThumbnailStore`, a renewal through `coverEviction`, both after clearing `thumbPath`).
 - **Pacing.**
   - **The sync is unchanged and sends no new request.** The items come in the replies it already downloads. R20's drop
     deletes local files and cache keys only; a dropped image downloads again only when the owner views that item (or the
@@ -1400,6 +1423,11 @@ are shown in the viewer on demand.
   - **R28 sends nothing new.** A child's own id is one more field of the replies the sync and a visit's one `mediaInfo`
     already download, and the drop it can now also trigger (a reorder of slides of one type) is the same local deletion; what
     it drops is downloaded again as before, by a view or the queue ahead of an open post, never by the sync.
+  - **R29 sends nothing new.** The cover's drop is local. A dropped cover is downloaded again only by the sync's existing
+    thumbnail step on the CDN lane (the page's that dropped it, or the next sync's that reaches the post): one CDN download
+    per changed carousel, as for a new post. In the viewer, while a post has no cover, item 0's own picture is one download
+    on the same lane, by its own load or the queue (R23), like any other slide's, and it is kept, so it shows offline. No
+    lane's concurrency, jitter or budget changes.
   - **A carousel visit sends at most one `mediaInfo`,** on the interactive lane (a 2 s minimum gap, counted in the 24 h budget
     and the cooldown), under the same session gates as a reel's link renewal. That one request is the fill and any renewal
     together: swiping through the items adds no request beyond it, and never starts the next post's prefetch (R11).
@@ -1481,11 +1509,11 @@ renewal and the cache are in [Video](#video).
     refusal at most once;
   - **the pictures fetched ahead (R23, R26, `fetchAhead`).** Once the fill is in (stored items: at once), the visit runs one
     queue in its scope: each turn picks the next page by the settled item as it is then (`nextAhead`: the items after it in
-    order, then those before it, the nearest first), skipping item 0, pictures shown already, items whose own load was asked
-    for and pages taken before, and calls `CarouselRepository.prefetchImage` for an image item or `prefetchPoster` for a
-    video item (R26): `Shown` shows the picture (`imagePath`), `Skipped` goes on with the next, `Stop` ends the queue for
-    the visit (P1, R25). A failure never shows. One download at a time: the lane has two slots, and the other is the settled
-    item's own. An item settle reorders what is left without restarting the queue or cancelling the download that is out;
+    order, then those before it, the nearest first), skipping item 0 while the cover shows it (R29: without one it is a
+    picture like the others), pictures shown already, items whose own load was asked for and pages taken before, and calls
+    `CarouselRepository.prefetchImage` for an image item or `prefetchPoster` for a video item (R26): `Shown` shows the
+    picture (`imagePath`), `Skipped` goes on with the next, `Stop` ends the queue for the visit (P1, R25). A failure never
+    shows. One download at a time: the lane has two slots, and the other is the settled item's own. An item settle reorders what is left without restarting the queue or cancelling the download that is out;
     leaving the post cancels it with the visit;
   - **then the video starts (R26).** Once no picture is left, the same queue takes the video items (`nextStart`: the same
     order, item 0 included, never the settled item, which the player reads, nor one taken before) and calls
@@ -1526,6 +1554,12 @@ renewal and the cache are in [Video](#video).
   downloads it itself, once a visit (or waits for its download ahead, if that is out); until then the viewer's black shows.
   R23 amends R10's "no prefetch of items": on the phone each newly viewed image showed the black placeholder for the lane's
   jitter and its download.
+  - **No cover (R29).** A post with no cover shows item 0's own picture, downloaded like any other item's. When the visit's
+    renewal drops the cover (another first slide, [Carousels](#carousels)), the visit follows `Visit.coverDropped`: on item 0
+    its own picture loads at once (the owner would see the cover go), elsewhere when item 0 settles or the queue gets to it.
+    A sync that drops the cover of the open post fetches the new one in the same page, and the page shows it as the row
+    comes back; if that fetch fails, item 0 is black for the rest of the visit (the visit took the row with the cover), and
+    loads its own picture when the post is shown again.
   - **Posters (R26, reversing R10's "video items have no poster").** A video item's poster is fetched ahead with the pictures,
     and by the item's own load when it settles before its poster came (a poster that cannot come says nothing: the video
     plays, or says why it cannot). `CarouselPager` gives the item's picture (`ItemStill`: its poster, item 0's cover, else
@@ -1670,16 +1704,22 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
 - **Room.** `ReelsDatabaseMigrationTest` (a row in each of version 1's six data tables survives 1 to 2; R28: 2 to 3 keeps every
   row and the items with a null child pk, 1 to 3 goes through both, and `build` opens a version-1 or version-2 file of either
   library at version 3), `CarouselItemDaoTest` (replace, position order, the cascade, the upsert that must not cascade, Delete
-  library; R28: the child pk stored and mapped, and R20's rule case by case, a reorder of video items included), `SchemaBuildGuardTest` (R21's `versionCode`, D4's
+  library; R28: the child pk stored and mapped, and R20's rule case by case, a reorder of video items included; R29's rule
+  case by case), `SchemaBuildGuardTest` (R21's `versionCode`, D4's
   asset merge). `SyncEngineTest` (items stored with the page, replaced on a re-sync, kept when the reply has none or an empty
   list, written in the page's transaction; R20's drop for a deleted slide and a type swap, none for the same items or a page
   that rolls back, and a failing drop that does not stop the run; R28: a drop for two slides of one type swapped, none for
   the same children with renewed links, and none for a child pk unknown on either side; the drop outside the page's
-  transaction).
+  transaction; R29: another first slide drops the cover after the commit and the page fetches the new one once, a new cover
+  that could not be fetched comes with the next sync that reaches the post, and a change further on, renewed links and a
+  page that rolls back keep it).
 - **Data layer.** `PacedMediaInfoTest` (every outcome and gate), `CarouselRepositoryTest` (the fill, once per visit including a
   cancelled call, the CDN lane, renewals, R2 on both paths, the cached-video table of R9, R20's drop with a real image store
   and video cache, and R28's at a renewal (two slides of one type swapped drop, the same children with new links keep
-  everything, a child pk unknown on either side drops nothing, the drop only once the new items are stored), a post marked
+  everything, a child pk unknown on either side drops nothing, the drop only once the new items are stored), R29's at a
+  renewal (another first slide clears the cover's path and deletes its file once the items are stored, the visit knows, item
+  0 then loads its own picture on demand and ahead, and the next sync that reaches the post writes the cover again; a
+  change further on and the same slides with new links keep it), a post marked
   removed mid-download, log lines with no link, host or pk, Mock mode's clip, Delete library;
   R23's `prefetchImage`: the CDN lane and a later load that serves its file, nothing for the cover, a video item, past the
   last item, a post unsaved, deleted (before or while it downloads), not a carousel or without stored items, an on-demand
@@ -1719,7 +1759,7 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   a removal of one key alone), `ViewerLoadControlTest` (R26: a streamed video starts at 1 s and goes on after a stall at 2 s,
   read from the load control's own decisions; every other decision Media3's default, the minimum buffer included).
 - **Wiring** (source and runtime pins). `BackendWiringGuardTest` (the carousel request's gates in both modes, anchored at both
-  ends, the folders, the construction sites, the eviction, R20's shared drop and Delete library wiring),
+  ends, the folders, the construction sites, the eviction, R20's shared drop, R29's cover drop and Delete library wiring),
   `InstagramTransportWiringTest` (a Mock mode carousel visit never builds the transport or moves the real budget, nor does a
   picture fetched ahead, which stores the fake fetcher's placeholder on the fake backend's own CDN lane, never the real one),
   `VideoWiringGuardTest` (one `ContentFrame`, no cookie jar, the resolver's gate; R26: the one player built with
@@ -1743,7 +1783,9 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   that cannot come saying nothing, a video item with no preview frame still getting its start with no request (M4), the
   earlier starts nearest first, a start slow to stop holding the player up for the 300 ms cap only, the next start coming
   once it has stopped (M5), a start of a link replaced meanwhile holding the player until it has stopped and been dropped,
-  the item then playing its new link (N-M1), and every path of a visit sending one `mediaInfo`),
+  the item then playing its new link (N-M1), and every path of a visit sending one `mediaInfo`; R29: a renewal that puts
+  another slide first shows item 0's own picture at once on item 0, and, with the owner elsewhere, has the queue fetch it in
+  its turn, last),
   `ViewerScreenCarouselTest` (the real screen over a player the test watches and whose every call is checked for its thread;
   C1's list moves; R16 on screen; R26 end to end in Mock mode: the poster fetched ahead covers the video item until the
   player reports its first frame), `CarouselPagerTest` also pins R26's shutter with a player that raises the first-frame
@@ -1752,7 +1794,8 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   surface mid-swipe between two video items, and a video item 0's cover as its shutter,
   `ImageLoadingTest` (R28's review: through the loader `ReelsApp` gives Coil, with real PNGs under native graphics, a picture
   rewritten at the same path loads anew, told by its time when the size is the same and by its size when the time is, a
-  dropped one is a failed load, a thumbnail likewise, an unchanged one still comes from memory, and a link loads nothing),
+  dropped one is a failed load, a thumbnail likewise, an unchanged one still comes from memory, and a link loads nothing;
+  R29: a dropped cover is a failed load until the new one, under the same name, loads anew),
   `ViewerOverlayTest` (the icon buttons: labels, tooltips, which button when, no text button left), `ViewerPageTest`, `AppIconGuardTest` (the layers, the safe zone, no stroke, no activity icon, each glyph's own outline,
   the helper drawing the glyph it is given, the notice and its licence terms, the notice kept, no extended icon library).
 - **Motion.** `MotionTest` (the transitions, scale 0, an unset scale, the nav host's use of every factory, the shared key, a

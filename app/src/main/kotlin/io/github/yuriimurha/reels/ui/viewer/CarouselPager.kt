@@ -65,7 +65,8 @@ data class CarouselItemUi(
     val type: MediaType,
     /**
      * The downloaded picture (absolute path): an image item's image, or a video item's poster (R26), shown until its first
-     * frame and under its failure. Null while there is none: item 0 shows the cover meanwhile, any other the viewer's black.
+     * frame and under its failure. Null while there is none: item 0 shows the cover meanwhile (when the post has one; R29),
+     * any other the viewer's black.
      */
     val imagePath: String? = null,
     /** Why the item cannot show or play ("Can't load this item", "Offline: this item isn't cached yet", ...), or null. */

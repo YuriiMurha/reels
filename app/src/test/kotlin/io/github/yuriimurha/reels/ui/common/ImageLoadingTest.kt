@@ -155,6 +155,27 @@ class ImageLoadingTest {
         assertEquals(Color.GREEN, loadFile(path).color)
     }
 
+    /**
+     * R29, the grid tile: a cover dropped because another slide is first (its file deleted, its path cleared) is never drawn
+     * from memory. A view still holding its path gets a failed load, so its placeholder, and the new cover, written later under
+     * the same name, loads anew.
+     */
+    @Test
+    fun aDroppedCoverShowsThePlaceholderUntilTheNewCoverNeverTheOldPicture() {
+        val thumbnails = ThumbnailStore(File(tmp.root, "thumbs"))
+        val path = thumbnails.write(PK, png(Color.RED, 4))
+        assertEquals(Color.RED, loadFile(path).color)
+        assertEquals(DataSource.MEMORY_CACHE, loadFile(path).source, "precondition: held in memory")
+
+        thumbnails.delete(PK)
+        assertIs<ErrorResult>(loadFile(path), "the placeholder, never the old slide")
+
+        assertEquals(path, thumbnails.write(PK, png(Color.GREEN, 64)), "precondition: the new cover under the same name")
+        val again = loadFile(path)
+        assertEquals(Color.GREEN, again.color, "the new cover")
+        assertNotEquals(DataSource.MEMORY_CACHE, again.source)
+    }
+
     /** The loader has no network fetcher: every picture is a local file (R1). A link is an error, with no request. */
     @Test
     fun theLoaderFetchesNothingFromTheNetwork() {

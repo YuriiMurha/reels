@@ -53,4 +53,20 @@ fun itemShapeChanged(old: List<CarouselItemEntity>, new: List<CarouselItemEntity
     }
 }
 
+/**
+ * R29: whether [new], in place of [old], puts another slide first: the type at position 0 changed, or its child pk did while
+ * known on both sides (R28's rule, at position 0 only), or [new] has no position 0. Item 0 and the grid tile show the post's
+ * stored cover (`{pk}.jpg`), which is the first slide's picture and which the sync writes only while the post has none, so
+ * when this is true the cover is another slide's and must go too. A change further on (a later slide deleted, added or
+ * swapped) keeps the cover, and so do renewed links. A child pk unknown on either side tells nothing, as for R28: a first
+ * slide deleted, or swapped for one of the same type, while the child pks are unknown is not seen. Nothing stored before
+ * ([old] empty) has no first slide to compare. True only when [itemShapeChanged] is.
+ */
+fun firstSlideChanged(old: List<CarouselItemEntity>, new: List<CarouselItemEntity>): Boolean {
+    val was = old.firstOrNull { it.position == 0 } ?: return false
+    val first = new.firstOrNull { it.position == 0 } ?: return true
+    if (was.type != first.type) return true
+    return was.childPk != null && first.childPk != null && was.childPk != first.childPk
+}
+
 private fun List<CarouselItemEntity>.shape() = map { it.position to it.type }.sortedBy { it.first }

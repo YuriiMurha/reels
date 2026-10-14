@@ -304,3 +304,37 @@ Smaller changes from R28's review (2026-10-14), none of which sends anything or 
   already holds; the sync's drop runs outside the page's transaction and a renewal's only once the new items are stored;
   a start under `{pk}_20` never holds item 2's play; an `id` of `{pk}_` with no owner digits is unreadable; the fake
   children draw nothing from the library's random source, and their pks have the documented nine digits.
+
+R29 closes the known gap R28's review found (2026-10-15). It changes the code, with tests that fail without it.
+
+- **R29: another first slide takes the post's cover with it (amends R10, R20, R28 and §4).** Why: item 0 and the grid tile
+  show the post's stored cover (`{pk}.jpg`, the sync's thumbnail), which is the first slide's picture (R10) and which a sync
+  writes only while the post has none, and R20 and R28 dropped only the slides' own files (`{pk}_{position}.jpg`) and the
+  item video starts. So after a poster deleted, moved or swapped slide 0, item 0 and the tile kept the old cover until the
+  post was unsaved or Delete library ran. The decision:
+  1. **The rule.** Slide 0 changed when the type at position 0 changed, or its child pk did while known on both sides (R28's
+     rule at position 0 only), or the new items have no position 0 (`firstSlideChanged`). That is only ever so when R20's
+     drop fires, and the cover goes only then. A change further on (a later slide deleted, added or moved) and renewed links
+     keep the cover, so it still shows offline.
+  2. **At the sync.** Once the page is committed, the post's `thumbPath` is cleared and its `{pk}.jpg` deleted, and the
+     page's own thumbnail step then fetches the new cover from the post's cover link, exactly as for a new post. If that
+     fetch fails (the CDN's 429, offline), the post has no cover, and the next sync that reaches it (or a resume of the run)
+     fetches it. The drop is not cancellable: a Cancel between the commit and the drop would leave the old cover for good,
+     because the next sync stores the same items and sees no change.
+  3. **At a renewal.** The same drop, once the renewal's items are stored, but nothing downloads the cover: the grid tile
+     shows its placeholder until the next sync that reaches the post writes it. The visit knows (`Visit.coverDropped`), and
+     item 0 shows its own picture instead, by R10's rule for a post without a cover: `{pk}_0.jpg`, downloaded on demand like
+     any slide's, at once when the owner is on item 0, else when item 0 settles, and R23's queue takes it in its turn
+     (`Visit.coverShows` is the one rule for "item 0 shows the cover", for the queue and the item's own load alike).
+  4. **Memory.** The tile and item 0 follow the files (R28's review: Coil keys a local file by its path, time and size), so
+     between the drop and the new cover they show their placeholder, never the old picture from memory.
+
+  Pacing: no new API request; the drop is local. A dropped cover is downloaded again only by the sync's existing thumbnail
+  step on the CDN lane (that page's, or the next sync's that reaches the post): one CDN download per changed carousel. In the
+  viewer, while a post has no cover, item 0's own picture is one download on the same lane, by the item's own load or R23's
+  queue, as any other slide's, and it is kept, so it shows offline. No lane's concurrency, jitter or budget changes. Cost: an
+  old post whose cover a renewal dropped shows the tile's placeholder until a sync reaches it, which for an old post is a Full
+  sync (a Sync stops at the first known post); a first slide deleted, or swapped for one of the same type, while the child
+  pks are unknown is still not seen (R28's unknowns); and when a sync drops the cover of the post open in the viewer and
+  cannot fetch the new one, item 0 shows black for the rest of that visit (the visit took the row with the cover; shown
+  again, item 0 loads its own picture).

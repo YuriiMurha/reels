@@ -15,21 +15,27 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.CarouselItemEntity
 import io.github.yuriimurha.reels.data.db.MediaEntity
+import io.github.yuriimurha.reels.data.db.SyncMode
+import io.github.yuriimurha.reels.data.db.SyncRunEntity
+import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.library.LibraryDeletion
 import io.github.yuriimurha.reels.data.library.LibraryRepository
 import io.github.yuriimurha.reels.instagram.InstagramClient
 import io.github.yuriimurha.reels.instagram.InstagramException
 import io.github.yuriimurha.reels.instagram.MediaType
+import io.github.yuriimurha.reels.instagram.Page
 import io.github.yuriimurha.reels.instagram.RemoteCarouselItem
 import io.github.yuriimurha.reels.instagram.RemoteMedia
 import io.github.yuriimurha.reels.instagram.fake.FakeFailures
 import io.github.yuriimurha.reels.instagram.fake.FakeInstagramClient
 import io.github.yuriimurha.reels.instagram.fake.FakeLibrary
 import io.github.yuriimurha.reels.sync.SessionSignals
+import io.github.yuriimurha.reels.sync.SyncEngine
 import io.github.yuriimurha.reels.sync.pacing.InMemoryCooldownStore
 import io.github.yuriimurha.reels.sync.pacing.InMemoryRequestLog
 import io.github.yuriimurha.reels.sync.pacing.Pacer
 import io.github.yuriimurha.reels.sync.pacing.PacingPolicy
+import io.github.yuriimurha.reels.testutil.InMemoryLibraryAccount
 import io.github.yuriimurha.reels.testutil.cacheWholeFile
 import io.github.yuriimurha.reels.testutil.inMemoryDb
 import io.github.yuriimurha.reels.testutil.mediaEntity
@@ -95,6 +101,9 @@ class CarouselRepositoryTest {
     /** R26: where video starts are written; it records each write and answers what the test says. */
     private val starts = RecordingStarts()
     private val images by lazy { CarouselImageStore(File(tmp.root, "carousel")) }
+
+    /** The posts' covers, as the sync stores them (R29 drops one). */
+    private val thumbs by lazy { ThumbnailStore(File(tmp.root, "thumbs")) }
     private var sessionReady = true
 
     private var databaseProvider: StandaloneDatabaseProvider? = null
@@ -124,6 +133,8 @@ class CarouselRepositoryTest {
         starts: VideoStarts = this@CarouselRepositoryTest.starts,
         // The container's R20 steps, over this test's own cache and image store.
         itemEviction: MediaEviction = MediaEviction.eachStep({ videoCache.removeCarouselItems(it) }, { images.deleteFor(it) }),
+        // The container's R29 step, over this test's own thumbnails.
+        coverEviction: MediaEviction = MediaEviction.eachStep({ thumbs.delete(it) }),
     ): CarouselRepository {
         val clock = { START + testScheduler.currentTime }
         val pacer = Pacer(PacingPolicy.Conservative, InMemoryRequestLog(), cooldowns, Random(1), now = clock)
@@ -137,6 +148,7 @@ class CarouselRepositoryTest {
             log = log,
             itemEviction = itemEviction,
             starts = starts,
+            coverEviction = coverEviction,
         )
     }
 
@@ -1330,6 +1342,138 @@ class CarouselRepositoryTest {
         repository.video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
 
         assertEquals(listOf(listOf(fakeChildPks[1], fakeChildPks[0], fakeChildPks[2])), seen.toList(), "dropped once, after the store")
+    }
+
+    // --- R29: another first slide takes the post's cover with it ---
+
+    /** The post's cover as a sync stored it: its file, and its path on the post's row. */
+    private suspend fun storeCover(): File {
+        val path = thumbs.write(pk, byteArrayOf(OLD_BYTE))
+        db.mediaDao().setThumbPath(pk, path)
+        return File(path)
+    }
+
+    private suspend fun thumbPath() = db.mediaDao().byPks(listOf(pk)).single().thumbPath
+
+    /** The poster swapped slides 0 and 1 (two images; their child pks move with them): another slide is first. */
+    private val firstTwoSwapped: (List<RemoteCarouselItem>) -> List<RemoteCarouselItem> =
+        { items -> listOf(items[1].copy(position = 0), items[0].copy(position = 1)) + items.drop(2) }
+
+    /**
+     * The cover is the old first slide's picture: once the renewal has stored the new items, its path is cleared (the tile
+     * shows its placeholder) and its file goes, and the visit knows it. Item 0 then shows its own picture, the slide first now,
+     * downloaded on demand like any other item's; nothing downloads the cover itself.
+     */
+    @Test
+    fun aRenewalThatPutsAnotherSlideFirstDropsTheCoverAndItemZeroShowsItsOwnPicture() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        val cover = storeCover()
+        fetcher.answer = { url -> url.toByteArray() }
+        val seen = Collections.synchronizedList(mutableListOf<String>())
+        val repository = repository(
+            coverEviction = { pks -> seen += runBlocking { "${rows().map { it.childPk }} ${thumbPath()}" }; pks.forEach(thumbs::delete) },
+        )
+        replyWithFirstThree(firstTwoSwapped)
+        val visit = CarouselRepository.Visit()
+        assertTrue(visit.coverShows(media), "precondition: item 0 shows the cover")
+
+        repository.video(media, 2, visit, forceRefresh = true) // the visit's renewal
+
+        assertNull(thumbPath(), "the cover's path is cleared")
+        assertFalse(cover.exists(), "and its file is gone")
+        assertEquals(listOf("${listOf(fakeChildPks[1], fakeChildPks[0], fakeChildPks[2])} null"), seen.toList(), "once, after the store and the path")
+        assertTrue(visit.coverDropped.value)
+        assertFalse(visit.coverShows(media), "the visit's own row still names the cover: the visit knows better")
+
+        val own = assertIs<ItemImage.File>(repository.image(media, 0, visit))
+        assertContentEquals(newImage(1).toByteArray(), File(own.path).readBytes(), "the slide first now")
+        assertEquals(listOf(newImage(1)), fetcher.fetched, "item 0's own picture, and never the cover")
+        assertEquals(listOf("mediaInfo:$pk"), fake.calls)
+    }
+
+    /** R23 consistent: without the cover, item 0's own picture is fetched ahead like any other item's (and only then). */
+    @Test
+    fun withTheCoverDroppedItemZerosPictureIsFetchedAheadLikeAnyOther() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        storeCover()
+        fetcher.answer = { url -> url.toByteArray() }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+        assertEquals(ImageAhead.Skipped, repository.prefetchImage(media, 0, visit), "precondition: the cover shows item 0")
+        replyWithFirstThree(firstTwoSwapped)
+
+        repository.video(media, 2, visit, forceRefresh = true) // the visit's renewal
+
+        val ahead = assertIs<ImageAhead.Shown>(repository.prefetchImage(media, 0, visit))
+        assertContentEquals(newImage(1).toByteArray(), File(ahead.path).readBytes())
+        assertEquals(listOf(newImage(1)), fetcher.fetched)
+    }
+
+    /**
+     * The renewal site's whole loop: the cover the renewal dropped is written again, from the post's new cover link, by the next
+     * sync that reaches the post (its existing thumbnail step: the post has none), on the CDN lane as for a new post.
+     */
+    @Test
+    fun aCoverARenewalDroppedComesBackWithTheNextSyncThatReachesThePost() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        val cover = storeCover()
+        fetcher.answer = { url -> url.toByteArray() }
+        replyWithFirstThree(firstTwoSwapped)
+        repository().video(media, 2, CarouselRepository.Visit(), forceRefresh = true)
+        assertNull(thumbPath(), "precondition: dropped")
+        // The saved feed sends the post as the renewal did: those first three slides.
+        val feed = object : InstagramClient by fake {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                val page = fake.savedMedia(collectionId, cursor)
+                return page.copy(items = page.items.map { if (it.pk == pk) it.copy(carouselItems = firstTwoSwapped(it.carouselItems!!.take(3))) else it })
+            }
+        }
+        val clock = { START + testScheduler.currentTime }
+        val pacer = Pacer(PacingPolicy.Fast, InMemoryRequestLog(), InMemoryCooldownStore(), Random(1), now = clock)
+        val engine = SyncEngine(feed, pacer, db, fetcher, thumbs, now = clock, libraryAccount = InMemoryLibraryAccount())
+        val run = db.syncDao().insertRun(SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.RUNNING, startedAt = clock()))
+
+        engine.run(run)
+
+        assertEquals(SyncStatus.DONE, db.syncDao().run(run)!!.status)
+        assertEquals(cover.absolutePath, thumbPath(), "the cover again, under its name")
+        assertContentEquals(post.thumbnailUrl.toByteArray(), cover.readBytes(), "from the post's own cover link")
+        assertEquals(1, fetcher.fetched.count { it == post.thumbnailUrl })
+    }
+
+    /** Slide 0 unchanged: a change further on drops the slides' own media (R20), and the cover stays, offline. */
+    @Test
+    fun aRenewalThatChangesALaterSlideKeepsTheCover() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        val cover = storeCover()
+        cacheEveryItem()
+        replyWithFirstThree { items -> items.filterNot { it.position == 1 }.map { if (it.position == 2) it.copy(position = 1) else it } }
+        val repository = repository()
+        val visit = CarouselRepository.Visit()
+
+        repository.video(media, 2, visit, forceRefresh = true)
+
+        assertEquals(listOf(false, false, false), cachedItems(), "precondition: the slides' own media went (R20)")
+        assertEquals(cover.absolutePath, thumbPath(), "the cover stays")
+        assertContentEquals(byteArrayOf(OLD_BYTE), cover.readBytes())
+        assertFalse(visit.coverDropped.value)
+        assertEquals(ImageAhead.Skipped, repository.prefetchImage(media, 0, visit), "item 0 still shows the cover")
+    }
+
+    /** The usual renewal, the same slides with new links: the cover stays, with everything else. */
+    @Test
+    fun aRenewalWithTheSameSlidesKeepsTheCover() = runTest {
+        storeOldItems(childPks = fakeChildPks)
+        val cover = storeCover()
+        replyWithFirstThree()
+        val visit = CarouselRepository.Visit()
+
+        repository().video(media, 2, visit, forceRefresh = true)
+
+        assertEquals(List(3) { newImage(it) }, rows().map { it.imageUrl }, "precondition: the renewed links are stored")
+        assertEquals(cover.absolutePath, thumbPath())
+        assertContentEquals(byteArrayOf(OLD_BYTE), cover.readBytes())
+        assertFalse(visit.coverDropped.value)
     }
 
     // --- Delete library ---

@@ -534,11 +534,14 @@ A carousel post keeps all its items, and the viewer shows them on demand, as it 
   drops that post's downloaded images and cached videos, so a shifted item never shows the old picture; they download again
   when viewed. The app also keeps each slide's own Instagram id (the database is version 3 now), so a reorder of slides of
   the same kind drops them too, and the viewer shows the new pictures at once, not ones it still held in memory. The
-  first slide is the exception: item 0 and the grid tile show the post's stored cover, which a sync writes only once, so
-  after a change to slide 0 they keep the old cover (a known gap, in `TODO.md`). Carousels
-  stored before version 3 get their slides' ids from the next sync that reaches them, or the next renewal of their links,
-  with nothing dropped; a reorder made before then can still show the old pictures at the moved positions until the post
-  is unsaved or **Delete library** runs. The slides' ids have only met made-up test data so far: if a real carousel's
+  first slide's picture is also the post's cover, which item 0 and the grid tile show, so when the first slide changes
+  (deleted, moved, or another put in its place) the cover goes too. A sync then fetches the new cover right away (if the
+  image servers refuse it just then, the next sync that reaches the post does). A link renewal in the viewer does not: the grid tile shows its blank placeholder until the next sync that reaches the post (for
+  an older post, a **Full sync**), and item 0 shows its own picture meanwhile (it loads like any other slide's and is kept
+  for offline). Neither ever shows the old cover again. Carousels stored before version 3 get their slides' ids from the
+  next sync that reaches them, or the next renewal of their links, with nothing dropped; a reorder made before then can
+  still show the old pictures at the moved positions (and the old cover, when the first slide moved) until the post is
+  unsaved or **Delete library** runs. The slides' ids have only met made-up test data so far: if a real carousel's
   slides carry none, a same-kind reorder is not seen ([section 8](#the-viewer-update-carousels-icon-buttons-the-app-icon-motion),
   step 9).
 - **Messages** over an item are in [Troubleshooting](#the-viewer-messages-over-a-video-or-a-carousel-item).

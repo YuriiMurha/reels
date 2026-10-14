@@ -459,6 +459,21 @@ class BackendWiringGuardTest {
         assertTrue(Regex("""\bitemEviction\s*=\s*carouselItemEviction\b""").containsMatchIn(repository), "a renewal: $repository")
     }
 
+    /**
+     * R29: a renewal that puts another slide first drops the post's cover file from the thumbnails the sync writes (the
+     * repository clears the path itself, `CarouselRepositoryTest` runs it); the sync drops its covers through its own store.
+     */
+    @Test
+    fun aRenewalThatPutsAnotherSlideFirstDropsTheCoverFile() {
+        val container = main("di/AppContainer.kt")
+        val repository = callArguments(container, "CarouselRepository(").single()
+        val drop = Regex("""\bcoverEviction\s*=\s*MediaEviction\.eachStep\(""").find(repository)
+        assertTrue(drop != null, "a renewal's cover drop is one MediaEviction.eachStep: $repository")
+        val steps = callArguments(repository.substring(drop.range.first), "MediaEviction.eachStep(").first()
+        assertTrue(Regex("""\{\s*thumbnails\.delete\(\s*it\s*\)\s*}""").containsMatchIn(steps), "the drop must be { thumbnails.delete(it) }: $steps")
+        assertTrue(Regex("""\bthumbnails\s*,""").containsMatchIn(callArguments(container, "SyncEngine(").single()), "the sync's own store")
+    }
+
     @Test
     fun theSyncScreenShowsTheBackendsPacer() {
         val screen = main("ui/sync/SyncScreen.kt")

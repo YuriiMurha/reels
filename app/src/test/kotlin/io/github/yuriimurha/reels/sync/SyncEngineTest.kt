@@ -66,6 +66,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -2482,6 +2483,148 @@ class SyncEngineTest {
 
         assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
         assertEquals(1, storedItems(carousel.pk).size)
+    }
+
+    // R29: item 0 and the grid tile show the post's stored cover, the first slide's picture. Another first slide takes it along.
+
+    /** [pk]'s items and cover as [delegate]'s saved feed sends them, replaced by [items] and [cover]. */
+    private class ChangedCarousel(
+        private val delegate: InstagramClient,
+        private val pk: String,
+        private val items: List<RemoteCarouselItem>,
+        private val cover: String,
+    ) : InstagramClient by delegate {
+        override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+            val page = delegate.savedMedia(collectionId, cursor)
+            return page.copy(items = page.items.map { if (it.pk == pk) it.copy(carouselItems = items, thumbnailUrl = cover) else it })
+        }
+    }
+
+    /** [carousel]'s items with its first two slides swapped: two images, whose child pks move with them. Another slide is first. */
+    private fun firstTwoSwapped(carousel: RemoteMedia): List<RemoteCarouselItem> {
+        val items = carousel.carouselItems!!
+        assertEquals(listOf(MediaType.IMAGE, MediaType.IMAGE), items.take(2).map { it.type }, "precondition: two images first")
+        return listOf(items[1].copy(position = 0), items[0].copy(position = 1)) + items.drop(2)
+    }
+
+    private suspend fun thumbPath(pk: String) = db.mediaDao().byPks(listOf(pk)).single().thumbPath
+
+    /** Where the engine's store keeps [pk]'s cover. */
+    private fun coverFile(pk: String) = File(tmp.root, "thumbs/$pk.jpg")
+
+    /**
+     * The poster put another slide first: once the page is committed the old cover goes (its path cleared, its file deleted),
+     * and the page's own thumbnail step fetches the new one, once, as for a new post. The tile and item 0 show the new picture.
+     */
+    @Test
+    fun anotherFirstSlideDropsTheCoverAndThePageFetchesTheNewOne() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val oldPath = assertNotNull(thumbPath(carousel.pk), "precondition: the cover is stored")
+        assertContentEquals(byteArrayOf(1, 2, 3), File(oldPath).readBytes(), "precondition: the old cover")
+        val newCover = "${carousel.thumbnailUrl}-new"
+        val atFetch = mutableListOf<String>()
+        val cdn = MediaFetcher { url ->
+            atFetch += "$url path=${thumbPath(carousel.pk)} file=${coverFile(carousel.pk).exists()}"
+            url.toByteArray()
+        }
+        val engine = engine(ChangedCarousel(fake, carousel.pk, firstTwoSwapped(carousel), newCover), mediaFetcher = cdn)
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+
+        assertEquals(listOf("$newCover path=null file=false"), atFetch, "the new cover, once, after the old one went")
+        assertEquals(oldPath, thumbPath(carousel.pk), "under the same name again")
+        assertContentEquals(newCover.toByteArray(), coverFile(carousel.pk).readBytes(), "the new cover")
+    }
+
+    /**
+     * The new cover could not be fetched in that run (the CDN refused it): the old one is gone all the same, so the tile shows
+     * its placeholder, never the old slide, and the next sync that reaches the post (a QUICK one here) fetches the new one.
+     */
+    @Test
+    fun aNewCoverThatCouldNotBeFetchedComesWithTheNextSyncThatReachesThePost() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val newCover = "${carousel.thumbnailUrl}-new"
+        var cdnAnswers = false
+        val engine = engine(
+            ChangedCarousel(fake, carousel.pk, firstTwoSwapped(carousel), newCover),
+            mediaFetcher = MediaFetcher { url -> if (cdnAnswers) url.toByteArray() else null },
+        )
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+        assertNull(thumbPath(carousel.pk), "no cover: the tile shows its placeholder")
+        assertFalse(coverFile(carousel.pk).exists(), "and the old cover's file is gone")
+
+        cdnAnswers = true
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.QUICK).status)
+
+        assertEquals(coverFile(carousel.pk).absolutePath, thumbPath(carousel.pk))
+        assertContentEquals(newCover.toByteArray(), coverFile(carousel.pk).readBytes(), "the new cover")
+    }
+
+    /** Slide 0 unchanged: a change further on drops the slides' own media (R20), but the cover stays, offline, and is not fetched again. */
+    @Test
+    fun aChangeAfterTheFirstSlideKeepsTheCover() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val path = assertNotNull(thumbPath(carousel.pk))
+        val items = carousel.carouselItems!!
+        val laterSwapped = listOf(items[0], items[2].copy(position = 1), items[1].copy(position = 2)) + items.drop(3)
+        val fetched = mutableListOf<String>()
+        val engine = engine(
+            ChangedCarousel(fake, carousel.pk, laterSwapped, "${carousel.thumbnailUrl}-new"),
+            mediaFetcher = MediaFetcher { url -> fetched += url; url.toByteArray() },
+            carouselEviction = { reshaped += it },
+        )
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+
+        assertEquals(listOf(carousel.pk), reshaped, "precondition: the slides' own media went (R20)")
+        assertEquals(path, thumbPath(carousel.pk), "the cover stays")
+        assertContentEquals(byteArrayOf(1, 2, 3), File(path).readBytes(), "the very file")
+        assertEquals(emptyList(), fetched, "nothing fetched again")
+    }
+
+    /** The same slides with renewed links, the cover's own link included: the cover stays, and is not fetched again. */
+    @Test
+    fun renewedLinksKeepTheCover() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val path = assertNotNull(thumbPath(carousel.pk))
+        val renewed = carousel.carouselItems!!.map { it.copy(imageUrl = "${it.imageUrl}-renewed", videoUrl = it.videoUrl?.let { url -> "$url-renewed" }) }
+        val fetched = mutableListOf<String>()
+        val engine = engine(
+            ChangedCarousel(fake, carousel.pk, renewed, "${carousel.thumbnailUrl}-renewed"),
+            mediaFetcher = MediaFetcher { url -> fetched += url; url.toByteArray() },
+        )
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+
+        assertEquals(renewed.map { it.toEntity(carousel.pk) }, storedItems(carousel.pk), "precondition: the renewed links are stored")
+        assertEquals(path, thumbPath(carousel.pk), "the cover stays")
+        assertContentEquals(byteArrayOf(1, 2, 3), File(path).readBytes(), "the very file")
+        assertEquals(emptyList(), fetched, "nothing fetched again")
+    }
+
+    /** The cover goes only once the page is committed: a page that rolls back keeps its old items, and its cover. */
+    @Test
+    fun aPageThatRollsBackKeepsTheCover() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val path = assertNotNull(thumbPath(carousel.pk))
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_memberships BEFORE INSERT ON collection_media BEGIN SELECT RAISE(ABORT, 'injected failure'); END",
+        )
+        val engine = engine(
+            ChangedCarousel(fake, carousel.pk, firstTwoSwapped(carousel), "${carousel.thumbnailUrl}-new"),
+            mediaFetcher = MediaFetcher { url -> url.toByteArray() },
+        )
+
+        assertEquals(SyncStatus.PAUSED, runSync(engine, SyncMode.FULL).status)
+
+        assertEquals(path, thumbPath(carousel.pk))
+        assertContentEquals(byteArrayOf(1, 2, 3), File(path).readBytes())
     }
 
     private class ThrowingSignals : SessionSignals {
