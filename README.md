@@ -4,12 +4,8 @@ A personal Android app that syncs the saved reels and posts of a **throwaway Ins
 collections, and shows them Pinterest-style: a staggered grid of real thumbnails, grouped by collection, and a
 full-screen viewer for reels and carousels. Kotlin and Jetpack Compose, one user, no server.
 
-<p align="center">
-  <img src="docs/images/mock-home.png" width="240" alt="The Saved screen in Mock mode: All Saved, Uncategorized and fake collections with their item counts">
-  <img src="docs/images/mock-grid.png" width="240" alt="A two-column staggered grid in Mock mode, with reel and carousel badges on the tiles">
-  <img src="docs/images/mock-carousel.png" width="240" alt="The viewer on the second item of a fake carousel, with its 2/10 counter and dots">
-</p>
-<p align="center"><sub>Mock mode on an emulator: every picture, handle and caption is generated fake data.</sub></p>
+No Instagram account needed to look around: a debug build runs on a generated fake library ([Try it without an
+Instagram account](#try-it-without-an-instagram-account)).
 
 > [!WARNING]
 > **Read this before you use it.**
@@ -20,9 +16,16 @@ full-screen viewer for reels and carousels. Kotlin and Jetpack Compose, one user
 >   Instagram can break it at any time.
 > - Everything stays on the phone: no server, no cloud, no analytics or telemetry, and Android backup is off. The
 >   session lives only in the WebView's own cookie store.
-> - Sync is manual and deliberately slow: one request at a time, a random 4–12 s apart (about 6 s typically), a
+> - Sync is manual and deliberately slow: one request at a time, a random 4–12 s apart (a median of about 6.4 s), a
 >   60–180 s break after every 15–30 requests, and at most **300 requests per run** and **600 per rolling 24 hours**. A
 >   rate limit stops every Instagram request for 1 hour, and a second one within 24 hours for 24 hours.
+
+<p align="center">
+  <img src="docs/images/mock-home.png" width="240" alt="The Saved screen in Mock mode: All Saved, Uncategorized and fake collections with their item counts">
+  <img src="docs/images/mock-grid.png" width="240" alt="A two-column staggered grid in Mock mode, with reel and carousel badges on the tiles">
+  <img src="docs/images/mock-carousel.png" width="240" alt="The viewer on the second item of a fake carousel, with its 2/10 counter and dots">
+</p>
+<p align="center"><sub>Mock mode on an emulator: every picture, handle and caption is generated fake data.</sub></p>
 
 ## What it is
 
@@ -59,10 +62,9 @@ the app, and it paces every request itself.
   from the site's own request, and the sync goes on; if that fails, the last names are kept.
 - **Pacing and budgets.** One Pacer gates every API request: the numbers in the warning above, a 2 s minimum gap for the
   requests you wait for in the viewer, and image downloads (and carousel video starts) at most 2 at a time, after a
-  short random pause. Budgets and
-  cooldowns survive an app restart.
-- **Mock mode.** Debug builds start on a generated library of 2,000 fake items in 8 collections, with placeholder
-  pictures and a bundled clip, so the whole app works without Instagram.
+  short random pause. Budgets and cooldowns survive an app restart.
+- **Mock mode.** Debug builds start in Mock mode: the first **Sync** fills a generated library of 2,000 fake items in 8
+  collections, with placeholder pictures and a bundled clip, so the whole app works without Instagram.
 - **Adapter lab** (debug builds only). One request per endpoint, showing the answer's redacted shape and saving a
   scrubbed copy, to check the parsers against what Instagram really sends.
 
@@ -110,26 +112,33 @@ the app, and it paces every request itself.
 - **Android Studio**, for its bundled JDK, the Android SDK and the emulator. The build has only been run with Android
   Studio's own JDK (JetBrains Runtime 25); it compiles to Java 17.
 - **Android SDK Platform 37** (the build compiles against API 37) and **Platform-Tools** (`adb`), from Android
-  Studio's SDK Manager. The app targets API 36 and runs on Android 10 (minSdk 29) and newer; the instrumented tests run on
-  an API 37 emulator.
+  Studio's SDK Manager. The app targets API 36 and runs on Android 10 (minSdk 29) and newer; the instrumented tests have
+  only been run on an API 37 emulator.
 - Gradle 9.8 comes with the wrapper (`./gradlew`); AGP 9.4.1, Kotlin 2.4.20 and the other versions are pinned in
   [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
 
-Every Gradle command needs `JAVA_HOME` and `ANDROID_HOME`. Set both in each new terminal, with your own paths:
+Every Gradle command needs `JAVA_HOME` and `ANDROID_HOME`. Set both in each new terminal. On macOS, with Android Studio
+in `/Applications` and the SDK in its default place:
 
 ```bash
-export JAVA_HOME="<Android Studio>/jbr" ANDROID_HOME="<Android SDK>" PATH="$PATH:<Android SDK>/platform-tools"
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" ANDROID_HOME="$HOME/Library/Android/sdk" PATH="$PATH:$HOME/Library/Android/sdk/platform-tools"
 ```
 
-The usual places: on macOS, `JAVA_HOME` is `/Applications/Android Studio.app/Contents/jbr/Contents/Home` and the SDK is
-`$HOME/Library/Android/sdk`; on Linux, `JAVA_HOME` is the `jbr` folder inside Android Studio's folder and the SDK is
-`$HOME/Android/Sdk`. Instead of `ANDROID_HOME` you can put `sdk.dir=<Android SDK>` in `local.properties` (gitignored).
+On Linux, with Android Studio unpacked in `/opt/android-studio` and the SDK in its default place (adjust both paths to
+yours):
+
+```bash
+export JAVA_HOME="/opt/android-studio/jbr" ANDROID_HOME="$HOME/Android/Sdk" PATH="$PATH:$HOME/Android/Sdk/platform-tools"
+```
+
+Instead of `ANDROID_HOME` you can put `sdk.dir=` followed by the SDK's path in `local.properties` (gitignored).
 
 ## Try it without an Instagram account
 
-A debug build starts in **Mock mode**: it shows the fake library, and **Sync** fills it with generated items. It never
-contacts Instagram unless you tap **Log in**, **Paste sessionid**, **Check now**, **Open on Instagram** or the
-**Adapter lab**.
+A debug build starts in **Mock mode** with an empty library ("Nothing synced yet"); **Sync** fills it with generated
+items. It never contacts Instagram unless you tap **Log in**, **Paste sessionid**, **Check now**, **Open on Instagram** or
+the **Adapter lab**. **Never log in to Instagram on an emulator:** keep emulators in Mock mode, and log in only on a real
+phone, with a throwaway account.
 
 ```bash
 git clone https://github.com/YuriiMurha/reels.git
@@ -173,8 +182,8 @@ On a real phone, roughly: install the debug build over USB; on **Sync → Develo
 restarts on the empty real library); under **Instagram session**, tap **Log in** and log in to the throwaway account in
 Instagram's own page (2FA included); then tap **Sync**. A run of 300 requests takes roughly an hour, so a library of a few
 thousand saves needs several runs; **Resume** carries on where one stopped. Run a **Full sync** only after a plain Sync has
-succeeded: it is the only sync that removes items. A release build (`installRelease`) is minified, has no Mock mode and
-is signed with the debug key unless you add your own.
+succeeded: it is the only sync that removes items. A release build (`installRelease`, with `ANDROID_SERIAL` as above) is minified,
+has no Mock mode and is signed with the debug key unless you add your own.
 
 The full procedure, with the checks, the limits, every banner and message, and troubleshooting, is in
 [**`docs/GUIDE.md`**](docs/GUIDE.md): sections 1–5 for the first run, 6 for videos and carousels, 7 for the Adapter lab,

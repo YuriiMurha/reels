@@ -737,3 +737,17 @@ repo could not tell quickly what it is, whether to use it, or how to try it.
   and anchor in the edited docs resolves.
 - **Pacing.** Nothing changed: docs and comments only. **Safety.** Nothing contacted Instagram, and the phone was not
   touched.
+
+## 2026-10-14: two phone facts recorded late, and the status brought up to date
+
+Read from the phone's library (the `sync_run` table, counts only) and the owner's own reports, for `ARCHITECTURE.md`'s new
+status section:
+
+- **The 2026-10-11 evening Sync** (run 6, QUICK, DONE): 72 requests, 1,393 new items, 1,392 thumbnails cached, one failure
+  (a thumbnail). The account's library had grown since the first Sync that afternoon (3 requests, 10 items).
+- **The 2026-10-13 Full sync** (run 7, DONE): 73 requests, 1,416 items seen, 26 new, 3 removed.
+- **A cooldown on Sync** (2026-10-11): Sync showed a cooldown with its minutes left (1,440), armed by a 429 the build before
+  the WebView transport had received; the owner cleared it by hand (a throwaway account). The budget display and the
+  challenge stop are still not reported.
+- `ARCHITECTURE.md`'s Status section now lists what the phone confirmed and what is still open; `CLAUDE.md` names the
+  README and `docs/GUIDE.md` among the docs to keep current.

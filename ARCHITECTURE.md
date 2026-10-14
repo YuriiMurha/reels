@@ -21,8 +21,8 @@ the owner on their own phone with a throwaway account, from 2026-10-08 to 2026-1
   owner's collections have digits-only ids and the automatic ones are left out, with no placeholder) and CURSOR (41
   collections at 12 a page, each page from the second on asked with the page before's `page_info.end_cursor` as `after`,
   2026-10-11).
-- **M4, real sync.** A Sync stored 1,393 items in 72 requests (2026-10-11), and a Full sync walked 1,416 in 73, with 26 new
-  and 3 removed (2026-10-13). The 24-hour cooldown after a 429 showed on Sync.
+- **M4, real sync.** A Sync stored 1,393 items in 72 requests (2026-10-11), and a Full sync saw 1,416 in 73 requests,
+  with 26 new and 3 removed (2026-10-13). A cooldown armed by a 429 showed on Sync with its minutes left (2026-10-11).
 - **M5, video.** A reel plays, loops and replays offline from the cache.
 - **The viewer update.** The Room 1 to 2 upgrade kept the library; carousels swipe, and their pictures (R23) and video
   starts (R26) load ahead; an unviewed picture offline says so (R16); the icon buttons, the launcher icon and its themed
