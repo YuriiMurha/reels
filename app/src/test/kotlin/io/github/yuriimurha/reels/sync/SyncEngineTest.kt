@@ -72,7 +72,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Spelled out, not [SyncEngine.ANOTHER_ACCOUNT]: the banner's text is what the README tells the owner to look for. */
+/** Spelled out, not [SyncEngine.ANOTHER_ACCOUNT]: the banner's text is what docs/GUIDE.md tells the owner to look for. */
 private const val ANOTHER_ACCOUNT = "This library belongs to another Instagram account. Delete library to switch."
 
 private const val DAY = 86_400_000L

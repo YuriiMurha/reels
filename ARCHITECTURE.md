@@ -9,13 +9,13 @@ this file describes only what exists.
 The code for M0 to M6 is complete and unit-tested, with fakes and MockWebServer only. No agent has logged in to
 Instagram or sent it a request, and the emulator only ever ran the debug build in Mock mode or the release build logged
 out (once also on the fake backend, through a temporary local edit), plus the hidden page's and the repair page's own
-tests, which load only local servers. What is still unconfirmed needs the owner's phone (the README's checklist, `TODO.md`):
+tests, which load only local servers. What is still unconfirmed needs the owner's phone (the checklist in [`docs/GUIDE.md`](docs/GUIDE.md) section 8, `TODO.md`):
 
 - **The WebView transport.** The first two API requests the app made on the owner's phone, sent by OkHttp before this
   change, were answered HTTP 429. Every API call now runs inside a hidden instagram.com page ([Transport](#transport)),
   which has never met Instagram. First on the phone: the hidden page loads and one request answers 200, Who am I if
-  Logged in, otherwise the login check (R102) (README section 5, "After an update that changes how the app talks to
-  Instagram").
+  Logged in, otherwise the login check (R102) (`docs/GUIDE.md` section 5, "After an update that changes how the app
+  talks to Instagram").
 - **Collection names.** The website answers the first design's collections-list call with a 404. The names now come
   from the website's own GraphQL query, sent by the same hidden page, and when Instagram changes that query's id the app
   learns the new one from the site itself, on the phone ([Collection names](#collection-names)). Built and tested with
@@ -23,7 +23,7 @@ tests, which load only local servers. What is still unconfirmed needs the owner'
   about the query are the plan's stated defaults, marked "assumed" in the code, until the phone confirms them: how a
   rejected id is answered (STALE), the name of the page-2 cursor variable, `after` (CURSOR), and that the owner's own
   collections have digits-only ids while the automatic ones ("All posts", audio) do not (AUTO). First on the phone: the
-  README box "After the collection names update". It settles AUTO (no "All posts" or audio card) and shows a real repair
+  box "After the collection names update" in `docs/GUIDE.md` section 5. It settles AUTO (no "All posts" or audio card) and shows a real repair
   (Forget, then a Sync), but not every fact: Forget no longer sends a wrong id (R18), so STALE stays assumed until Instagram
   really changes the id. CURSOR held on the phone on 2026-10-11 (run 6, a Sync, DONE): it stored 41 collections of the
   owner's with no "Collection N" placeholder, and with 12 a page every names page from the second on was asked for with the
@@ -45,7 +45,7 @@ tests, which load only local servers. What is still unconfirmed needs the owner'
   carousel videos still slow to start on the phone) shows a video item's poster until its first frame and writes the first
   megabyte of each video item ahead, after the pictures, on the same queue; R27, from its review, keeps a start refused with
   anything but a 403 or 410 from changing what the item's play costs. Its database is version 2, and
-  `versionCode` follows it (R21): a build from before it is refused instead of installed. Still unconfirmed, on the owner's phone (README section 8, "The viewer update"):
+  `versionCode` follows it (R21): a build from before it is refused instead of installed. Still unconfirmed, on the owner's phone (`docs/GUIDE.md` section 8, "The viewer update"):
   - that a real carousel's `carousel_media` reads as parsed (one more of the M3 shape candidates, pinned by a synthetic
     fixture only), that its images load and its video items play, and that an expired link is renewed by the one
     `mediaInfo` a visit may send ([Carousels](#carousels));
@@ -155,7 +155,7 @@ A debug build starts in Mock mode (the fake library); a release build always use
   - **Not exercised under R8** (it needs Instagram, which no agent contacts): the real client (the hidden-page transport
     with its `ig_fetch.js` asset and `androidx.webkit` message listener, and the JSON parsing in `:instagram`), the CDN
     fetcher (OkHttp) and the WebView login.
-- **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, README "Automated smoke tests"):
+- **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, `docs/GUIDE.md` section 3, "Automated smoke tests"):
   `SmokeTest` drives the debug app through its real UI on the emulator, in Mock mode: Home, Sync (logged-out session, the
   Developer section, a fake Sync to the end), grid, viewer, video playback, a carousel swiped to its second item (`t6`), back
   from a post far down the list to that post's tile (`t7`) and Search, with a screenshot per step in the
@@ -181,8 +181,8 @@ A debug build starts in Mock mode (the fake library); a release build always use
   `SchemaBuildGuardTest` fails when a schema bump leaves it behind. So a build from before a schema change has a lower code and
   Android refuses it (`INSTALL_FAILED_VERSION_DOWNGRADE`) instead of installing over the upgraded library, where Room, with no
   way back and no destructive fallback (there must be none: it would wipe the library and the request log), would fail at
-  every start. The README tells the owner never to uninstall or clear data to get past the refusal, but to install a current
-  build.
+  every start. The guide (`docs/GUIDE.md`) tells the owner never to uninstall or clear data to get past the refusal, but to install a
+  current build.
 - **Manifest.** `android:enableOnBackInvokedCallback="true"` on the application (predictive back, [Motion](#motion)), with
   `tools:targetApi="33"` (the attribute is read from API 33 on; minSdk is 29), and `android:icon` / `android:roundIcon` ([App
   icon](#app-icon)); `ManifestGuardTest` and `AppIconGuardTest` pin them, and no activity may name an icon of its own.
@@ -1599,8 +1599,8 @@ renewal and the cache are in [Video](#video).
   composition after a cold start stalls the main thread (class loading, JIT, building ExoPlayer: 200 to 500 ms for a debug
   build on a software emulator). The 300 ms fade can then finish first, and the media appears in place at full size, never
   flying in from a tile that is gone (`MotionTest.aPageThatShowsAfterTheTransitionShowsInPlace`). So a first open after a cold
-  start on a slow device may just fade, while warm opens grow. The owner's phone, on the release build, is the judge (README
-  section 8). A follow-up, if it looks late there: show the tapped post in the viewer's first frame, before Paging's first load.
+  start on a slow device may just fade, while warm opens grow. The owner's phone, on the release build, is the judge
+  (`docs/GUIDE.md` section 8). A follow-up, if it looks late there: show the tapped post in the viewer's first frame, before Paging's first load.
 - **Pacing.** Motion adds no request, rate or concurrency.
 
 ## App icon
@@ -1899,7 +1899,7 @@ Mock mode switch.
   `composable<AdapterLabRoute>` in `ReelsNavHost.kt` each sit inside an `if (BuildConfig.DEBUG)` block, `adapterLab` is
   referenced only from `di/AppContainer.kt` and `ui/lab/`, and `AdapterLabScreen` paces with `container.instagramPacer` and
   never touches the backend (whose pacer is the fast fake one in Mock mode).
-- The README's "Adapter lab" section is the owner's procedure.
+- `docs/GUIDE.md` section 7, "Adapter lab and the spike handback", is the owner's procedure.
 
 ## Session
 

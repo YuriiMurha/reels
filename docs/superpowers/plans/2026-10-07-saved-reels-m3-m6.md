@@ -1,5 +1,8 @@
 # Saved Reels M3–M6 Implementation Plan
 
+> **Note (2026-10-14):** the `README.md` this plan edits is now [`docs/GUIDE.md`](../../GUIDE.md), with the same
+> section numbers and headings; the README became a short page for visitors.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the real Instagram adapter, the Adapter lab for the on-phone spike, real paced sync, on-demand video with a `pk`-keyed cache, and a release build. Every line is written and tested without any agent contacting Instagram.

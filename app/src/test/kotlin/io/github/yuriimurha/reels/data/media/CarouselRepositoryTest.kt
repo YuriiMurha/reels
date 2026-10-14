@@ -1768,7 +1768,7 @@ class CarouselRepositoryTest {
         assertEquals(listOf("${pk}_2 $OLD_VIDEO ${1 shl 20}"), starts.writes.toList(), "and the rest of it is written")
     }
 
-    /** R26's debug lines say what happened, in the words README section 8 gives, and never name a link, a host or a pk. */
+    /** R26's debug lines say what happened, in the words docs/GUIDE.md section 8 gives, and never name a link, a host or a pk. */
     @Test
     fun thePosterAndStartLinesAreLabelledAndNameNoLinkOrPk() = runTest {
         val lines = Collections.synchronizedList(mutableListOf<String>())

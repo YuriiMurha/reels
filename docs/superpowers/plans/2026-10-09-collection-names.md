@@ -1,5 +1,8 @@
 # Saved-collection names, self-repairing: Implementation Plan
 
+> **Note (2026-10-14):** the `README.md` this plan edits is now [`docs/GUIDE.md`](../../GUIDE.md), with the same
+> section numbers and headings; the README became a short page for visitors.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Sync shows the account's saved collections under their Instagram names, fetched with the website's own GraphQL query from the hidden mobile page, and the app learns a changed query id on the phone by itself.
