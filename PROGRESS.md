@@ -683,3 +683,28 @@ with its scoped re-review's two Minors, one docs Minor and two nits open. This f
   closes a connection sooner.
 - **Safety.** Nothing contacted Instagram or touched the owner's phone: fakes, MockWebServer, a SOCKS proxy on loopback and
   local data only.
+
+## 2026-10-14: the viewer update on the owner's phone
+
+The owner checked the viewer update on their phone (Pixel 10, gesture navigation, debug builds) on 2026-10-13 and 2026-10-14,
+with the request log captured live (`adb logcat -s InstagramHttp`) and the library read through `run-as` (counts only):
+
+- **The upgrade.** `versionCode` 1 to 2 installed over the existing library: Room went from version 1 to 2, the foreign-key
+  check came back empty, and Saved kept its collections.
+- **Carousels.** The first open of an 8-item carousel synced before the update sent one `GET api/v1/media/<n>/info/` and
+  logged `carousel fill: fresh (8 items)`. A Full sync then (73 requests, all 200, 26 new posts, 3 removed) stored the items
+  of all 145 live carousels, 790 in all, each matching its post's count; after it, carousel visits sent no `GET api/...` line.
+- **Offline (R16).** After a Sync, in airplane mode, the viewed items showed and an unviewed picture said "Offline: this item
+  isn't cached yet". A video item never watched through is not checked yet.
+- **Feedback that changed the code.** Swiping a carousel showed a placeholder on every item, so an open carousel now fetches
+  its other pictures ahead (R23, R25, #14); the shared-axis page fade was replaced by a push (R24, #12); and video items
+  were still slow, so they now get a poster and their first megabyte ahead (R26, R27, #15, #16). The owner confirmed each on
+  the phone: "carousels load fast now", "the transition is good", "carousel videos start fast now".
+- **Icons and motion.** The icon buttons and their tooltips, the launcher icon and its themed layer, the grow and shrink
+  between a tile and its post, and the back gesture all work.
+- **The log.** With the items stored and their links fresh, the last two checks (the pictures ahead, then the video starts)
+  logged no Instagram API request at all: only CDN downloads, which are not logged.
+- **CURSOR.** The 2026-10-11 Sync stored 41 named collections with no placeholder, at 12 names a page, so the names query's
+  cursor was used and works (recorded in #14).
+- **Still open** (TODO): an expired carousel link renewed once, a video item offline, the first open after a cold start on
+  the release build, the release build itself, the Adapter lab answers, STALE, an expired reel link and a 403/410 recovered.
