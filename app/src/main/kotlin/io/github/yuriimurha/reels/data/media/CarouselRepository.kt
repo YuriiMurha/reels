@@ -6,6 +6,7 @@ import io.github.yuriimurha.reels.data.db.CarouselItemDao
 import io.github.yuriimurha.reels.data.db.CarouselItemEntity
 import io.github.yuriimurha.reels.data.db.MediaDao
 import io.github.yuriimurha.reels.data.db.MediaEntity
+import io.github.yuriimurha.reels.data.db.firstSlideChanged
 import io.github.yuriimurha.reels.data.db.itemShapeChanged
 import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.instagram.MediaType
@@ -16,6 +17,9 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -119,6 +123,12 @@ class CarouselRepository(
     private val itemEviction: MediaEviction = MediaEviction { },
     /** R26: writes a video item's start into the video cache, through the player's own cookieless stack. Its writes run on [pacer]'s CDN lane. */
     private val starts: VideoStarts = VideoStarts.NONE,
+    /**
+     * R29: told the post whose renewal put another slide first ([firstSlideChanged]), once its items are stored and its
+     * `thumbPath` cleared, so its stored cover file (`{pk}.jpg`, the old first slide's picture) goes. The container's deletes
+     * the thumbnail; the next sync that reaches the post writes the new cover.
+     */
+    private val coverEviction: MediaEviction = MediaEviction { },
 ) {
     /**
      * One visit of a post, from the moment the viewer shows it until it leaves it: the visit's one `mediaInfo`, and what it
@@ -150,6 +160,25 @@ class CarouselRepository(
          * nothing). A 403 or 410 goes into [refused] instead.
          */
         internal val startsRefused: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+        private val dropped = MutableStateFlow(false)
+
+        /**
+         * R29: true once this visit's renewal put another slide first and so dropped the post's stored cover, the old first
+         * slide's picture. From then on item 0 shows its own picture, downloaded like any other item's ([coverShows]).
+         */
+        val coverDropped: StateFlow<Boolean> = dropped.asStateFlow()
+
+        internal fun dropCover() {
+            dropped.value = true
+        }
+
+        /**
+         * R10, R29: whether item 0 of [media] shows the stored cover in this visit: the post has one, and no renewal of the
+         * visit dropped it. When it does, item 0's own picture is never downloaded (it is the same picture); when it does not,
+         * item 0's picture is downloaded on demand and fetched ahead like any other item's.
+         */
+        fun coverShows(media: MediaEntity): Boolean = media.thumbPath != null && !coverDropped.value
     }
 
     /** N-M1: a start written ahead from [url]; [checked] completes once the write has stopped and its bytes were checked. */
@@ -190,9 +219,10 @@ class CarouselRepository(
 
     /**
      * R23: item [position]'s picture, downloaded before the owner swipes to it (the viewer calls this for a carousel's other
-     * pictures, one at a time). Only an IMAGE item past the cover (item 0 shows the stored cover, R10) with stored items, of a
-     * post still in the library, through the CDN lane with the same fetcher and store as [image]; it shares the visit's
-     * per-item download lock with [image], so the two never download one item twice.
+     * pictures, one at a time). Only an IMAGE item with stored items, of a post still in the library, and never item 0 while
+     * the stored cover shows it (R10; [Visit.coverShows]: with no cover, R29, item 0's own picture is fetched like any other),
+     * through the CDN lane with the same fetcher and store as [image]; it shares the visit's per-item download lock with
+     * [image], so the two never download one item twice.
      *
      * Pacing (R25): it never fills. A refused link (or none) may spend the [visit]'s one renewal by the same rule as [image]
      * (the first call that needs it sends it, every later one shares what it brought), and the item then loads from its
@@ -330,9 +360,9 @@ class CarouselRepository(
      * items only, never the fill, and at most the visit's one renewal (R25).
      */
     private suspend fun loadAhead(media: MediaEntity, position: Int, visit: Visit, type: MediaType): ImageAhead {
-        // Not a carousel: no items. Item 0: the stored cover shows it (R10), for an image and a video item alike. Neither is
-        // downloaded ahead.
-        if (media.type != MediaType.CAROUSEL || position <= 0) return ImageAhead.Skipped
+        // Not a carousel: no items. Item 0 while the stored cover shows it (R10), for an image and a video item alike. Neither
+        // is downloaded ahead. Without a cover (none stored, or R29 dropped it in this visit) item 0 is fetched like any other.
+        if (media.type != MediaType.CAROUSEL || position < 0 || (position == 0 && visit.coverShows(media))) return ImageAhead.Skipped
         return visit.downloadOf(position).withLock { loadAheadNow(media, position, visit, type) }
     }
 
@@ -499,17 +529,17 @@ class CarouselRepository(
     private suspend fun renewal(media: MediaEntity, visit: Visit, purpose: String): Renewal = visit.lock.withLock {
         visit.renewal?.let { return@withLock it }
         visit.renewal = SPENT
-        renew(media, purpose).also { visit.renewal = it }
+        renew(media, visit, purpose).also { visit.renewal = it }
     }
 
-    private suspend fun renew(media: MediaEntity, purpose: String): Renewal {
+    private suspend fun renew(media: MediaEntity, visit: Visit, purpose: String): Renewal {
         // A post no longer in the library (Delete library ran while it was open, or a sync found it unsaved) needs no items:
         // nothing is asked.
         if (!isLive(media.pk)) return SPENT
         val outcome = info.fetch(media.pk)
         log?.invoke("$purpose: ${outcome.summary()}")
         return when (outcome) {
-            is PacedMediaInfo.Outcome.Fresh -> store(media.pk, outcome.media.carouselItems)
+            is PacedMediaInfo.Outcome.Fresh -> store(media.pk, outcome.media.carouselItems, visit)
             PacedMediaInfo.Outcome.Gone -> Renewal.Failed(GONE)
             is PacedMediaInfo.Outcome.Failed -> Renewal.Failed(outcome.forItem(), cachedMayPlay = outcome.reason in NOT_ASKED)
         }
@@ -519,18 +549,53 @@ class CarouselRepository(
      * The post's fresh items, in place of whatever was stored. A reply without them stores nothing and keeps the stored ones.
      * When the post's row went while the request was out (Delete library), the foreign key refuses the write: that throws, into
      * the public call's guard, which answers "Can't load this item"; the visit stays spent. Items of another shape than the
-     * stored ones (R20, with R28's child pks) take the post's cached item media with them, once they are stored.
+     * stored ones (R20, with R28's child pks) take the post's cached item media with them, once they are stored, and when the
+     * first slide is another one (R29) the post's cover too, which [visit] then knows ([Visit.coverDropped]).
+     *
+     * The store and its drops are not cancellable, from the replace on: a visit that ends in between (the owner swipes to the
+     * next post) would keep the old media and cover for good, since the next reply stores the same items and sees no change.
+     * Room's replace can also commit and then throw on its return to a cancelled caller, so the block starts at the replace.
+     * It is local work only (a few rows and file deletions; the video cache's removals wait for no lock), so leaving the post
+     * waits for it at most that long.
      */
-    private suspend fun store(pk: String, remote: List<RemoteCarouselItem>?): Renewal {
+    private suspend fun store(pk: String, remote: List<RemoteCarouselItem>?, visit: Visit): Renewal {
         // R2 and R4: the reply does not say what the items are (no carousel_media, an empty one, an unreadable child). An empty
         // list is a shape blip far more often than a carousel without items, so it never replaces the stored ones with nothing.
         if (remote.isNullOrEmpty()) return Renewal.Failed(CANT_LOAD)
         val fetchedAt = now()
         val items = remote.map { it.toEntity(pk).withAssumedLifetime(fetchedAt) }.sortedBy { it.position }
-        val reshaped = itemShapeChanged(dao.items(pk), items)
-        dao.replace(pk, items)
-        if (reshaped) dropItemMedia(pk)
+        val stored = dao.items(pk)
+        val reshaped = itemShapeChanged(stored, items)
+        withContext(NonCancellable) {
+            dao.replace(pk, items)
+            if (reshaped) {
+                dropItemMedia(pk)
+                if (firstSlideChanged(stored, items)) dropCover(pk, visit)
+            }
+        }
         return Renewal.Items(items)
+    }
+
+    /**
+     * R29, once the items are stored (inside [store]'s block that cannot be cancelled): the post's cover is the old first
+     * slide's picture, so its `thumbPath` is cleared and its file goes ([coverEviction]). The grid tile shows its placeholder
+     * until the next sync that reaches the post writes the new cover (nothing here downloads it), and [visit] shows item 0's own
+     * picture meanwhile ([Visit.coverShows]). Housekeeping, as [dropItemMedia]: each step on its own, a step that fails stops
+     * neither the other nor the visit's knowing. The path is cleared after the replace's own transaction, not in it: a process
+     * death in between keeps the old cover (the sync clears it in its page's transaction instead).
+     */
+    private suspend fun dropCover(pk: String, visit: Visit) {
+        try {
+            mediaDao.setThumbPath(pk, null)
+        } catch (e: Exception) {
+            // Intentionally ignored: item 0 shows its own picture all the same, and the file goes below.
+        }
+        try {
+            withContext(ioDispatcher) { coverEviction.evict(listOf(pk)) }
+        } catch (e: Exception) {
+            // Intentionally ignored: with no path the file is never shown; the next sync's cover replaces it whole.
+        }
+        visit.dropCover()
     }
 
     /** R20's housekeeping, off the caller's thread: the items are stored, so a file or a cached video left behind only takes space. */

@@ -647,6 +647,121 @@ class ViewerViewModelTest {
         assertEquals(1, fetched.count { it == "fake://thumb/$pk-0" }, "$fetched")
     }
 
+    // --- R29: a renewal that puts another slide first drops the cover; item 0 shows its own picture ---
+
+    /** The fake's reply with its first two slides swapped (two images, whose child pks move with them): another slide is first. */
+    private fun swapTheFirstTwoInTheReply() {
+        onReply = { reply ->
+            reply?.let { r ->
+                val items = r.carouselItems!!
+                r.copy(carouselItems = listOf(items[1].copy(position = 0), items[0].copy(position = 1)) + items.drop(2))
+            }
+        }
+    }
+
+    /** Item 0's link once the first two slides are swapped: the fake's link of what was slide 1. */
+    private val firstNow = "fake://thumb/$pk-1"
+
+    /**
+     * On item 0, the queue's first picture is refused and the visit's renewal (R25) puts another slide first: the cover goes,
+     * and item 0 shows its own picture at once, the slide first now, downloaded once. The owner never left item 0.
+     */
+    @Test
+    fun onItemZeroARenewalThatPutsAnotherSlideFirstShowsItsOwnPicture() = runTest {
+        storeCarousel()
+        swapTheFirstTwoInTheReply()
+        val cdn = Cdn { url -> if (url.startsWith("fake://")) byteArrayOf(1, 2, 3) else null } // only renewed links load
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+
+        viewModel.onSettled(carousel)
+
+        val state = viewModel.awaitCarousel { it.items.firstOrNull()?.imagePath != null }
+        assertEquals(0, state.settled)
+        assertEquals(1, cdn.fetched.count { it == firstNow }, "${cdn.fetched}")
+        assertNull(db.mediaDao().byPks(listOf(pk)).single().thumbPath, "the cover went")
+        assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+    }
+
+    /**
+     * On item 3 when the renewal drops the cover: item 0's own picture is not fetched at once, but by the queue, like any
+     * other picture, in its turn (the nearest first: item 0 is the farthest, so the last).
+     */
+    @Test
+    fun withTheCoverGoneTheQueueFetchesItemZeroInItsTurn() = runTest {
+        storeCarousel()
+        swapTheFirstTwoInTheReply()
+        val cdn = Cdn { url -> if (url.startsWith("fake://")) byteArrayOf(1, 2, 3) else null }.apply { hold(old(1)) }
+        val viewModel = viewModel(carousels = carouselRepository(this, fetcher = cdn))
+        try {
+            viewModel.onSettled(carousel)
+            eventually { while (cdn.fetched.isEmpty()) delay(10) } // the queue's first picture is out
+            viewModel.onItemSettled(pk, 3) // its own link is refused: the visit's renewal drops the cover
+            cdn.release(old(1))
+
+            // Every picture in: the queue has nothing left to fetch.
+            val state = viewModel.awaitCarousel { it.shows(ahead) && it.items[0].imagePath != null }
+            assertEquals(3, state.settled, "the owner is still on item 3")
+            assertEquals(1, cdn.fetched.count { it == firstNow }, "${cdn.fetched}")
+            assertEquals(firstNow, cdn.fetched.last(), "in its turn, after every other picture: ${cdn.fetched}")
+            assertEquals(listOf("mediaInfo:$pk"), mediaInfoCalls)
+        } finally {
+            cdn.releaseAll()
+        }
+    }
+
+    /**
+     * R29's review (M-2): a sync drops the open post's cover (and cannot fetch the new one yet) while the owner is on item 0.
+     * The row whose cover went reaches the visit (no settle), and item 0 shows its own picture at once instead of black.
+     */
+    @Test
+    fun aCoverASyncDropsWhileOnItemZeroGivesWayToItsOwnPicture() = runTest {
+        storeCarousel()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        assertNull(viewModel.awaitCarousel { it.shows(ahead) }.items[0].imagePath, "precondition: the cover shows item 0")
+
+        viewModel.onRowChanged(carousel.copy(thumbPath = null))
+
+        viewModel.awaitCarousel { it.items[0].imagePath != null }
+        assertEquals(1, fetched.count { it == old(0) }, "$fetched")
+    }
+
+    /** Elsewhere than on item 0, the row's lost cover loads nothing at once; item 0's own picture comes when it settles. */
+    @Test
+    fun aCoverASyncDropsElsewhereLoadsItemZeroWhenItSettles() = runTest {
+        storeCarousel()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        viewModel.onItemSettled(pk, 3)
+        viewModel.awaitCarousel { it.shows(ahead) }
+
+        viewModel.onRowChanged(carousel.copy(thumbPath = null))
+        // An item 0 that loaded at once would be asked for within this (the lane's jitter is under a second).
+        eventually { withTimeoutOrNull(1_000) { while (old(0) !in fetched) delay(10) } }
+        assertEquals(0, fetched.count { it == old(0) }, "nothing for item 0 while the owner is elsewhere")
+
+        viewModel.onItemSettled(pk, 0)
+
+        viewModel.awaitCarousel { it.items[0].imagePath != null }
+        assertEquals(1, fetched.count { it == old(0) }, "$fetched")
+    }
+
+    /** A row of another post than the settled carousel changes nothing of the visit. */
+    @Test
+    fun anotherPostsRowLeavesTheVisitAlone() = runTest {
+        storeCarousel()
+        storeOther()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.shows(ahead) }
+
+        viewModel.onRowChanged(other.copy(thumbPath = null))
+        eventually { withTimeoutOrNull(1_000) { while (old(0) !in fetched) delay(10) } }
+
+        assertEquals(0, fetched.count { it == old(0) })
+        assertNull(viewModel.carousel.value!!.state.items[0].imagePath)
+    }
+
     @Test
     fun anItemImageThatCannotLoadSaysSo() = runTest {
         storeCarousel()

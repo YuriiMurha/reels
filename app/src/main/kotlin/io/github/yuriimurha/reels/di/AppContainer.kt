@@ -189,6 +189,8 @@ class AppContainer(context: Context) {
             log = debugLog,
             itemEviction = carouselItemEviction,
             starts = videoStarts,
+            // R29: a renewal that put another slide first drops the post's cover file (its path is cleared by the repository).
+            coverEviction = MediaEviction.eachStep({ thumbnails.delete(it) }),
         )
     }
 

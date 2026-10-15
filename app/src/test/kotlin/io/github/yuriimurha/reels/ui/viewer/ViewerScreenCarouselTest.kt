@@ -266,6 +266,22 @@ class ViewerScreenCarouselTest {
         assertTrue(displayedWith(VIDEO_SURFACE_TAG), "the video shows")
     }
 
+    /**
+     * R29's review (M-2): on A's item 0, a sync drops A's cover (and cannot fetch the new one yet). The screen hands the visit
+     * the row whose cover went, though nothing settles, and item 0 shows its own picture instead of black.
+     */
+    @Test
+    fun aCoverASyncDropsWhileOnItemZeroGivesWayToItsOwnPicture() {
+        onCarouselA()
+        assertTrue(displayedWith(CAROUSEL_COVER_TAG), "precondition: item 0 shows the cover")
+        val mark = player.events.size
+
+        runBlocking { container.db.mediaDao().setThumbPath(a.pk, null) }
+
+        awaitUntil("item 0's own picture") { displayedWith(carouselImageTag(0)) }
+        assertEquals(emptyList(), since(mark), "no settle: the player was left alone")
+    }
+
     /** Review Focus 1: the next carousel starts at its item 0, with nothing of A's item (no second settle, no video). */
     @Test
     fun aSwipeFromOneCarouselToTheNextStartsItAtItemZeroAndPlaysNothingOfTheFirst() {

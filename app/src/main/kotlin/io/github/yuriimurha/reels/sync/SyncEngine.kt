@@ -11,6 +11,7 @@ import io.github.yuriimurha.reels.data.db.SyncMode
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.db.ThumbnailTarget
+import io.github.yuriimurha.reels.data.db.firstSlideChanged
 import io.github.yuriimurha.reels.data.db.itemShapeChanged
 import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.data.media.CdnRateLimited
@@ -52,7 +53,8 @@ class SyncEngine(
     /**
      * R20: told which carousels a page stored items of another shape for ([itemShapeChanged]: a slide deleted, a type swapped,
      * or, R28, another child at a position by its known child pk), once that page is committed, so their downloaded item
-     * images and cached item videos (keyed by position) go. Never the post itself: its row, cover and items stay.
+     * images and cached item videos (keyed by position) go. Never the post itself: its row and items stay, and so does its
+     * cover unless the first slide changed (R29: the engine drops that one itself, [applyPage] and [dropCoverFiles]).
      */
     private val carouselEviction: MediaEviction = MediaEviction { },
     /**
@@ -413,11 +415,20 @@ class SyncEngine(
             val from = cursor.nextCursor
             val page = call(progress) { client.savedMedia(scope.takeUnless { it == ALL_SAVED_ID }, from) }
             val current = cursor
-            val outcome = db.withTransaction { applyPage(progress, scope, current, page, knownCollections, placeholders) }
+            // The page and the housekeeping it makes due go together, not cancellably: a Cancel (or WorkManager stopping the
+            // worker) that landed between the commit and the housekeeping would keep a removed post's files, a reshaped
+            // carousel's item media (R20) or an old cover's file for good, since the next sync sees no change. Room's
+            // withTransaction can commit and then throw on its return to a cancelled caller, so the block starts at the
+            // transaction: a Cancel during the page lets it finish, and the run stops at its next step. Local work only.
+            val outcome = withContext(NonCancellable) {
+                db.withTransaction { applyPage(progress, scope, current, page, knownCollections, placeholders) }.also { done ->
+                    done.removedPks.forEach(thumbnails::delete)
+                    evictVideos(done.removedPks)
+                    dropCarouselItemMedia(done.reshapedCarousels)
+                    dropCoverFiles(done.newCovers)
+                }
+            }
             cursor = outcome.cursor
-            outcome.removedPks.forEach(thumbnails::delete)
-            evictVideos(outcome.removedPks)
-            dropCarouselItemMedia(outcome.reshapedCarousels)
             cacheThumbnails(progress, outcome.needThumbnails.map { ThumbnailTarget(it.pk, it.thumbnailUrl) })
         }
         progress.update { it.copy(collectionsDone = it.collectionsDone + 1) }
@@ -446,17 +457,39 @@ class SyncEngine(
         }
     }
 
+    /**
+     * R29, after the page that put another slide first in [pks] is committed (their paths went in the page's own transaction,
+     * [applyPage]): each post's old cover file, the old first slide's picture, is deleted. The page's own thumbnail step then
+     * fetches the new cover under the same name, as for a new post. Housekeeping, as [evictVideos]: each pk on its own, and a
+     * file that cannot be deleted stops nothing (with no path it is never shown, and the new cover replaces it whole).
+     */
+    private fun dropCoverFiles(pks: List<String>) {
+        for (pk in pks) {
+            try {
+                thumbnails.delete(pk)
+            } catch (e: Exception) {
+                // Intentionally ignored: see above.
+            }
+        }
+    }
+
     private class PageOutcome(
         val cursor: SyncCursorEntity,
+        /** The page's posts whose cover the thumbnail step fetches: those with none, and (R29) those whose cover goes. */
         val needThumbnails: List<RemoteMedia>,
         val removedPks: List<String>,
         /** Carousels whose stored items changed shape on this page (R20). */
         val reshapedCarousels: List<String>,
+        /** R29: carousels of [reshapedCarousels] whose first slide is another one now: their path went with the page, their file goes. */
+        val newCovers: List<String>,
     )
 
     /**
      * One page in one transaction: media, carousel items, memberships, cursor and (at the end of a FULL walk) reconcile. Files
-     * are never touched here: what the page makes stale (a removed post's, a reshaped carousel's) goes once it is committed.
+     * are never touched here: what the page makes stale (a removed post's, a reshaped carousel's, R29 the cover file of a
+     * carousel whose first slide changed) goes once it is committed. R29's cover path goes in the transaction, with the items:
+     * a process death after the commit then leaves a post with no cover, which the resume (or the next sync that reaches it)
+     * fetches, never the old slide's for good.
      * With [placeholders] (the names are the last good ones), a collection an item lists that none of them names is added
      * ([addPlaceholder]).
      */
@@ -478,12 +511,20 @@ class SyncEngine(
         mediaDao.upsert(page.items.map { it.toEntity(existing[it.pk], at) })
         // A carousel's items, with their post. null or an empty list says nothing about them (R2): the stored ones stay.
         val reshaped = mutableListOf<String>()
+        val newCovers = mutableListOf<String>()
         page.items.forEach { item ->
             val remote = item.carouselItems?.takeIf { it.isNotEmpty() } ?: return@forEach
             val items = remote.map { c -> c.toEntity(item.pk) }
-            if (itemShapeChanged(carouselDao.items(item.pk), items)) reshaped += item.pk
+            val stored = carouselDao.items(item.pk)
+            if (itemShapeChanged(stored, items)) {
+                reshaped += item.pk
+                // R29: the cover is the first slide's picture, so another first slide takes it with it.
+                if (firstSlideChanged(stored, items)) newCovers += item.pk
+            }
             carouselDao.replace(item.pk, items)
         }
+        // R29: the old cover's path goes with the items that made it stale (its file once the page is committed).
+        newCovers.forEach { mediaDao.setThumbPath(it, null) }
         val memberships = page.items.mapIndexed { offset, item ->
             val known = members[item.pk]
             val key = if (mode == SyncMode.FULL || known == null) {
@@ -529,7 +570,8 @@ class SyncEngine(
         progress.update { r ->
             r.copy(newItems = r.newItems + page.items.count { it.pk !in existing }, seenItems = r.seenItems + page.items.size)
         }
-        return PageOutcome(next, page.items.filter { existing[it.pk]?.thumbPath == null }, removed, reshaped)
+        val needThumbnails = page.items.filter { existing[it.pk]?.thumbPath == null || it.pk in newCovers }
+        return PageOutcome(next, needThumbnails, removed, reshaped, newCovers)
     }
 
     /**

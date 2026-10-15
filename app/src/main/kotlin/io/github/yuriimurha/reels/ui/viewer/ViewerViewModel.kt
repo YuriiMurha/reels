@@ -136,6 +136,19 @@ class ViewerViewModel(
     }
 
     /**
+     * R29: the list's row of the post [media] changed in place (a sync cleared or wrote its cover; the screen reports a row
+     * whose cover path changed, which is no settle). The settled carousel's visit takes the newer row, so item 0 and the queue
+     * follow its cover; and when the cover is gone (a sync dropped it, and could not fetch the new one yet) while the owner is
+     * on item 0, item 0's own picture loads at once instead of the black a missing cover would leave. Nothing for any other
+     * post, and never a settle: the player is left alone.
+     */
+    fun onRowChanged(media: MediaEntity) {
+        val current = carouselVisit?.takeIf { it.media.pk == media.pk } ?: return
+        current.media = media
+        if (media.thumbPath == null && current.current()?.settled == 0) current.loadImage(0)
+    }
+
+    /**
      * If [next], the item after the settled one, is a video whose link has run out or is about to, renews it now, so that
      * swiping on finds it ready. Called once the settled item's own resolve has returned (R77), so the visible item's
      * request is never queued behind this one. Through the same resolver, so on the interactive lane and under the same
@@ -281,6 +294,12 @@ class ViewerViewModel(
                 current()?.let { loadImage(it.settled) }
                 fetchAhead()
             }
+            // R29: the visit's renewal put another slide first and dropped the cover. On item 0 now, the owner would see it go:
+            // item 0's own picture loads at once. Elsewhere it loads when item 0 settles, or the queue fetches it ahead.
+            scope.launch {
+                visit.coverDropped.first { it }
+                if (current()?.settled == 0) loadImage(0)
+            }
         }
 
         /**
@@ -290,10 +309,11 @@ class ViewerViewModel(
          * cancelling the download that is out. It ends when nothing is left, when the repository says to stop (the CDN's 429,
          * offline, a post gone, a refusal the renewal cannot help: P1, R25), or with the visit.
          *
-         * First every picture past the cover, an image item's image and a video item's poster alike (R26), none shown or
-         * asked for on demand already: through [CarouselRepository.prefetchImage] and [CarouselRepository.prefetchPoster],
-         * whose only request to Instagram is the visit's one renewal for a refused link (R25). A picture that does not come
-         * never shows a failure (an image item says why once it settles; a video item's own video speaks for it).
+         * First every picture past the cover (and item 0's own once there is no cover, R29), an image item's image and a video
+         * item's poster alike (R26), none shown or asked for on demand already: through [CarouselRepository.prefetchImage] and
+         * [CarouselRepository.prefetchPoster], whose only request to Instagram is the visit's one renewal for a refused link
+         * (R25). A picture that does not come never shows a failure (an image item says why once it settles; a video item's own
+         * video speaks for it).
          *
          * Then, once no picture is left, the first megabyte of every video item but the settled one (which plays), through
          * [CarouselRepository.preloadVideo], which never asks Instagram anything. A start the owner settles on while it is
@@ -335,13 +355,15 @@ class ViewerViewModel(
 
         /**
          * The page whose picture to fetch ahead next, or null: the items after the settled one in order, then those before it,
-         * the nearest first. Never item 0 (the cover, R10, for an image and a video item alike), a picture already shown, one
-         * the item's own [loadImage] asked for, or one taken before.
+         * the nearest first. Never item 0 while the cover shows it (R10, for an image and a video item alike; without one, R29,
+         * item 0 is a picture like the others), a picture already shown, one the item's own [loadImage] asked for, or one
+         * taken before.
          */
         private fun nextAhead(): Int? {
             val state = current() ?: return null
             val settled = state.settled.coerceIn(0, state.items.size)
-            val order = (settled + 1 until state.items.size) + (settled - 1 downTo 1)
+            val first = if (visit.coverShows(media)) 1 else 0
+            val order = (settled + 1 until state.items.size) + (settled - 1 downTo first)
             return order.firstOrNull { page ->
                 val item = state.items[page]
                 item.type in PICTURED && item.imagePath == null && page !in imagesAsked && page !in fetchedAhead
@@ -389,14 +411,15 @@ class ViewerViewModel(
         /**
          * Item [index]'s picture, on demand, once a visit: an image item's image, or a video item's poster (R26), which shows
          * until the video's first frame. Item 0's is the cover the sync stored (taken from the first item, by the same rule),
-         * so it is only fetched for a post without one, and a picture the queue fetched ahead (R23) is shown already. If the
-         * queue's download of this very item is out, the repository waits for it. A poster that does not come says nothing:
-         * the video plays, or says why it cannot, all the same.
+         * so it is only fetched for a post without one, or once the visit's renewal dropped it (R29,
+         * [CarouselRepository.Visit.coverShows]), and a picture the queue fetched ahead (R23) is shown already. If the queue's
+         * download of this very item is out, the repository waits for it. A poster that does not come says nothing: the video
+         * plays, or says why it cannot, all the same.
          */
         fun loadImage(index: Int) {
             val item = current()?.items?.getOrNull(index) ?: return
             if (item.type !in PICTURED || item.imagePath != null) return
-            if (index == 0 && media.thumbPath != null) return
+            if (index == 0 && visit.coverShows(media)) return
             if (!imagesAsked.add(index)) return
             scope.launch {
                 val shown: (CarouselItemUi) -> CarouselItemUi = when (val image = carousels.image(media, item.position, visit)) {

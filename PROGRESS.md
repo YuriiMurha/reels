@@ -831,3 +831,102 @@ last review asked for are in. Both were open in `TODO.md`.
   loader's key adds a file stat per picture load, on the device only, as Coil's own last-modified key would.
 - **Safety.** Nothing contacted Instagram or touched the owner's phone: fakes, synthetic fixtures and local data only, and
   the emulator in Mock mode.
+
+## 2026-10-15: another first slide takes the post's cover with it (R29)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6: R29 closes the known gap R28's review found, which was
+open in `TODO.md`.
+
+- **The gap.** Item 0 and the grid tile show the post's stored cover (`{pk}.jpg`), the first slide's picture, which a sync
+  writes only while the post has none, and R20 and R28 dropped only the slides' own files (`{pk}_{position}.jpg`) and the
+  item video starts. After a poster deleted, moved or swapped slide 0, item 0 and the tile kept the old cover until the post
+  was unsaved or Delete library ran.
+- **The rule.** `firstSlideChanged` (next to `itemShapeChanged`): the type at position 0 changed, or its child pk did while
+  known on both sides (R28's rule at position 0 only), or there is no position 0. It is only ever true when R20's drop
+  fires, and the cover goes only then; a change further on, and renewed links, keep the cover.
+- **At the sync.** Once the page is committed, the post's `thumbPath` is cleared and its `{pk}.jpg` deleted (`dropCovers`,
+  not cancellable: a Cancel between the commit and the drop would leave the old cover for good, since the next sync stores
+  the same items), and the post joins that page's own thumbnail step, which fetches the new cover from the post's cover
+  link, as for a new post. If that fetch fails, the post has no cover and the next sync that reaches it, or a resume,
+  fetches it.
+- **At a renewal.** The same drop once the renewal's items are stored (the repository clears the path; the container's
+  `coverEviction` deletes the file), and nothing downloads the cover: the tile shows its placeholder until the next sync
+  that reaches the post. The visit learns it (`Visit.coverDropped`), and `Visit.coverShows` is now the one rule for item 0:
+  on item 0 its own picture loads at once, elsewhere when it settles or R23's queue reaches it (the queue, `prefetchImage`
+  and `prefetchPoster` take item 0 whenever there is no cover).
+- **One reading of the plan.** It said the next sync downloads the new cover. At the sync site the page that dropped it
+  fetches it in the same run (its existing thumbnail step), because a Sync walks only the first page and an older post would
+  otherwise show a blank tile until the next Full sync; the next sync is the fallback when that fetch fails. At the renewal
+  site it is the next sync that reaches the post, as planned.
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`: 1291 app tests in 95 classes and 388 `:instagram` tests, 0
+  failures, lint with no errors and the same 16 warnings; `connectedDebugAndroidTest` on the emulator in Mock mode: 54
+  tests, 0 failures. New (15): one `CarouselItemDaoTest` (the rule case by case), five `SyncEngineTest` (another first slide drops the cover after the commit and the page fetches the new one once;
+  a new cover the CDN refused comes with the next sync that reaches the post; a change further on, renewed links and a page
+  that rolls back keep the cover), five `CarouselRepositoryTest` (a renewal drops the cover's path and file once the items
+  are stored and the visit knows, item 0 then loads its own picture on demand and ahead, the next sync writes the cover
+  again; a change further on and the same slides with new links keep it), two `ViewerViewModelTest` (on item 0 its own
+  picture at once; elsewhere the queue fetches it in its turn, last), one `ImageLoadingTest` (a dropped cover is a failed
+  load until the new one loads anew) and one `BackendWiringGuardTest` (the container's cover drop). Mutation-checked in a
+  scratch export: 26 mutants, all killed: the sync site (7: no drop, the thumbnail step leaving it, never a new cover, the
+  path or the file kept, every reshape dropping, the file deleted inside the page's transaction), the rule (5: no child pk,
+  null as a change, no type, R20's rule, no position 0 as no change), the renewal site (9: no drop, the path or the file
+  kept, the visit not told, the drop before the store, every reshape dropping, item 0 never fetched ahead, the cover read
+  from the row alone, the container's wiring), the viewer (4: item 0 by the row alone, nothing following the drop, item 0
+  loaded at once wherever the owner is, the queue never taking item 0) and the grid tile (1: Coil keying a file by its path
+  alone). "Item 0 at once wherever the owner is" survived the first run: the queue test read the order as soon as item 0
+  showed, not once the queue was done; it now waits for every picture.
+- **Pacing.** No new API request; the drop is local. A dropped cover is downloaded again only by the sync's existing
+  thumbnail step on the CDN lane (that page's, or the next sync's that reaches the post): one CDN download per changed
+  carousel, as for a new post. In the viewer, while a post has no cover, item 0's own picture is one download on the same
+  lane, by its own load or the queue, like any other slide's, and it is kept. No lane's concurrency, jitter or budget
+  changes, and no schema change (`versionCode` stays 3).
+- **Safety.** Nothing contacted Instagram or touched the owner's phone: fakes, synthetic data and local files only, and the
+  emulator in Mock mode.
+- **The review (2026-10-15).** An adversarial review (pacing, correctness, tests by mutation) found 1 Important, 6 Minor
+  and 3 Nits, and two statements above held only in part: the sync's drop was not cancellable for a Cancel in flight (the
+  page rolled back) but a process death after the commit kept the old cover, and "one CDN download per changed carousel"
+  holds at the sync only. Fixed:
+  - **I-1 (Important), and R20's own gap.** At a renewal the cover's drop ran behind R20's drop and the replace, which a visit
+    ending (the owner swiping on) could cancel, Room's replace even after committing; the old cover, and the slides' old
+    media (R20, a gap older than R29), then stayed for good. `store` now runs the replace and both drops in one
+    `withContext(NonCancellable)` that starts at the replace. The sync's page and its housekeeping (a reconcile's evictions,
+    R20's drop, the cover's file) are one such block too, from the transaction on: a Cancel during a page lets it finish,
+    and the run stops at its next step.
+  - **M-4.** The sync clears the cover's path in the page's own transaction, so a process death after the commit leaves a
+    post with no cover, which the resume fetches; a path that cannot be cleared now fails the page like any of its writes
+    (the review's probe of a failing path step at the sync no longer applies, and a test pins the page's rollback instead).
+    The file still goes only after the commit. At a renewal the path is still cleared right after the replace's own
+    transaction: a process death in that instant keeps the old cover (documented).
+  - **M-1.** A grid tile handed the drop and the new cover in one recomposition (the app in the background while the sync
+    ran) kept drawing the old bitmap: the path was the same before and after, so Coil was never asked again. `Thumbnail`
+    now takes a `version`, the cover link for the grid tile and item 0's cover, and asks again when it changes; an
+    unchanged file (a link only signed again) still comes from memory.
+  - **M-2.** Item 0 was black for the rest of a visit after a sync dropped the open post's cover and could not fetch the new
+    one. The screen now reports a carousel's row whose cover path changed in place (`ViewerViewModel.onRowChanged`, no
+    settle), and item 0 loads its own picture at once when the owner is on it.
+  - **M-3.** Not changed, documented: a change found at a renewal downloads the first slide's picture twice (item 0's own,
+    then the cover by the next sync that reaches the post), in R29 and ARCHITECTURE's pacing statement.
+  - **M-5, M-6 and the Nits.** The review's probes are tests, and the docs say what the code does (N-1's order no longer
+    matters; N-2's race, a renewal's file deletion landing between a sync's new cover and its path, stays negligible).
+  - **Tests and mutants.** `./gradlew check --no-build-cache --rerun-tasks`: 1309 app tests in 96 classes and 388
+    `:instagram` tests, 0 failures, lint with no errors and the same 16 warnings; `connectedDebugAndroidTest` on the
+    emulator in Mock mode: 54 tests, 0 failures. New (18): six `CarouselRepositoryTest`, the review's five probes and one
+    more (a visit ending
+    right after the store, with the replace returning as Room's does to a cancelled caller, drops the slides' media and the
+    cover; one ending while R20's drop or the cover's runs still drops the cover; each of the cover's two steps on its own),
+    five `SyncEngineTest` (a process death right after the commit still leads to the new cover through the resume; a path
+    that cannot be cleared fails the page and keeps the old cover whole; a Cancel inside the page's transaction finishes it
+    with its housekeeping; one during the housekeeping still leads to the new cover; two carousels of one page), three
+    `ViewerViewModelTest` (a lost cover on item 0 loads its own picture at once, elsewhere when it settles, another post's
+    row changes nothing), one `ViewerScreenCarouselTest` (the real screen: a row whose cover went, on item 0, shows item
+    0's own picture with no settle) and three `CoverRewriteTest` (the review's compose probe, through the app's loader: the
+    grid tile and item 0's cover show a cover rewritten under the same name in one recomposition, and a cover whose link
+    only changed still shows); the review's probes P-F, P-G and P-I are among the `SyncEngineTest` ones. Mutation-checked in
+    a new scratch export: 23 mutants, all killed: the renewal (6: the store cancellable, the block starting after the
+    replace, the cover's drop outside it, one try for both cover steps, the visit told only after the file or only after the
+    path), the sync (7: the path after the commit, alone or with the file, the page cancellable, only the housekeeping not
+    cancellable, only the first cover file, no cover file, the file deleted inside the transaction), the tile (4: no key, a
+    key without the version, no version from the grid tile or from item 0's cover) and item 0 after a sync's drop (6: the
+    visit keeping its row, nothing loading, item 0 loading wherever the owner is, any post's row, no row reported by the
+    screen, a row reported once per post). The review's own survivors S1 (the sync's inner `NonCancellable`) and R1 (the
+    renewal's) are gone with the code: each site has one block now, and S2 (the step order) no longer exists.
