@@ -1015,7 +1015,21 @@ page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
   between the commit and the housekeeping would keep a removed post's files, a reshaped carousel's item media or an old cover
   file for good, since the next sync sees no change, and Room's `withTransaction` can commit and then throw on its return to
   a cancelled caller. So a Cancel during a page lets the page finish with its housekeeping, all local work, and the run
-  stops at its next step (PAUSED, "Cancelled", as before).
+  stops at its next step (PAUSED, "Cancelled", as before), and the run row reads PAUSED "Cancelled" all the while (next
+  bullet).
+- **The run row's writes (R29's review).** The engine writes the row whole twice: `save` at the run's start (RUNNING, no
+  error, so a run begun on a row another writer left PAUSED, as when WorkManager runs a worker again after a process death,
+  reads RUNNING from then on) and `finish` at its end (the final status and `lastError`). Everything in between, the phase and
+  the counts, the page's own progress write inside its transaction included, goes through `SyncDao.updateProgress`, which
+  writes those columns (`SyncRunProgress`) and never the status, the error or the end time. Before, each of those writes put
+  the engine's own copy of the row, made at the run's start, whole. The Cancel button writes PAUSED "Cancelled"
+  (`SyncController.cancel`) behind that copy's back, and a page that a Cancel lets finish commits after it: its write set the
+  row RUNNING again and cleared the error until the run ended a few milliseconds later, so Sync and the Saved chip read
+  "Syncing…" and a Delete library tap was ignored. Now the row reads PAUSED "Cancelled" from the Cancel to the run's end, the
+  page's counts and its cursor still commit with it, and a Resume starts at the next page with the counts carried on. A run with
+  no Cancel reads RUNNING throughout. `SyncEngineTest` pins each (a SQLite trigger records any write that makes a paused row
+  RUNNING, since a row that reads RUNNING for milliseconds is gone before a test reads it). No request is added, and no schema
+  change: `SyncRunProgress` is a partial update of `sync_run`, not a table.
 - **Session signals.** `run` reads `signals.epoch()` first thing inside its try (a session layer that cannot answer ends the
   run PAUSED "Unexpected error", never RUNNING), tells the session layer `sessionOk(username, epoch)` once
   `currentUser()` has succeeded, and passes the same epoch with `loginRequired` and `challengeRequired`; a failing receiver
@@ -1040,9 +1054,11 @@ page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
 ### Run outcomes
 
 Expected errors map to run statuses, an unexpected one pauses the run (its `lastError` names only the exception class),
-and only cancellation propagates. The status and `lastError` are written before `run` returns. The Sync screen shows the
-`lastError` as the banner for PAUSED and `STOPPED_SHAPE`, and a fixed text for the other three STOPPED statuses; the Saved
-status chip shows the `lastError` for any stopped or paused run.
+and only cancellation propagates. The status and `lastError` are written before `run` returns, and by the engine only at the run's
+start (RUNNING) and end (the status below): a Cancel's PAUSED "Cancelled" is written by the Cancel button first and by the
+engine again when it stops, and the row never reads RUNNING between them (R29's review, [Sync engine](#sync-engine)). The Sync
+screen shows the `lastError` as the banner for PAUSED and `STOPPED_SHAPE`, and a fixed text for the other three STOPPED
+statuses; the Saved status chip shows the `lastError` for any stopped or paused run.
 
 | What happened | Status | `lastError` | Sync screen banner |
 |---|---|---|---|

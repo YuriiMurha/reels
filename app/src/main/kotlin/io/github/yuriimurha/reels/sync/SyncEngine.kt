@@ -13,6 +13,7 @@ import io.github.yuriimurha.reels.data.db.SyncStatus
 import io.github.yuriimurha.reels.data.db.ThumbnailTarget
 import io.github.yuriimurha.reels.data.db.firstSlideChanged
 import io.github.yuriimurha.reels.data.db.itemShapeChanged
+import io.github.yuriimurha.reels.data.db.progress
 import io.github.yuriimurha.reels.data.db.toEntity
 import io.github.yuriimurha.reels.data.media.CdnRateLimited
 import io.github.yuriimurha.reels.data.media.MediaEviction
@@ -696,7 +697,11 @@ class SyncEngine(
 
     /**
      * The run row plus this invocation's request budget and the session [epoch] it started under; every change is written
-     * straight through.
+     * straight through. The row is written whole twice only, by [save] (RUNNING, the run's start) and by [finish] (its end).
+     * Everything in between ([update], [phase]) writes the phase and the counts and leaves the status and the error to
+     * whoever means to change them: this copy of the row is as old as the run's start, and the Cancel button pauses the row
+     * behind its back, so a whole-row write from the copy (the page's progress write is inside the page's transaction, which
+     * a Cancel lets finish) would set it RUNNING again and clear "Cancelled" until the run ended, a few milliseconds later.
      */
     private inner class Progress(var run: SyncRunEntity, val budget: Pacer.RunBudget, var epoch: Int) {
         private val requestsBefore = run.requestsUsed
@@ -712,14 +717,15 @@ class SyncEngine(
 
         suspend fun update(change: (SyncRunEntity) -> SyncRunEntity) {
             run = change(run).copy(requestsUsed = requestsBefore + budget.used)
-            syncDao.updateRun(run)
+            syncDao.updateProgress(run.progress())
         }
 
         suspend fun phase(text: String) = update { it.copy(phase = text) }
 
         suspend fun finish(status: SyncStatus, error: String?) {
             mediaDao.refreshCollectionNames()
-            update { it.copy(status = status, lastError = error, finishedAt = now(), phase = "") }
+            run = run.copy(status = status, lastError = error, finishedAt = now(), phase = "", requestsUsed = requestsBefore + budget.used)
+            syncDao.updateRun(run)
         }
     }
 }

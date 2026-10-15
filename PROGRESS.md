@@ -930,3 +930,35 @@ open in `TODO.md`.
     visit keeping its row, nothing loading, item 0 loading wherever the owner is, any post's row, no row reported by the
     screen, a row reported once per post). The review's own survivors S1 (the sync's inner `NonCancellable`) and R1 (the
     renewal's) are gone with the code: each site has one block now, and S2 (the step order) no longer exists.
+
+## 2026-10-15: a Cancel during a page no longer sets the run row RUNNING again
+
+Closes the `TODO.md` line left by R29's review: a Cancel that lands during a sync page.
+
+- **The bug.** Since R29 a page runs, from its transaction on, in a block that a Cancel cannot interrupt. The Cancel button
+  writes the run row PAUSED "Cancelled" (`SyncController.cancel`), the page then commits, and its progress write, inside
+  the transaction, wrote the engine's own copy of the row whole: RUNNING, and the error cleared. A few milliseconds later the
+  run's cleanup ended it as PAUSED "Cancelled" again. In between Sync and the Saved chip read "Syncing…" and a Delete
+  library tap was ignored. The re-review reproduced it with its probe RR-2.
+- **The fix, one level up from the TODO's wording.** The TODO suggested leaving the status out of the page's progress write
+  once a Cancel has been seen. The engine cannot see the Cancel (it is the controller's write, and inside the block the job
+  is not cancelled), and every progress write carried the same stale copy, so no progress write writes the status now:
+  `Progress.update` and `phase` go through the new `SyncDao.updateProgress(SyncRunProgress)`, a partial update of the phase
+  and the counts (`SyncRunProgress`, no table, no schema change), and only `save` (the run's start, RUNNING) and `finish` (its
+  end) write the row whole. The counts and the page's cursor still commit with the page, so a Resume starts at the next page
+  and counts on. A run with no Cancel reads RUNNING throughout, including one started on a row left PAUSED. No request is
+  added: nothing about pacing, rates or concurrency changes.
+- **Safety.** Nothing contacted Instagram or touched the owner's phone or the emulator: fakes, an in-memory database and
+  local files only.
+- **Tests and mutants.** `./gradlew check --no-build-cache --rerun-tasks`: 1312 app tests in 96 classes and 388
+  `:instagram` tests, 0 failures, lint with no errors and the same 16 warnings. New (3, all in `SyncEngineTest`): the
+  re-review's RR-2 as a test (the controller's pause, then a Cancel inside the page's transaction: the row reads PAUSED
+  "Cancelled" with the page's 20 items already counted while the housekeeping runs, a SQLite trigger records no write that
+  makes the paused row RUNNING, and the run ends PAUSED "Cancelled"; it failed before the fix with `RUNNING/null`), a Resume
+  after that Cancel asks for the page after the first (never the first again), counts on to 50 and fetches the cover the page
+  dropped, and a run with no Cancel, started on a PAUSED row, reads RUNNING at every request, housekeeping and thumbnail.
+  Mutation-checked in a new scratch export: 8 mutants, all killed (the bug back for every progress write, for the page's own
+  write only, a progress write only while the stored row is RUNNING, no cursor written with the page, a resume that ignores
+  its cursor, a progress write that forgets a count, a start that writes no status, an end that writes no status). The first
+  round of the tests let two of them survive (the end's whole-row write puts the counts in anyway), so the Cancel test now
+  reads the counts right after the commit.

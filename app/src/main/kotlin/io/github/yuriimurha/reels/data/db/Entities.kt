@@ -129,6 +129,28 @@ data class SyncRunEntity(
     val lastError: String? = null,
 )
 
+/**
+ * The columns of a [SyncRunEntity] that a run's progress writes: the phase and the counts, and never the status, the error or
+ * the end time ([SyncDao.updateProgress]). Those belong to the writes that mean to change them (the run's start and end, the
+ * Sync screen's Cancel and Resume), so a progress write that lands after one of them can't undo it: the Cancel button's
+ * PAUSED "Cancelled" stays while a page that was already committing finishes.
+ */
+data class SyncRunProgress(
+    val id: Long,
+    val phase: String,
+    val collectionsDone: Int,
+    val collectionsTotal: Int,
+    val requestsUsed: Int,
+    val newItems: Int,
+    val seenItems: Int,
+    val thumbsCached: Int,
+    val failures: Int,
+)
+
+fun SyncRunEntity.progress() = SyncRunProgress(
+    id, phase, collectionsDone, collectionsTotal, requestsUsed, newItems, seenItems, thumbsCached, failures,
+)
+
 @Entity(tableName = "sync_cursor", primaryKeys = ["runId", "scope"])
 data class SyncCursorEntity(
     val runId: Long,
