@@ -351,7 +351,8 @@ R29 closes the known gap R28's review found (2026-10-15). It changes the code, w
   pks are unknown is still not seen (R28's unknowns); and a process death in the instant between a renewal's replace and its
   path keeps the old cover until the next change.
 
-Smaller changes from R29's review (2026-10-15), none of which sends anything or raises a rate:
+Smaller changes from R29's review (2026-10-15), none of which sends an Instagram request or raises a rate (M-2 can add one
+CDN download of item 0's own picture when the changed post is open in the viewer, on the same lane):
 
 - **I-1, a visit ending during a renewal's store.** The cover's drop ran behind R20's drop and the replace, both of which a
   visit's end could cancel (Room's replace can commit and then throw on its return), so the old cover could stay for good,
