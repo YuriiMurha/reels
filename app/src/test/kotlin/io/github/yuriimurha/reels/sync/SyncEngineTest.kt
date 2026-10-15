@@ -2933,6 +2933,84 @@ class SyncEngineTest {
         assertEquals(setOf("RUNNING/null"), seen.map { it.substringAfter(' ') }.toSet(), seen.toString())
     }
 
+    /**
+     * Every column the engine's progress write carries is right while the run is still going. The run's last write, `finish`,
+     * puts the engine's whole copy of the row in, so whatever a progress write got wrong is gone from a finished row: only a read
+     * in the middle sees it (R29's review: a progress write that wrote the phase and six of the seven counts as ""/0 passed
+     * every test). Read at every saved-feed request of a strategy B run, whose second and third scopes follow a finished one,
+     * against what the test counted itself: the scope's name, the fake's call log, the pages it returned, and the fetcher's
+     * answers (one new save's thumbnail fails, and so does the fake's missing one, so failures are not zero).
+     */
+    @Test
+    fun everyColumnOfTheRowIsRightWhileTheRunGoesOn() = runTest {
+        val fake = strategyBClient()
+        assertEquals(SyncStatus.DONE, runSync(engine(fake), SyncMode.QUICK).status)
+        val callsBefore = fake.calls.size
+        val added = fake.library.addNewSaves(3)
+        val addedPks = added.map { it.pk }.toSet()
+        var stored = 0
+        var failed = 0
+        val cdn = MediaFetcher { url ->
+            if (url == added[1].thumbnailUrl || url.startsWith("fake://missing/")) {
+                failed++
+                null
+            } else {
+                stored++
+                byteArrayOf(1)
+            }
+        }
+        val scopes = listOf<String?>(null) + fake.library.collections.map { it.id }
+        val labels = listOf("All Saved") + fake.library.collections.map { it.name }
+        var seenItems = 0
+        val seenPks = mutableSetOf<String>()
+        var id = 0L
+        val reads = mutableListOf<Map<String, Any>>()
+        val wrong = mutableListOf<String>()
+        val client = object : InstagramClient by fake {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                val scope = scopes.indexOf(collectionId)
+                val expected = mapOf<String, Any>(
+                    "phase" to "Syncing ${labels[scope]}",
+                    "collectionsDone" to scope,
+                    "collectionsTotal" to scopes.size,
+                    "requestsUsed" to fake.calls.size - callsBefore,
+                    "newItems" to seenPks.count { it in addedPks },
+                    "seenItems" to seenItems,
+                    "thumbsCached" to stored,
+                    "failures" to failed,
+                )
+                val row = db.syncDao().run(id)!!
+                val actual = mapOf<String, Any>(
+                    "phase" to row.phase,
+                    "collectionsDone" to row.collectionsDone,
+                    "collectionsTotal" to row.collectionsTotal,
+                    "requestsUsed" to row.requestsUsed,
+                    "newItems" to row.newItems,
+                    "seenItems" to row.seenItems,
+                    "thumbsCached" to row.thumbsCached,
+                    "failures" to row.failures,
+                )
+                reads += actual
+                if (actual != expected) wrong += "$collectionId $cursor: expected $expected, was $actual"
+                val page = fake.savedMedia(collectionId, cursor)
+                seenItems += page.items.size
+                seenPks += page.items.map { it.pk }
+                return page
+            }
+        }
+        val engine = engine(client, mediaFetcher = cdn)
+        id = newRun(SyncMode.FULL)
+
+        engine.run(id)
+
+        assertEquals(SyncStatus.DONE, db.syncDao().run(id)!!.status)
+        assertEquals(emptyList(), wrong, "a column that was wrong while the run went on")
+        assertTrue(reads.size > 3 * scopes.size, "precondition: several pages in every scope, read at each: ${reads.size}")
+        for (column in reads.first().keys) {
+            assertTrue(reads.any { it[column] != 0 && it[column] != "" }, "precondition: $column was not 0 or empty at some read, or a column left at its default would pass")
+        }
+    }
+
     /** Two carousels of one page both put another slide first: both covers go before the page's thumbnail step fetches both. */
     @Test
     fun twoCarouselsOnOnePageBothLoseTheirCovers() = runTest {

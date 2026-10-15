@@ -1028,8 +1028,11 @@ page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
   "Syncing…" and a Delete library tap was ignored. Now the row reads PAUSED "Cancelled" from the Cancel to the run's end, the
   page's counts and its cursor still commit with it, and a Resume starts at the next page with the counts carried on. A run with
   no Cancel reads RUNNING throughout. `SyncEngineTest` pins each (a SQLite trigger records any write that makes a paused row
-  RUNNING, since a row that reads RUNNING for milliseconds is gone before a test reads it). No request is added, and no schema
-  change: `SyncRunProgress` is a partial update of `sync_run`, not a table.
+  RUNNING, since a row that reads RUNNING for milliseconds is gone before a test reads it) and every column the progress
+  write carries mid-run, since `finish` writes the whole copy at the end and hides a wrong one. A counter added to
+  `SyncRunEntity` goes into `SyncRunProgress` and `progress()` too: `SyncRunProgressTest` fails until it does (or until the
+  column is named there as not progress). No request is added, and no schema change: `SyncRunProgress` is a partial update of
+  `sync_run`, not a table.
 - **Session signals.** `run` reads `signals.epoch()` first thing inside its try (a session layer that cannot answer ends the
   run PAUSED "Unexpected error", never RUNNING), tells the session layer `sessionOk(username, epoch)` once
   `currentUser()` has succeeded, and passes the same epoch with `loginRequired` and `challengeRequired`; a failing receiver

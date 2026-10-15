@@ -950,15 +950,29 @@ Closes the `TODO.md` line left by R29's review: a Cancel that lands during a syn
   added: nothing about pacing, rates or concurrency changes.
 - **Safety.** Nothing contacted Instagram or touched the owner's phone or the emulator: fakes, an in-memory database and
   local files only.
-- **Tests and mutants.** `./gradlew check --no-build-cache --rerun-tasks`: 1312 app tests in 96 classes and 388
-  `:instagram` tests, 0 failures, lint with no errors and the same 16 warnings. New (3, all in `SyncEngineTest`): the
-  re-review's RR-2 as a test (the controller's pause, then a Cancel inside the page's transaction: the row reads PAUSED
-  "Cancelled" with the page's 20 items already counted while the housekeeping runs, a SQLite trigger records no write that
-  makes the paused row RUNNING, and the run ends PAUSED "Cancelled"; it failed before the fix with `RUNNING/null`), a Resume
-  after that Cancel asks for the page after the first (never the first again), counts on to 50 and fetches the cover the page
-  dropped, and a run with no Cancel, started on a PAUSED row, reads RUNNING at every request, housekeeping and thumbnail.
-  Mutation-checked in a new scratch export: 8 mutants, all killed (the bug back for every progress write, for the page's own
-  write only, a progress write only while the stored row is RUNNING, no cursor written with the page, a resume that ignores
-  its cursor, a progress write that forgets a count, a start that writes no status, an end that writes no status). The first
-  round of the tests let two of them survive (the end's whole-row write puts the counts in anyway), so the Cancel test now
-  reads the counts right after the commit.
+- **Tests and mutants.** `./gradlew check --no-build-cache --rerun-tasks`: 1315 app tests in 97 classes and 388
+  `:instagram` tests, 0 failures, lint with no errors and the same 16 warnings. New (6): four in `SyncEngineTest` and two in
+  `SyncRunProgressTest`.
+  - The re-review's RR-2 as a test (the controller's pause, then a Cancel inside the page's transaction: the row reads PAUSED
+    "Cancelled" with the page's 20 items already counted while the housekeeping runs, a SQLite trigger records no write that
+    makes the paused row RUNNING, and the run ends PAUSED "Cancelled"; it failed before the fix with `RUNNING/null`).
+  - A Resume after that Cancel asks for the page after the first (never the first again), counts on to 50 and fetches the
+    cover the page dropped.
+  - A run with no Cancel, started on a PAUSED row, reads RUNNING at every request, housekeeping and thumbnail.
+  - Every column the progress write carries (the phase, collections done and total, the requests, the new and seen items,
+    the thumbnails stored and failed) is right while a run goes on: a strategy B run reads the row at every saved-feed
+    request, over three scopes, and compares each column with what the test counted itself (the scope, the fake's call log,
+    the pages it returned, the fetcher's answers). It has to be a read in the middle: the run's last write, `finish`, puts the
+    engine's whole copy in, so a progress write that got a column wrong leaves no trace in the finished row.
+  - `SyncRunProgressTest`: `SyncRunProgress`'s fields are `SyncRunEntity`'s minus `mode`, `status`, `startedAt`,
+    `finishedAt` and `lastError` (a counter added to the entity and forgotten there fails by itself), and `progress()` copies
+    each of them unchanged, from values of their own.
+  - **Mutants, in two scratch exports (deleted).** First, 8, all killed: the bug back for every progress write, for the
+    page's own write only, a progress write only while the stored row is RUNNING, no cursor written with the page, a resume
+    that ignores its cursor, a progress write that writes the seen count as 0, a start that writes no status, an end that
+    writes no status. That round let two survive (the end's whole-row write puts a lost count in anyway), so the Cancel test
+    reads the counts right after the commit. Then a review found that only `seenItems` was read mid-run: a mapping that wrote
+    the phase and six of the seven counts as ""/0 survived all 1312 tests. Now 11, all killed: that one, each of the 8 columns
+    (the phase and the seven counts) dropped alone, `newItems` and `seenItems` written into each other, and a counter
+    forgotten in `SyncRunProgress`. The mid-run test kills every mapping mutant on its own, the mapping test as well, and
+    the field test kills the forgotten counter.
