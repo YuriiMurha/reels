@@ -551,6 +551,12 @@ class CarouselRepository(
      * the public call's guard, which answers "Can't load this item"; the visit stays spent. Items of another shape than the
      * stored ones (R20, with R28's child pks) take the post's cached item media with them, once they are stored, and when the
      * first slide is another one (R29) the post's cover too, which [visit] then knows ([Visit.coverDropped]).
+     *
+     * The store and its drops are not cancellable, from the replace on: a visit that ends in between (the owner swipes to the
+     * next post) would keep the old media and cover for good, since the next reply stores the same items and sees no change.
+     * Room's replace can also commit and then throw on its return to a cancelled caller, so the block starts at the replace.
+     * It is local work only (a few rows and file deletions; the video cache's removals wait for no lock), so leaving the post
+     * waits for it at most that long.
      */
     private suspend fun store(pk: String, remote: List<RemoteCarouselItem>?, visit: Visit): Renewal {
         // R2 and R4: the reply does not say what the items are (no carousel_media, an empty one, an unreadable child). An empty
@@ -560,22 +566,25 @@ class CarouselRepository(
         val items = remote.map { it.toEntity(pk).withAssumedLifetime(fetchedAt) }.sortedBy { it.position }
         val stored = dao.items(pk)
         val reshaped = itemShapeChanged(stored, items)
-        dao.replace(pk, items)
-        if (reshaped) {
-            dropItemMedia(pk)
-            if (firstSlideChanged(stored, items)) dropCover(pk, visit)
+        withContext(NonCancellable) {
+            dao.replace(pk, items)
+            if (reshaped) {
+                dropItemMedia(pk)
+                if (firstSlideChanged(stored, items)) dropCover(pk, visit)
+            }
         }
         return Renewal.Items(items)
     }
 
     /**
-     * R29, once the items are stored: the post's cover is the old first slide's picture, so its `thumbPath` is cleared and its
-     * file goes ([coverEviction]). The grid tile shows its placeholder until the next sync that reaches the post writes the new
-     * cover (nothing here downloads it), and [visit] shows item 0's own picture meanwhile ([Visit.coverShows]). Housekeeping, as
-     * [dropItemMedia]: a step that fails stops nothing. Not cancellable: a visit that ends here would leave the old cover for
-     * good, since the stored items no longer differ from the next reply's.
+     * R29, once the items are stored (inside [store]'s block that cannot be cancelled): the post's cover is the old first
+     * slide's picture, so its `thumbPath` is cleared and its file goes ([coverEviction]). The grid tile shows its placeholder
+     * until the next sync that reaches the post writes the new cover (nothing here downloads it), and [visit] shows item 0's own
+     * picture meanwhile ([Visit.coverShows]). Housekeeping, as [dropItemMedia]: each step on its own, a step that fails stops
+     * neither the other nor the visit's knowing. The path is cleared after the replace's own transaction, not in it: a process
+     * death in between keeps the old cover (the sync clears it in its page's transaction instead).
      */
-    private suspend fun dropCover(pk: String, visit: Visit) = withContext(NonCancellable) {
+    private suspend fun dropCover(pk: String, visit: Visit) {
         try {
             mediaDao.setThumbPath(pk, null)
         } catch (e: Exception) {

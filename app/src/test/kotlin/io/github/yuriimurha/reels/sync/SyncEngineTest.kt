@@ -68,6 +68,7 @@ import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -2625,6 +2626,166 @@ class SyncEngineTest {
 
         assertEquals(path, thumbPath(carousel.pk))
         assertContentEquals(byteArrayOf(1, 2, 3), File(path).readBytes())
+    }
+
+    // R29's review: the page and its housekeeping cannot be cancelled, and the cover's path goes in the page's transaction.
+
+    /** What the process dying looks like to the code running in it: nothing after this point runs, and no catch takes it. */
+    private class ProcessDeath : Error("the process died")
+
+    /**
+     * M-4: the process dies right after the page that put another slide first is committed, before any housekeeping after it
+     * (here at the first of it). The path went with the items, so the post has no cover, and the run's resume (WorkManager
+     * runs the worker again) fetches the new one; before, the old cover stayed for good, since no later sync sees a change.
+     */
+    @Test
+    fun aProcessDeathRightAfterThePageCommitsStillLeadsToTheNewCover() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val newCover = "${carousel.thumbnailUrl}-new"
+        val client = ChangedCarousel(fake, carousel.pk, firstTwoSwapped(carousel), newCover)
+        val cdn = MediaFetcher { url -> url.toByteArray() }
+        val id = newRun(SyncMode.FULL)
+
+        assertFailsWith<ProcessDeath> { engine(client, mediaFetcher = cdn, carouselEviction = { throw ProcessDeath() }).run(id) }
+        assertEquals(firstTwoSwapped(carousel).map { it.childPk }, storedItems(carousel.pk).map { it.childPk }, "precondition: committed")
+        assertNull(thumbPath(carousel.pk), "the old cover's path went with the page")
+
+        engine(client, mediaFetcher = cdn).run(id)
+
+        assertEquals(SyncStatus.DONE, db.syncDao().run(id)!!.status)
+        assertEquals(coverFile(carousel.pk).absolutePath, thumbPath(carousel.pk))
+        assertContentEquals(newCover.toByteArray(), coverFile(carousel.pk).readBytes(), "the new cover, from the resume")
+    }
+
+    /**
+     * M-4: the path goes in the page's transaction, so a path that cannot be cleared fails the page like any of its writes: the
+     * page rolls back with its items, and the old cover stays whole (its file goes only after a commit).
+     */
+    @Test
+    fun aCoverPathThatCannotBeClearedFailsThePageWhichKeepsTheOldCover() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val path = assertNotNull(thumbPath(carousel.pk))
+        val stored = storedItems(carousel.pk)
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_clear BEFORE UPDATE OF thumbPath ON media WHEN NEW.thumbPath IS NULL BEGIN SELECT RAISE(ABORT, 'injected'); END",
+        )
+        val engine = engine(
+            ChangedCarousel(fake, carousel.pk, firstTwoSwapped(carousel), "${carousel.thumbnailUrl}-new"),
+            mediaFetcher = MediaFetcher { url -> url.toByteArray() },
+        )
+
+        assertEquals(SyncStatus.PAUSED, runSync(engine, SyncMode.FULL).status)
+
+        assertEquals(stored, storedItems(carousel.pk), "the page rolled back")
+        assertEquals(path, thumbPath(carousel.pk))
+        assertContentEquals(byteArrayOf(1, 2, 3), File(path).readBytes(), "the old cover, whole")
+    }
+
+    /**
+     * A Cancel (or WorkManager stopping the worker) that lands inside the page's transaction, after the items' replace: the page
+     * finishes with its housekeeping (the slides' own media and the old cover go) and the run stops right after; the next sync
+     * that reaches the post fetches the new cover. Room's transaction can commit and then throw on its return to a cancelled
+     * caller, so nothing between the page and its housekeeping may be cancellable.
+     */
+    @Test
+    fun aCancelInsideThePagesTransactionFinishesThePageWithItsHousekeeping() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val swapped = firstTwoSwapped(carousel)
+        val newCover = "${carousel.thumbnailUrl}-new"
+        var armed = false
+        lateinit var job: Job
+        val client = object : InstagramClient by fake {
+            override val reportsSavedCollectionIds: Boolean
+                get() {
+                    if (armed) {
+                        armed = false
+                        job.cancel() // read in the page's transaction, after the carousel's items were replaced
+                    }
+                    return fake.reportsSavedCollectionIds
+                }
+
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                val page = fake.savedMedia(collectionId, cursor)
+                if (page.items.any { it.pk == carousel.pk }) armed = true
+                return page.copy(items = page.items.map { if (it.pk == carousel.pk) it.copy(carouselItems = swapped, thumbnailUrl = newCover) else it })
+            }
+        }
+        val dropped = mutableListOf<String>()
+        val cdn = MediaFetcher { url -> url.toByteArray() }
+        val engine = engine(client, mediaFetcher = cdn, carouselEviction = { dropped += it })
+        val id = newRun(SyncMode.FULL)
+
+        job = launch { engine.run(id) }
+        job.join()
+
+        assertEquals("Cancelled", db.syncDao().run(id)!!.lastError)
+        assertEquals(swapped.map { it.childPk }, storedItems(carousel.pk).map { it.childPk }, "the page finished")
+        assertEquals(listOf(carousel.pk), dropped, "with R20's drop")
+        assertNull(thumbPath(carousel.pk), "and the old cover's path")
+        assertFalse(coverFile(carousel.pk).exists(), "and its file")
+
+        assertEquals(SyncStatus.DONE, runSync(engine, SyncMode.FULL).status)
+        assertContentEquals(newCover.toByteArray(), coverFile(carousel.pk).readBytes(), "the new cover")
+    }
+
+    /**
+     * A Cancel that lands in the housekeeping right after the commit (here during R20's drop, just before the cover's file):
+     * the housekeeping finishes, and the next sync that reaches the post fetches the new cover.
+     */
+    @Test
+    fun aCancelDuringThePagesHousekeepingStillLeadsToTheNewCover() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val newCover = "${carousel.thumbnailUrl}-new"
+        val client = ChangedCarousel(fake, carousel.pk, firstTwoSwapped(carousel), newCover)
+        val cdn = MediaFetcher { url -> url.toByteArray() }
+        lateinit var job: Job
+        val cancelling = engine(client, mediaFetcher = cdn, carouselEviction = { job.cancel() })
+        val id = newRun(SyncMode.FULL)
+        job = launch { cancelling.run(id) }
+        job.join()
+        assertEquals(SyncStatus.PAUSED, db.syncDao().run(id)!!.status, "precondition: cancelled")
+        assertFalse(coverFile(carousel.pk).exists(), "the old cover's file went all the same")
+
+        assertEquals(SyncStatus.DONE, runSync(engine(client, mediaFetcher = cdn), SyncMode.FULL).status)
+
+        assertEquals(coverFile(carousel.pk).absolutePath, thumbPath(carousel.pk))
+        assertContentEquals(newCover.toByteArray(), coverFile(carousel.pk).readBytes(), "the new cover")
+    }
+
+    /** Two carousels of one page both put another slide first: both covers go before the page's thumbnail step fetches both. */
+    @Test
+    fun twoCarouselsOnOnePageBothLoseTheirCovers() = runTest {
+        val fake = FakeInstagramClient(FakeLibrary(itemCount = 200, collectionCount = 3))
+        assertEquals(SyncStatus.DONE, runSync(engine(fake), SyncMode.QUICK).status)
+        // Two carousels of one page (the fake client's pages hold 20).
+        val carousels = fake.library.allSaved().chunked(20).map { page -> page.filter { (it.carouselItems?.size ?: 0) >= 2 } }
+            .first { it.size >= 2 }.take(2)
+        assertEquals(2, carousels.size, "precondition: two carousels on one page")
+        // Slides 0 and 1 swapped (their child pks, and maybe their types, move with them): another slide is first in both.
+        val changed = carousels.associate { c ->
+            val items = c.carouselItems!!
+            c.pk to listOf(items[1].copy(position = 0), items[0].copy(position = 1)) + items.drop(2)
+        }
+        val client = object : InstagramClient by fake {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                val page = fake.savedMedia(collectionId, cursor)
+                return page.copy(items = page.items.map { m -> changed[m.pk]?.let { m.copy(carouselItems = it, thumbnailUrl = "${m.thumbnailUrl}-new") } ?: m })
+            }
+        }
+        val atFetch = mutableListOf<String>()
+        val cdn = MediaFetcher { url ->
+            carousels.firstOrNull { url == "${it.thumbnailUrl}-new" }?.let { c -> atFetch += "${c.pk} path=${thumbPath(c.pk)} file=${coverFile(c.pk).exists()}" }
+            url.toByteArray()
+        }
+
+        assertEquals(SyncStatus.DONE, runSync(engine(client, mediaFetcher = cdn), SyncMode.FULL).status)
+
+        assertEquals(carousels.map { "${it.pk} path=null file=false" }.sorted(), atFetch.sorted())
+        for (c in carousels) assertContentEquals("${c.thumbnailUrl}-new".toByteArray(), coverFile(c.pk).readBytes(), c.pk)
     }
 
     private class ThrowingSignals : SessionSignals {

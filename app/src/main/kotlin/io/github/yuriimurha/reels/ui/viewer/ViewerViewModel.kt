@@ -136,6 +136,19 @@ class ViewerViewModel(
     }
 
     /**
+     * R29: the list's row of the post [media] changed in place (a sync cleared or wrote its cover; the screen reports a row
+     * whose cover path changed, which is no settle). The settled carousel's visit takes the newer row, so item 0 and the queue
+     * follow its cover; and when the cover is gone (a sync dropped it, and could not fetch the new one yet) while the owner is
+     * on item 0, item 0's own picture loads at once instead of the black a missing cover would leave. Nothing for any other
+     * post, and never a settle: the player is left alone.
+     */
+    fun onRowChanged(media: MediaEntity) {
+        val current = carouselVisit?.takeIf { it.media.pk == media.pk } ?: return
+        current.media = media
+        if (media.thumbPath == null && current.current()?.settled == 0) current.loadImage(0)
+    }
+
+    /**
      * If [next], the item after the settled one, is a video whose link has run out or is about to, renews it now, so that
      * swiping on finds it ready. Called once the settled item's own resolve has returned (R77), so the visible item's
      * request is never queued behind this one. Through the same resolver, so on the interactive lane and under the same

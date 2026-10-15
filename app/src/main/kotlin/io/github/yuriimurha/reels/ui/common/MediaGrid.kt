@@ -61,8 +61,13 @@ fun MediaTile(media: MediaEntity?, onClick: () -> Unit, modifier: Modifier = Mod
         ?.let { (it.width.toFloat() / it.height).coerceIn(0.5f, 1f) } ?: (9f / 16f)
     Column(modifier.testTag("tile").clickable(enabled = media != null, onClick = onClick)) {
         Box(Modifier.fillMaxWidth().aspectRatio(ratio).clip(RoundedCornerShape(10.dp))) {
-            // The post grows from here into the viewer, and shrinks back here (Motion.kt).
-            Thumbnail(media?.thumbPath, Modifier.matchParentSize().then(if (media != null) Modifier.sharedMedia(media.pk) else Modifier))
+            // The post grows from here into the viewer, and shrinks back here (Motion.kt). R29: a cover rewritten under the same
+            // name comes with a new cover link, which loads it again (Thumbnail).
+            Thumbnail(
+                media?.thumbPath,
+                Modifier.matchParentSize().then(if (media != null) Modifier.sharedMedia(media.pk) else Modifier),
+                version = media?.thumbUrl,
+            )
             if (media != null) TypeBadge(media, Modifier.align(Alignment.TopEnd).padding(6.dp))
         }
         if (media != null) {

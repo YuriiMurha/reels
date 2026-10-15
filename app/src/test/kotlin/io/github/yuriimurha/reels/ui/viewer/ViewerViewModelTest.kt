@@ -709,6 +709,59 @@ class ViewerViewModelTest {
         }
     }
 
+    /**
+     * R29's review (M-2): a sync drops the open post's cover (and cannot fetch the new one yet) while the owner is on item 0.
+     * The row whose cover went reaches the visit (no settle), and item 0 shows its own picture at once instead of black.
+     */
+    @Test
+    fun aCoverASyncDropsWhileOnItemZeroGivesWayToItsOwnPicture() = runTest {
+        storeCarousel()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        assertNull(viewModel.awaitCarousel { it.shows(ahead) }.items[0].imagePath, "precondition: the cover shows item 0")
+
+        viewModel.onRowChanged(carousel.copy(thumbPath = null))
+
+        viewModel.awaitCarousel { it.items[0].imagePath != null }
+        assertEquals(1, fetched.count { it == old(0) }, "$fetched")
+    }
+
+    /** Elsewhere than on item 0, the row's lost cover loads nothing at once; item 0's own picture comes when it settles. */
+    @Test
+    fun aCoverASyncDropsElsewhereLoadsItemZeroWhenItSettles() = runTest {
+        storeCarousel()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        viewModel.onItemSettled(pk, 3)
+        viewModel.awaitCarousel { it.shows(ahead) }
+
+        viewModel.onRowChanged(carousel.copy(thumbPath = null))
+        // An item 0 that loaded at once would be asked for within this (the lane's jitter is under a second).
+        eventually { withTimeoutOrNull(1_000) { while (old(0) !in fetched) delay(10) } }
+        assertEquals(0, fetched.count { it == old(0) }, "nothing for item 0 while the owner is elsewhere")
+
+        viewModel.onItemSettled(pk, 0)
+
+        viewModel.awaitCarousel { it.items[0].imagePath != null }
+        assertEquals(1, fetched.count { it == old(0) }, "$fetched")
+    }
+
+    /** A row of another post than the settled carousel changes nothing of the visit. */
+    @Test
+    fun anotherPostsRowLeavesTheVisitAlone() = runTest {
+        storeCarousel()
+        storeOther()
+        val viewModel = viewModel(carousels = carouselRepository(this, sampleClip))
+        viewModel.onSettled(carousel)
+        viewModel.awaitCarousel { it.shows(ahead) }
+
+        viewModel.onRowChanged(other.copy(thumbPath = null))
+        eventually { withTimeoutOrNull(1_000) { while (old(0) !in fetched) delay(10) } }
+
+        assertEquals(0, fetched.count { it == old(0) })
+        assertNull(viewModel.carousel.value!!.state.items[0].imagePath)
+    }
+
     @Test
     fun anItemImageThatCannotLoadSaysSo() = runTest {
         storeCarousel()

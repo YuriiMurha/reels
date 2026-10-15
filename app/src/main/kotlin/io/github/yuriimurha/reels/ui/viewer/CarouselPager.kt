@@ -223,7 +223,7 @@ private fun ItemStill(media: MediaEntity, item: CarouselItemUi?, index: Int) {
             Thumbnail(path, Modifier.fillMaxSize().testTag(tag), ContentScale.Fit)
         }
         index == 0 && media.thumbPath != null ->
-            Thumbnail(media.thumbPath, Modifier.fillMaxSize().testTag(CAROUSEL_COVER_TAG), ContentScale.Fit)
+            Thumbnail(media.thumbPath, Modifier.fillMaxSize().testTag(CAROUSEL_COVER_TAG), version = media.thumbUrl, contentScale = ContentScale.Fit)
         else -> Box(Modifier.fillMaxSize())
     }
 }

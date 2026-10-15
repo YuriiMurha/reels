@@ -211,6 +211,8 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
             val unit = media?.let { Playable(it.pk, carouselPosition(it, carousel)) }
             val cannotPlay = unavailable?.takeIf { unit != null && it.first == unit }?.second
             val carouselState = media?.let { m -> carousel?.takeIf { it.pk == m.pk }?.state }
+            // R29: a carousel's row whose cover changed in place (a sync's drop, or its new cover) is no settle; the visit takes it.
+            if (media?.type == MediaType.CAROUSEL) LaunchedEffect(media.pk, media.thumbPath) { viewModel.onRowChanged(media) }
             ViewerPage(
                 media = media,
                 player = player.takeIf { unit != null && playing?.playable == unit },
