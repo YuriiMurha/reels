@@ -2756,6 +2756,261 @@ class SyncEngineTest {
         assertContentEquals(newCover.toByteArray(), coverFile(carousel.pk).readBytes(), "the new cover")
     }
 
+    // R29's review (2026-10-15): the Cancel button pauses the row, and a page that finishes after it must not undo that.
+
+    /** What the run row says right now as "STATUS/lastError", read straight from the database (not through the engine's copy). */
+    private fun rowOf(id: Long): String =
+        db.openHelper.readableDatabase.query("SELECT status, lastError FROM sync_run WHERE id = $id").use { c ->
+            c.moveToFirst()
+            "${c.getString(0)}/${c.getString(1)}"
+        }
+
+    /** The run row's `seenItems` right now, straight from the database. */
+    private fun seenItemsOf(id: Long): Int =
+        db.openHelper.readableDatabase.query("SELECT seenItems FROM sync_run WHERE id = $id").use { c ->
+            c.moveToFirst()
+            c.getInt(0)
+        }
+
+    /**
+     * From now on, every write that makes a PAUSED run row RUNNING (whichever columns it names, whoever writes it) leaves a line
+     * in `running_after_pause`: a row that reads RUNNING for a few milliseconds is gone by the time a test looks at it.
+     */
+    private fun watchForRunningAfterPause() {
+        val sql = db.openHelper.writableDatabase
+        sql.execSQL("CREATE TABLE running_after_pause (runId INTEGER NOT NULL)")
+        sql.execSQL(
+            "CREATE TRIGGER pause_undone AFTER UPDATE ON sync_run WHEN OLD.status = 'PAUSED' AND NEW.status = 'RUNNING' " +
+                "BEGIN INSERT INTO running_after_pause VALUES (NEW.id); END",
+        )
+    }
+
+    private fun runningAfterPause(): List<Long> =
+        db.openHelper.readableDatabase.query("SELECT runId FROM running_after_pause").use { c ->
+            buildList { while (c.moveToNext()) add(c.getLong(0)) }
+        }
+
+    /**
+     * [fake] as a Cancel meets it in a page: once the page holding [carousel] (with [swapped] as its items) is fetched, the
+     * controller's write pauses the row (`pauseRunningRuns`, as `SyncController.cancel` does), and the worker's cancel then lands
+     * inside the page's transaction, after the items' replace ([job] is cancelled when the engine reads
+     * `reportsSavedCollectionIds`). [requested] holds the cursor of every saved-feed page asked for.
+     */
+    private inner class CancelledInAPage(
+        private val fake: InstagramClient,
+        private val carousel: RemoteMedia,
+        private val swapped: List<RemoteCarouselItem>,
+        private val newCover: String,
+    ) : InstagramClient by fake {
+        lateinit var job: Job
+        var cancelled = false
+        val requested = mutableListOf<String?>()
+        private var armed = false
+
+        override val reportsSavedCollectionIds: Boolean
+            get() {
+                if (armed) {
+                    armed = false
+                    cancelled = true
+                    job.cancel()
+                }
+                return fake.reportsSavedCollectionIds
+            }
+
+        override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+            requested += cursor
+            val page = fake.savedMedia(collectionId, cursor)
+            if (page.items.any { it.pk == carousel.pk }) {
+                db.syncDao().pauseRunningRuns("Cancelled") // the controller's write, before the worker's cancel lands
+                armed = true
+            }
+            return page.copy(items = page.items.map { if (it.pk == carousel.pk) it.copy(carouselItems = swapped, thumbnailUrl = newCover) else it })
+        }
+    }
+
+    /**
+     * RR-2: the page of a Cancel commits (its progress write is inside the transaction) and its housekeeping runs, all after the
+     * controller wrote the row PAUSED "Cancelled". That write carried the engine's own copy of the row and set it RUNNING again,
+     * clearing the error, until the run ended a few milliseconds later: Sync read "Syncing…" and Delete library was refused. The
+     * row never reads RUNNING again, and the page's counts still commit with its cursor.
+     */
+    @Test
+    fun aCancelDuringAPageNeverLetsTheRowReadRunningAgain() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val swapped = firstTwoSwapped(carousel)
+        val client = CancelledInAPage(fake, carousel, swapped, "${carousel.thumbnailUrl}-new")
+        val id = newRun(SyncMode.FULL)
+        watchForRunningAfterPause()
+        val seen = mutableListOf<String>()
+        val engine = engine(client, carouselEviction = { seen += "${rowOf(id)} seen=${seenItemsOf(id)}" })
+
+        client.job = launch { engine.run(id) }
+        client.job.join()
+
+        assertTrue(client.cancelled, "precondition: the cancel landed in the page")
+        assertEquals(swapped.map { it.childPk }, storedItems(carousel.pk).map { it.childPk }, "precondition: the page finished")
+        // Right after the commit, before the run ends: paused, and the page's 20 items already counted (not only once the run ends).
+        assertEquals(listOf("PAUSED/Cancelled seen=20"), seen, "the row while the cancelled page's housekeeping runs")
+        assertEquals(emptyList(), runningAfterPause(), "no write set the paused row running again")
+        val end = db.syncDao().run(id)!!
+        assertEquals(SyncStatus.PAUSED, end.status)
+        assertEquals("Cancelled", end.lastError)
+        assertEquals(20, end.seenItems, "the page's counts committed with it")
+        assertEquals(20L, db.syncDao().cursor(id, ALL_SAVED_ID)!!.walkIndex, "and so did its cursor")
+    }
+
+    /**
+     * What the fix must not cost: the page's counts and its cursor commit together even when a Cancel lands in it, so the resume
+     * (the run's own row, which the controller sets RUNNING again) asks for the page after it, never the first again, counts on
+     * from the page's, and still fetches the cover the page dropped.
+     */
+    @Test
+    fun aResumeAfterACancelDuringAPageStartsAtTheNextPage() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val newCover = "${carousel.thumbnailUrl}-new"
+        val client = CancelledInAPage(fake, carousel, firstTwoSwapped(carousel), newCover)
+        val engine = engine(client, mediaFetcher = MediaFetcher { url -> url.toByteArray() })
+        val id = newRun(SyncMode.FULL)
+        client.job = launch { engine.run(id) }
+        client.job.join()
+        assertTrue(client.cancelled, "precondition: the cancel landed in the page")
+        val cursor = db.syncDao().cursor(id, ALL_SAVED_ID)!!
+        assertEquals(20L, cursor.walkIndex, "the page's cursor committed with it")
+        assertFalse(cursor.done)
+        val next = assertNotNull(cursor.nextCursor, "and points at the page after it")
+        assertEquals(SyncStatus.PAUSED, db.syncDao().run(id)!!.status)
+
+        db.syncDao().updateRun(db.syncDao().run(id)!!.copy(status = SyncStatus.RUNNING, lastError = null)) // SyncController.start
+        client.requested.clear()
+        engine.run(id)
+
+        assertEquals(SyncStatus.DONE, db.syncDao().run(id)!!.status)
+        assertEquals(2, client.requested.size, "the two pages after the first, of three")
+        assertEquals(next, client.requested.first(), "the resume starts at the next page")
+        assertFalse(null in client.requested, "and never asks for the first page again")
+        assertEquals(50, db.syncDao().run(id)!!.seenItems, "the run counts on from the first page's 20")
+        assertContentEquals(newCover.toByteArray(), coverFile(carousel.pk).readBytes(), "the resume fetched the cover the page dropped")
+    }
+
+    /**
+     * The other side of the fix: a run that is not cancelled still reads RUNNING all the way, whenever the row is read (at each
+     * request, each page's housekeeping, each thumbnail), even one that starts on a row another writer left PAUSED (WorkManager
+     * running a worker again after the process died: the engine puts the row back to RUNNING at its start, and its progress
+     * writes leave it there).
+     */
+    @Test
+    fun aRunWithNoCancelReadsRunningThroughout() = runTest {
+        val fake = smallClient()
+        val carousel = syncedCarousel(fake)
+        val seen = mutableListOf<String>()
+        lateinit var read: () -> String
+        val client = object : InstagramClient by fake {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                seen += "page ${read()}"
+                return fake.savedMedia(collectionId, cursor)
+            }
+        }
+        val cdn = MediaFetcher { url ->
+            seen += "thumbnail ${read()}"
+            url.toByteArray()
+        }
+        // The page with the carousel puts another slide first, so it has housekeeping and a thumbnail step of its own.
+        val engine = engine(
+            ChangedCarousel(client, carousel.pk, firstTwoSwapped(carousel), "${carousel.thumbnailUrl}-new"),
+            mediaFetcher = cdn,
+            carouselEviction = { seen += "housekeeping ${read()}" },
+        )
+        val id = newRun(SyncMode.FULL)
+        read = { rowOf(id) }
+        db.syncDao().pauseRunningRuns("Interrupted, tap Resume")
+
+        engine.run(id)
+
+        assertEquals(SyncStatus.DONE, db.syncDao().run(id)!!.status)
+        assertEquals(setOf("page", "housekeeping", "thumbnail"), seen.map { it.substringBefore(' ') }.toSet(), "precondition: read at every kind of point")
+        assertEquals(setOf("RUNNING/null"), seen.map { it.substringAfter(' ') }.toSet(), seen.toString())
+    }
+
+    /**
+     * Every column the engine's progress write carries is right while the run is still going. The run's last write, `finish`,
+     * puts the engine's whole copy of the row in, so whatever a progress write got wrong is gone from a finished row: only a read
+     * in the middle sees it (R29's review: a progress write that wrote the phase and six of the seven counts as ""/0 passed
+     * every test). Read at every saved-feed request of a strategy B run, whose second and third scopes follow a finished one,
+     * against what the test counted itself: the scope's name, the fake's call log, the pages it returned, and the fetcher's
+     * answers (one new save's thumbnail fails, and so does the fake's missing one, so failures are not zero).
+     */
+    @Test
+    fun everyColumnOfTheRowIsRightWhileTheRunGoesOn() = runTest {
+        val fake = strategyBClient()
+        assertEquals(SyncStatus.DONE, runSync(engine(fake), SyncMode.QUICK).status)
+        val callsBefore = fake.calls.size
+        val added = fake.library.addNewSaves(3)
+        val addedPks = added.map { it.pk }.toSet()
+        var stored = 0
+        var failed = 0
+        val cdn = MediaFetcher { url ->
+            if (url == added[1].thumbnailUrl || url.startsWith("fake://missing/")) {
+                failed++
+                null
+            } else {
+                stored++
+                byteArrayOf(1)
+            }
+        }
+        val scopes = listOf<String?>(null) + fake.library.collections.map { it.id }
+        val labels = listOf("All Saved") + fake.library.collections.map { it.name }
+        var seenItems = 0
+        val seenPks = mutableSetOf<String>()
+        var id = 0L
+        val reads = mutableListOf<Map<String, Any>>()
+        val wrong = mutableListOf<String>()
+        val client = object : InstagramClient by fake {
+            override suspend fun savedMedia(collectionId: String?, cursor: String?): Page<RemoteMedia> {
+                val scope = scopes.indexOf(collectionId)
+                val expected = mapOf<String, Any>(
+                    "phase" to "Syncing ${labels[scope]}",
+                    "collectionsDone" to scope,
+                    "collectionsTotal" to scopes.size,
+                    "requestsUsed" to fake.calls.size - callsBefore,
+                    "newItems" to seenPks.count { it in addedPks },
+                    "seenItems" to seenItems,
+                    "thumbsCached" to stored,
+                    "failures" to failed,
+                )
+                val row = db.syncDao().run(id)!!
+                val actual = mapOf<String, Any>(
+                    "phase" to row.phase,
+                    "collectionsDone" to row.collectionsDone,
+                    "collectionsTotal" to row.collectionsTotal,
+                    "requestsUsed" to row.requestsUsed,
+                    "newItems" to row.newItems,
+                    "seenItems" to row.seenItems,
+                    "thumbsCached" to row.thumbsCached,
+                    "failures" to row.failures,
+                )
+                reads += actual
+                if (actual != expected) wrong += "$collectionId $cursor: expected $expected, was $actual"
+                val page = fake.savedMedia(collectionId, cursor)
+                seenItems += page.items.size
+                seenPks += page.items.map { it.pk }
+                return page
+            }
+        }
+        val engine = engine(client, mediaFetcher = cdn)
+        id = newRun(SyncMode.FULL)
+
+        engine.run(id)
+
+        assertEquals(SyncStatus.DONE, db.syncDao().run(id)!!.status)
+        assertEquals(emptyList(), wrong, "a column that was wrong while the run went on")
+        assertTrue(reads.size > 3 * scopes.size, "precondition: several pages in every scope, read at each: ${reads.size}")
+        for (column in reads.first().keys) {
+            assertTrue(reads.any { it[column] != 0 && it[column] != "" }, "precondition: $column was not 0 or empty at some read, or a column left at its default would pass")
+        }
+    }
+
     /** Two carousels of one page both put another slide first: both covers go before the page's thumbnail step fetches both. */
     @Test
     fun twoCarouselsOnOnePageBothLoseTheirCovers() = runTest {

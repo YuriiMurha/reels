@@ -12,8 +12,16 @@ interface SyncDao {
     @Insert
     suspend fun insertRun(run: SyncRunEntity): Long
 
+    /** Writes every column, the status and the error included: the run's start and end, and the buttons' resume and discard. */
     @Update
     suspend fun updateRun(run: SyncRunEntity)
+
+    /**
+     * Only the phase and the counts (see [SyncRunProgress]): what the engine writes while a run goes on. It leaves the status
+     * and the error alone, so a Cancel that paused the row while a page was committing is not undone by that page's write.
+     */
+    @Update(entity = SyncRunEntity::class)
+    suspend fun updateProgress(progress: SyncRunProgress)
 
     @Query("SELECT * FROM sync_run WHERE id = :id")
     suspend fun run(id: Long): SyncRunEntity?
