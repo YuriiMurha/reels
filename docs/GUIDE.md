@@ -112,17 +112,22 @@ SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDeb
 
 Then open **Reels** on the phone. A fresh debug install is in Mock mode.
 
-- **Saved** (home) lists All Saved, Uncategorized and your collections, each with its item count. Tap a card for its
-  grid. When the library is empty it says "Nothing synced yet": tap **Open Sync**.
+- **Home** lists All Saved, Uncategorized and your collections, each with its item count. Tap a card for its
+  grid. When the library is empty it says "Nothing synced yet": tap **Open Sync**. Its top bar has no title: a search bar
+  on the left and the sync button on the right.
 - **Grid**: tap a tile and its picture grows into the full-screen viewer; swipe up and down for the next post. A carousel
   (its tile reads "1/N") also swipes left and right through its images and videos, with a counter ("2/5") and dots.
   **Back** (the button, or the back swipe from the screen edge) shrinks the post into its tile, and the grid shows the tile of
   the post you were on.
 - **Viewer buttons**: two icon buttons over the picture, **Open on Instagram** at the bottom left and **Mute** / **Unmute**
   (a speaker) at the bottom right. A long press on either shows its name.
-- **Search** (magnifier, top right) searches captions, authors and collection names, and can narrow to reels or
-  posts.
-- **Sync** (the status chip, top right: "Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and a problem):
+- **Search** (the search bar at the top of Home) opens with the keyboard up, searches captions, authors and collection
+  names, and can narrow to reels or posts.
+- **Sync** (the sync button, top right, two arrows in a circle; a long press shows its name). The arrows turn while a sync
+  is running (with Android's animations removed they stay still and turn yellow instead). A **red dot** on it means
+  something needs you: a run that stopped or paused (the Sync screen says why and offers **Resume**), or, with Mock mode
+  off, a session that is logged out, expired or wants verification. A cooldown alone puts no dot. When the library last
+  synced is on the Sync screen, under **History**.
   - **Sync** fetches what's new. **Full sync** also removes what you unsaved on Instagram, applies moves between
     collections (a Sync records which collections an item is in only for the items it walks, so an older save you newly add to
     a collection shows in it after the next Full sync), and fetches any thumbnails an earlier run skipped. **Delete library** wipes the local copy (your
@@ -138,7 +143,7 @@ Then open **Reels** on the phone. A fresh debug install is in Mock mode.
 A debug build starts on the **fake library**, so an emulator, or a phone before you have logged in, never needs a login
 and never contacts Instagram. A release build has no such switch and always uses the real library.
 
-- **Where:** Sync (status chip, top right), scroll down to **Developer**, **Mock mode (fake library)**. It is **on by
+- **Where:** Sync (the sync button, top right), scroll down to **Developer**, **Mock mode (fake library)**. It is **on by
   default**.
 - **For real sync, on the phone:** switch it **off**. The app restarts on the real library, which is empty until its
   first sync. The switch is greyed out while a sync is running (and for a moment after the screen opens, until it has
@@ -155,7 +160,7 @@ and never contacts Instagram. A release build has no such switch and always uses
 ### Automated smoke tests (emulator only)
 
 An on-device UI suite (`app/src/androidTest/`) drives the real app through its screens, like a browser test for the phone
-app. It covers: launch (Home's "Saved" bar, Search, the sync chip), the Sync screen (the session shown logged out, the
+app. It covers: launch (Home's search bar and sync button), the Sync screen (the session shown logged out, the
 Developer section with Mock mode on), a fake **Sync** to the end, a collection grid, opening the viewer, a reel that
 starts playing, a carousel swiped to its second item, back from a post far down the list to that post's tile, and Search. It never contacts Instagram: it never logs in and never taps Log in, Check now, Open on
 Instagram, the Adapter lab or the Mock mode switch (it only checks that they are there).
@@ -222,7 +227,7 @@ update, do [its box](#after-the-collection-names-update) instead of step 5's fir
    SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
    ```
 
-2. **Turn Mock mode off.** Open **Reels**, tap the status chip (top right) to open **Sync**, scroll down to
+2. **Turn Mock mode off.** Open **Reels**, tap the sync button (top right) to open **Sync**, scroll down to
    **Developer** and switch **Mock mode (fake library)** off. The app restarts on the real library, which is empty
    ("Nothing synced yet").
 3. **Log in** (section 4). Sync must say "Logged in as @handle".
@@ -368,7 +373,7 @@ Don't reinstall or clear the app's data to skip it.
    **Expect** the session check's `GET` line, then `collections query forced`, `repair: start` and
    `repair: learned new id` (and no `GRAPHQL` line before them: the names came from the site's own request), then the
    saved-feed `GET` lines. The run ends with no banner, Sync shows **no** "Couldn't refresh collection names", and the
-   **Saved** screen shows the same names as in step 4. If the log says `repair: failed (<reason>)` instead: for
+   **Home** screen shows the same names as in step 4. If the log says `repair: failed (<reason>)` instead: for
    `login page`, `challenge page`, `http 429`, `reply login`, `reply challenge` or `reply rate limit` the run stops with its banner (the session needs you, or a cooldown started,
    as for any request: see [When a run stops](#when-a-run-stops-the-red-banner-on-sync)); for any other reason (`limit`,
    `no handle`, `no query`, `page error`, `http <code>`, `reply stale`, `reply transient`, `shape ...`) the sync still ends
@@ -390,7 +395,7 @@ adb -d logcat -d -s InstagramHttp > ~/Desktop/reels-names-step5b.txt && cat ~/De
 **Expect** one `GRAPHQL PolarisProfileSavedTabContentQuery -> 200` line and no `collections query stale` or
 `collections query forced` line: the learned id works and nothing is repaired.
 
-6. **Paste the logs** into a Claude session, with what the screens showed (the **Saved** cards' names and counts, and any
+6. **Paste the logs** into a Claude session, with what the screens showed (the **Home** cards' names and counts, and any
    banner or notice on Sync). This prints the copies kept above, in order (a step you skipped has no file and is left out):
 
    ```bash
@@ -742,7 +747,7 @@ Run section 5 first. Keep the second terminal's logcat running during these.
   **Check again**, **Resume** works. **Report:** the banner, the logcat lines around the stop, and whether the check
   needed a new login.
 - [ ] **Collections hold the right posts.** After a Full sync, for each collection compare the count on its card in
-  **Saved** with the number of saves in that collection on Instagram. **Look for:** equal counts, and the posts you know are
+  **Home** with the number of saves in that collection on Instagram. **Look for:** equal counts, and the posts you know are
   in it. A sync reads each item's collections from All Saved and walks no collection feed, so there is no feed end to check;
   a plain Sync notices an older save newly added to a collection only after the next Full sync. **Report:** collection by
   collection, "phone N, Instagram M".
@@ -781,7 +786,7 @@ Run section 5 first. Keep the second terminal's logcat running during these.
 ### M6: release build
 
 - [ ] **`installRelease`** ([section 9](#9-release-build)), with the debug key first (no setup), and with your own key
-  if you made one. **Look for:** the app opens on Saved, and **Sync** has no Developer section. **Report:** which key
+  if you made one. **Look for:** the app opens on Home, and **Sync** has no Developer section. **Report:** which key
   (debug or yours), and a pass, or what you saw instead (an install error, a crash, a Developer section).
 - [ ] **What agents couldn't exercise under R8:** with the release build, **log in** (the login page must show and
   accept you: that is the WebView login), run **Sync** (the real client and the thumbnail downloader), then open a grid
@@ -862,7 +867,7 @@ adb -d logcat -s InstagramHttp
    SERIAL="$(adb -d get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
    ```
 
-   Open **Reels**. **Look for:** Saved lists the same collections and counts as before. **Report:** a pass, or what changed.
+   Open **Reels**. **Look for:** Home lists the same collections and counts as before. **Report:** a pass, or what changed.
    - **From now on, install only current builds.** The upgraded library can't be opened by a build from before this update,
      so Android refuses such a build with `INSTALL_FAILED_VERSION_DOWNGRADE` (an older checkout, or a branch cut before this
      update). Never uninstall or clear the app's data to get past it: that deletes the library (a full, paced re-sync), the
@@ -904,16 +909,16 @@ adb -d logcat -s InstagramHttp
    after swiping up through several posts, going Back shrinks the post into its own tile and the grid shows that tile (it scrolls
    only when the tile was out of view). **Report:** a pass, or what looked wrong.
    - **The first open after a cold start.** Force-stop the app (Settings, Apps, Reels, Force stop), open it, open a collection
-     from Saved and tap a tile, with no post opened before. On the **release** build ([section 9](#9-release-build)) that first
+     from Home and tap a tile, with no post opened before. On the **release** build ([section 9](#9-release-build)) that first
      open should grow from its tile. A **debug** build on a slow phone may only fade in this one case (the viewer's first screen is slow to compose on a debug build, and the
      fade is over before the picture is ready); every later open grows. **Report:** which build, and whether that first open grew
      or only faded.
 8. **Move between pages with the back swipe.** As step 7, this needs gesture navigation (with 3-button navigation, check only
    that Back slides the page out to the right). Pages now slide as in Instagram, with no fade (changed after your first look
-   on 2026-10-13). From Saved open Search (or Sync). **Look for:** the new page slides in from the right edge, the whole
-   width, over Saved, which shifts a little to the left underneath; nothing fades. Then drag back from the edge slowly,
+   on 2026-10-13). From Home open Search (or Sync). **Look for:** the new page slides in from the right edge, the whole
+   width, over Home, which shifts a little to the left underneath; nothing fades. Then drag back from the edge slowly,
    without letting go (if the keyboard is up, the first Back only closes it). **Look for:** the page moves right with your
-   finger, its left edge just behind your fingertip, and Saved slides back in from the left underneath it; the page you are
+   finger, its left edge just behind your fingertip, and Home slides back in from the left underneath it; the page you are
    leaving stays on top the whole way. Let go early and it slides back and stays open; go all the way and it slides off to
    the right. **Report:** a pass, or what looked wrong (does the slide feel too fast or too slow, and should the page
    underneath darken a little, as in Instagram?).
@@ -1060,7 +1065,7 @@ Then run the M6 part of the [checklist](#8-on-phone-checklist).
 
 ### Sync: paused runs (not stopped)
 
-A paused run shows its reason as the banner (and in the status chip on Saved). The button reads **Resume**.
+A paused run shows its reason as the banner (and a red dot on Home's sync button). The button reads **Resume**.
 
 - **"Cancelled"**: you tapped Cancel, or logged out during a run. **Resume** continues.
 - **"Interrupted, tap Resume"**: the app was killed mid-run and Android had not restarted it. Tap **Resume**.

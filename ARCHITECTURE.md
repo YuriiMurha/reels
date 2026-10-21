@@ -102,11 +102,11 @@ A debug build starts in Mock mode (the fake library); a release build always use
 | Sync control | `app/.../sync/SyncController.kt`, `SyncWorker.kt`, `SyncScheduler.kt` | The buttons resume the latest unfinished run or start one; unique WorkManager work (`KEEP`) means never two runs; a foreground `dataSync` worker whose notification is shown at once (`FOREGROUND_SERVICE_IMMEDIATE`). WorkManager itself re-runs an interrupted worker after process death, and orphaned RUNNING rows (no live work) become PAUSED at app start (`recoverInterruptedRuns`, "Interrupted, tap Resume"). The worker refuses work queued for the other library (see [Wiring](#wiring)). |
 | Wiring | `app/.../di/`, `ReelsApp.kt`, `data/media/HttpMediaFetcher.kt` | `AppContainer`, the fake and real backends, Mock mode, the CDN fetcher. The real backend, the session probe and the Adapter lab send every API call through `WebViewTransport` (a hidden instagram.com WebView page, `app/.../transport/`), built only when a request needs it; request pacing is unchanged (one Conservative Pacer, one `fetch` per call), and the site itself is loaded at most 3 home loads per user action (counted again after an idle close), plus at most one repair page view of the owner's Saved page per 24 h or per Forget. [Details](#wiring). |
 | UI shell | `app/.../ui/` | Dark Material 3 theme, type-safe Navigation Compose routes (`MediaSource` encoded into routes), `LocalAppContainer`. Every picture is a local file shown by `Thumbnail` through Coil's one loader, which `ReelsApp` provides and which keys a file by its path, time and size ([Carousels](#carousels), R28's review); a post's tile is asked for again when its cover link changes (every post type passes the link; only carousel covers are
-  ever rewritten) ([Viewer](#viewer), R29's review). Home ("Saved"): collection cards (All Saved, Uncategorized, collections) and a sync status chip ("Not synced", "Syncing…", "Synced 5 min ago", or "⚠" and the stopped or paused run's `lastError`). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages push, the new page sliding in over the last (R24), and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
+  ever rewritten) ([Viewer](#viewer), R29's review). Home: no title; its top bar, after Instagram's search tab, is a rounded search bar that opens Search with the keyboard up and an icon-only sync button whose badge turns while a run is going and shows a red dot when something needs the owner; under it the collection cards (All Saved, Uncategorized, collections) ([Home](#home)). Grid: two-column staggered Paging grid with real aspect ratios and type badges (a carousel's tile reads "1/N"). Pages push, the new page sliding in over the last (R24), and a post grows from and shrinks back into its grid tile ([Motion](#motion), `ui/common/Motion.kt`). |
 | App icon | `app/src/main/res/mipmap-anydpi-v26/`, `drawable/ic_launcher_*.xml` | An adaptive icon, all vectors, with a monochrome layer. [Details](#app-icon). |
 | Viewer | `app/.../ui/viewer/` | Vertical pager over the grid's paged list, and inside a carousel post a horizontal pager of its items ([Viewer](#viewer)); one reused ExoPlayer (Media3 `ContentFrame` in `VideoFrame`, the thumbnail, or a carousel video item's poster (R26), as shutter until the first frame; 1 s start buffer, R26), loop, remembered mute, author/caption/collection overlay, and two icon buttons: "Open on Instagram" at the start (via `Permalinks`, an `ACTION_VIEW` intent, so whichever app handles the link) and Mute/Unmute at the end, for a video, or a carousel while its settled item is one. Videos come from `VideoSourceResolver` (fake: a bundled synthetic clip; real: see [Video](#video)). The player draws on a `TextureView` (`ContentFrame(surfaceType = SURFACE_TYPE_TEXTURE_VIEW)`, pinned by `VideoWiringGuardTest`): with the default `SurfaceView`, a page the owner swiped away from and back to often never got its surface on the emulator (6 of 8 tries; 0 of 8 with a `TextureView`), and the clip played as sound under the thumbnail. |
 | Search | `app/.../ui/search/` | 200 ms debounced FTS search over caption, author and collection names; Reels/Posts and collection chips; results in the shared grid, opening the viewer on the same `MediaSource.Search`. |
-| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Collections" is feeds walked over feeds to walk, so `1 / 1` under strategy A, not the number of collections; "Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session, and its session section adds one line for the real Pacer's cooldown or 24 h count (see Session). Log out cancels a running sync before it forgets the session. With the real backend the Library section also says "Couldn't refresh collection names" while the names are the last good ones ([Collection names](#collection-names)). Debug builds add the Developer section ([Lab screen](#lab-screen)). |
+| Sync screen | `app/.../ui/sync/` | Sync / Full sync (or Resume + Discard paused run), Cancel, live run counters ("Collections" is feeds walked over feeds to walk, so `1 / 1` under strategy A, not the number of collections; "Requests (all attempts)" is cumulative over every attempt of the run and has no denominator, because the per-run budget restarts on each resume; "Requests in 24 h" shows the rolling budget), a cooldown countdown, status banners ([run outcomes](#run-outcomes)), history (last sync, last full sync: since Home lost its status chip, the one place that says when the library last synced), Delete library (keeps the session and the request log). With the real backend, Sync, Full sync and Resume are disabled unless the session is Valid (banner "Log in to Instagram to sync" when nothing more specific applies); Mock mode needs no session, and its session section adds one line for the real Pacer's cooldown or 24 h count (see Session). Log out cancels a running sync before it forgets the session. With the real backend the Library section also says "Couldn't refresh collection names" while the names are the last good ones ([Collection names](#collection-names)). Debug builds add the Developer section ([Lab screen](#lab-screen)). |
 | Lab screen | `app/.../ui/lab/`, `ui/sync/DeveloperSection.kt` | The debug-only front end of the Adapter lab, and the Mock mode switch. [Details](#lab-screen). |
 | Session | `app/.../session/` | The session lives only in the WebView's cookie store. [Details](#session). |
 | Login | `app/.../ui/login/`, `ui/sync/SessionSection.kt` | Instagram's own login page in a WebView. [Details](#login). |
@@ -147,10 +147,12 @@ A debug build starts in Mock mode (the fake library); a release build always use
     with its `ig_fetch.js` asset and `androidx.webkit` message listener, and the JSON parsing in `:instagram`), the CDN
     fetcher (OkHttp) and the WebView login.
 - **On-device smoke suite** (`app/src/androidTest/`, `./gradlew connectedDebugAndroidTest`, `docs/GUIDE.md` section 3, "Automated smoke tests"):
-  `SmokeTest` drives the debug app through its real UI on the emulator, in Mock mode: Home, Sync (logged-out session, the
-  Developer section, a fake Sync to the end), grid, viewer, video playback, a carousel swiped to its second item (`t6`), back
-  from a post far down the list to that post's tile (`t7`) and Search, with a screenshot per step in the
-  app's `files/smoke/`. The viewer's icon buttons are found by content description ("Open on Instagram", "Mute", "Unmute"). It never touches Instagram: `SmokeGuard`, the outermost rule, skips every test on a physical device
+  `SmokeTest` drives the debug app through its real UI on the emulator, in Mock mode: Home (its search bar and sync button,
+  no title and no status chip), Sync (logged-out session, the Developer section, a fake Sync to the end, then the last sync
+  in History and no dot on Home), grid, viewer, video playback, a carousel swiped to its second item (`t6`), back from a post
+  far down the list to that post's tile (`t7`) and Search (its field focused on arrival), with a screenshot per step in the
+  app's `files/smoke/`. The viewer's icon buttons are found by content description ("Open on Instagram", "Mute", "Unmute"),
+  Home's search bar and sync button by their test tags. It never touches Instagram: `SmokeGuard`, the outermost rule, skips every test on a physical device
   (`isEmulator()`, pinned by `EmulatorDetectionTest`) and fails unless `AppContainer.usesFake`, both before the Activity is
   launched; no test taps a login, check, Instagram-link, lab or Mock mode control. Video playback is read from the viewer's
   `TextureView` (the playing page carries the `video-surface` test tag): a frame is drawn and a later one differs. Sync pacing
@@ -1024,8 +1026,8 @@ page (media, carousel items, memberships, cursor), thumbnails on the CDN lane.
   writes those columns (`SyncRunProgress`) and never the status, the error or the end time. Before, each of those writes put
   the engine's own copy of the row, made at the run's start, whole. The Cancel button writes PAUSED "Cancelled"
   (`SyncController.cancel`) behind that copy's back, and a page that a Cancel lets finish commits after it: its write set the
-  row RUNNING again and cleared the error until the run ended a few milliseconds later, so Sync and the Saved chip read
-  "Syncing…" and a Delete library tap was ignored. Now the row reads PAUSED "Cancelled" from the Cancel to the run's end, the
+  row RUNNING again and cleared the error until the run ended a few milliseconds later, so Sync and Home's status chip (as it
+  was then) read "Syncing…" and a Delete library tap was ignored. Now the row reads PAUSED "Cancelled" from the Cancel to the run's end, the
   page's counts and its cursor still commit with it, and a Resume starts at the next page with the counts carried on. A run with
   no Cancel reads RUNNING throughout. `SyncEngineTest` pins each (a SQLite trigger records any write that makes a paused row
   RUNNING, since a row that reads RUNNING for milliseconds is gone before a test reads it) and every column the progress
@@ -1061,7 +1063,7 @@ and only cancellation propagates. The status and `lastError` are written before 
 start (RUNNING) and end (the status below): a Cancel's PAUSED "Cancelled" is written by the Cancel button first and by the
 engine again when it stops, and the row never reads RUNNING between them (R29's review, [Sync engine](#sync-engine)). The Sync
 screen shows the `lastError` as the banner for PAUSED and `STOPPED_SHAPE`, and a fixed text for the other three STOPPED
-statuses; the Saved status chip shows the `lastError` for any stopped or paused run.
+statuses; Home's sync button shows a red dot for any stopped or paused run ([Home](#home)), and the reason only on Sync.
 
 | What happened | Status | `lastError` | Sync screen banner |
 |---|---|---|---|
@@ -1512,6 +1514,46 @@ are shown in the viewer on demand.
     videos out, which then no longer play offline (M3, [Video](#video)). The player's 1 s start buffer was Media3's default
     already, so it changes no request.
 
+## Home
+
+`app/.../ui/home/`: `HomeScreen.kt`, `HomeViewModel.kt`, `SyncButton.kt`. The owner's design of 2026-10-21, after Instagram's
+search tab: the "Saved" title and the status chip are gone.
+
+- **The top bar.** A `TopAppBar` with no title text: its title slot holds a rounded search bar (a 40 dp pill in 8 % of the
+  surface colour, a magnifier and the hint "Search") that fills the width, and its actions the sync button. The search bar
+  only looks like a field: it is one clickable `Row` (role Button, click label "Open search", test tag `home-search`), and a
+  tap opens Search, whose field takes the focus while it is empty (`SearchScreen`'s `LaunchedEffect(query)`), so the keyboard
+  is up on arrival.
+- **The sync button** (`SyncButton`, test tag `sync-button`). An `IconButton` in a `TooltipBox` with no caption, in the
+  viewer's icon-button pattern ([Viewer](#viewer)): the label is both the content description and the tooltip (a long
+  press). The glyph is Material Symbols' `sync` (`ic_sync`, outlined, 24 dp, Apache 2.0, in the same notice as the viewer's).
+  It opens Sync. Its badge (`SyncBadge`) says the state:
+  - **Idle** ("Sync"): the plain glyph.
+  - **Running** ("Sync, running"): the glyph turns against the clock, the way its arrows point, one turn in 2 s
+    (`rememberInfiniteTransition`, read in the draw phase only). With the system's animations removed (`motionEnabled` false,
+    [Motion](#motion)) it stays still and takes the primary colour instead.
+  - **Needs attention** ("Sync, needs attention"): a small red dot at the glyph's corner (Material's small `Badge`, the error
+    colour).
+- **The badge, mapped from the chip it replaced** (`SyncBadge.from`, from the latest run and the session). The chip read
+  only the run: "Syncing…" (RUNNING) is Running; "⚠" and the `lastError` (any resumable run: PAUSED, Cancel and "Interrupted"
+  included, and every STOPPED status, so a challenge, an expired session, a rate limit and "Adapter needs repair" alike) is a
+  dot; "Synced 5 min ago" and "Not synced" are Idle. A running run wins, as on the chip. A cooldown alone (the Pacer's, left
+  by a check, the viewer or a finished run) never made the chip warn and gives no dot; a run that the rate limit stopped
+  (STOPPED_RATE_LIMIT) did, and does. Beyond the chip, with the real library a session that is not Valid (logged out,
+  expired, challenged) is a dot too, because Sync stays off until the owner logs in; Mock mode's fake library needs no
+  session, so `HomeScreen` passes `HomeViewModel` none there, and a session not read yet is no dot. The run shows at once
+  either way: the session flow starts as "not read".
+- **When it last synced** is said on the Sync screen only, in History ("Last sync", "Last full sync").
+- **Tests.** `SyncBadgeTest` (each chip state, the resumable statuses exactly, the session's dot for the real library only),
+  `HomeViewModelTest` (the badge from the run and the session), `SyncButtonTest` (from its pixels, at xxhdpi on a paused
+  clock: the idle glyph plain and still, the running glyph turning, still and tinted with animations off, the red dot; the
+  labels, the tooltip, the tap), `HomeContentTest` (no title and no chip text in any state, the bar's layout, each control's
+  screen), `HomeScreenTest` (the real nav host: the search bar opens Search with its field focused, the button opens Sync, a
+  logged-out real library shows the dot and Mock mode does not), `SyncContentTest` (the last sync on Sync), `AppIconGuardTest`
+  (the glyph, its outline, its notice, and that the button draws it). `NavigationBackTest` reads Home's position from its
+  search bar.
+- **Pacing.** UI only: no request, rate or concurrency changes.
+
 ## Viewer
 
 `app/.../ui/viewer/`: `ViewerScreen.kt`, `ViewerViewModel.kt`, `ViewerPlayback.kt`, `CarouselPager.kt`. Playback, link
@@ -1721,6 +1763,8 @@ renewal and the cache are in [Video](#video).
   flying in from a tile that is gone (`MotionTest.aPageThatShowsAfterTheTransitionShowsInPlace`). So a first open after a cold
   start on a slow device may just fade, while warm opens grow. The owner's phone, on the release build, is the judge
   (`docs/GUIDE.md` section 8). A follow-up, if it looks late there: show the tapped post in the viewer's first frame, before Paging's first load.
+- **Home's sync button** turns its glyph while a run is going. It reads `motionEnabled` too, and with animations removed it
+  stays still and takes the primary colour instead ([Home](#home)).
 - **Pacing.** Motion adds no request, rate or concurrency.
 
 ## App icon
@@ -1740,8 +1784,8 @@ Spec §3.5. An adaptive icon, all vectors: minSdk 29 is above 26, so no raster f
 - All three are drawn on the 108 dp adaptive canvas, with the content (x and y 30 to 78) inside the 21 to 87 safe zone, the 66
   dp the launcher's mask never cuts. The foreground has no group or transform, so `AppIconGuardTest` can read its raw path
   data and measure it.
-- The icon is original to this project, covered by the repository's LICENSE; the three viewer glyphs are Material Symbols
-  ([Viewer](#viewer)).
+- The icon is original to this project, covered by the repository's LICENSE; the three viewer glyphs and Home's sync glyph
+  are Material Symbols ([Viewer](#viewer), [Home](#home)).
 
 ## Tests of the viewer update
 

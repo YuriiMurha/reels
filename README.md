@@ -21,7 +21,7 @@ Instagram account](#try-it-without-an-instagram-account)).
 >   rate limit stops every Instagram request for 1 hour, and a second one within 24 hours for 24 hours.
 
 <p align="center">
-  <img src="docs/images/mock-home.png" width="240" alt="The Saved screen in Mock mode: All Saved, Uncategorized and fake collections with their item counts">
+  <img src="docs/images/mock-home.png" width="240" alt="Home in Mock mode: a search bar and a sync button at the top, then All Saved, Uncategorized and fake collections with their item counts">
   <img src="docs/images/mock-grid.png" width="240" alt="A two-column staggered grid in Mock mode, with reel and carousel badges on the tiles">
   <img src="docs/images/mock-carousel.png" width="240" alt="The viewer on the second item of a fake carousel, with its 2/10 counter and dots">
 </p>
@@ -42,8 +42,9 @@ the app, and it paces every request itself.
 
 ## Features
 
-- **Collections with their names.** Saved lists All Saved, Uncategorized and every collection under its Instagram name,
-  each with its item count. Instagram's automatic collections ("All posts", audio) are left out.
+- **Collections with their names.** Home lists All Saved, Uncategorized and every collection under its Instagram name,
+  each with its item count, under a search bar and a sync button (a dot on it when a sync needs you). Instagram's
+  automatic collections ("All posts", audio) are left out.
 - **Pinterest-style grid.** Two columns, staggered, at each post's real aspect ratio, with a ▶ badge on videos and "1/N" on
   carousels, paged from the local database.
 - **The viewer.** Swipe up and down between posts. Reels play on demand and loop, and mute is remembered. Carousels swipe
@@ -71,7 +72,7 @@ the app, and it paces every request itself.
 ## How it works
 
 ```text
-  Saved · Grid · Viewer · Search · Sync              (Jetpack Compose screens)
+  Home · Grid · Viewer · Search · Sync               (Jetpack Compose screens)
        │ read            │ Sync, Full sync           │ link renewals, session checks, lab
        ▼                 ▼                           │
   Room database ◄─── SyncEngine                      │
@@ -152,7 +153,7 @@ Then, with **one** emulator running (create one in Android Studio's Device Manag
 SERIAL="$(adb -e get-serialno)" && ANDROID_SERIAL="$SERIAL" ./gradlew installDebug
 ```
 
-Open **Reels**, tap **Open Sync** (or the status chip, top right), then **Sync**. On a phone, turn on USB debugging and
+Open **Reels**, tap **Open Sync** (or the sync button, top right), then **Sync**. On a phone, turn on USB debugging and
 use `adb -d` in place of `adb -e`. Always pass `ANDROID_SERIAL`: a bare `installDebug` installs on every device attached.
 
 **Tests.** The JVM unit tests of both modules (Robolectric for the Android parts):

@@ -39,6 +39,7 @@ import io.github.yuriimurha.reels.di.AppContainer
 import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.testutil.closingAfterComposition
 import io.github.yuriimurha.reels.testutil.mediaEntity
+import io.github.yuriimurha.reels.ui.home.HOME_SEARCH_TAG
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import io.github.yuriimurha.reels.ui.viewer.POST_MEDIA_TAG
 import kotlinx.coroutines.runBlocking
@@ -74,7 +75,8 @@ class NavigationBackTest {
     private lateinit var navController: NavHostController
     private lateinit var back: OnBackPressedDispatcher
     private val source = MediaSource.Collection(ALL_SAVED_ID)
-    private val homeTitle = hasText("Saved")
+    /** Home's own node to read its offset from: its search bar (Home has no title since 2026-10-21). */
+    private val homeSearch = hasTestTag(HOME_SEARCH_TAG)
     private val searchField = hasTestTag("searchField")
 
     @Before
@@ -324,7 +326,7 @@ class NavigationBackTest {
             }
         }
         compose.waitForIdle()
-        awaitUntil("Home") { xOf(homeTitle) != null }
+        awaitUntil("Home") { xOf(homeSearch) != null }
     }
 
     /**
@@ -335,7 +337,7 @@ class NavigationBackTest {
     @Test
     fun theBackGestureSlidesAPageOutWithTheFinger() {
         showHome()
-        val homeAt = xOf(homeTitle)!!
+        val homeAt = xOf(homeSearch)!!
         compose.runOnUiThread { navController.navigate(SearchRoute) }
         compose.waitForIdle()
         val searchAt = xOf(searchField)!!
@@ -349,7 +351,7 @@ class NavigationBackTest {
             recordFrames(4)
             assertNear(searchAt + progress * width, xOf(searchField)!!, "Search at $progress of the gesture")
             assertEquals(size, compose.onNode(searchField).fetchSemanticsNode().size, "Search's size at $progress of the gesture (the page is not scaled)")
-            assertNear(homeAt - (1 - progress) * width / 3f, xOf(homeTitle)!!, "Home under Search at $progress of the gesture")
+            assertNear(homeAt - (1 - progress) * width / 3f, xOf(homeSearch)!!, "Home under Search at $progress of the gesture")
         }
         compose.mainClock.autoAdvance = true
     }
@@ -461,13 +463,13 @@ class NavigationBackTest {
     @Test
     fun pagesPushInFromTheEndAndBackOutTheSameWay() {
         showHome()
-        val homeAt = xOf(homeTitle)!!
+        val homeAt = xOf(homeSearch)!!
         val width = root().width
         val third = width / 3f
 
         compose.mainClock.autoAdvance = false
         compose.runOnUiThread { navController.navigate(SearchRoute) }
-        val forward = recordXs(30, searchField, homeTitle)
+        val forward = recordXs(30, searchField, homeSearch)
         compose.mainClock.autoAdvance = true
         compose.waitForIdle()
         val searchAt = xOf(searchField)!!
@@ -486,7 +488,7 @@ class NavigationBackTest {
 
         compose.mainClock.autoAdvance = false
         compose.runOnUiThread { back.onBackPressed() }
-        val backward = recordXs(30, searchField, homeTitle)
+        val backward = recordXs(30, searchField, homeSearch)
         compose.mainClock.autoAdvance = true
         compose.waitForIdle()
         val closing = backward.mapNotNull { it.first?.minus(searchAt) }
@@ -501,7 +503,7 @@ class NavigationBackTest {
         )
         assertPacedLikeAPush(closing, "Search closing")
         assertPacedLikeAPush(returning, "Home coming back")
-        assertEquals(homeAt, xOf(homeTitle))
+        assertEquals(homeAt, xOf(homeSearch))
     }
 
     /** A screenshot, as ARGB pixels. */
@@ -553,7 +555,7 @@ class NavigationBackTest {
     @GraphicsMode(GraphicsMode.Mode.NATIVE)
     fun theMovingPageIsDrawnOnTopAndNothingFades() {
         showHome()
-        val homeAt = xOf(homeTitle)!!
+        val homeAt = xOf(homeSearch)!!
         compose.runOnUiThread { navController.navigate(SearchRoute) }
         compose.waitForIdle()
         val searchAt = xOf(searchField)!!
@@ -565,7 +567,7 @@ class NavigationBackTest {
         /** Checks the frame drawn now, if Search's edge is well inside the screen; whether it did. */
         fun checked(what: String): Boolean {
             val top = ((xOf(searchField) ?: return false) - searchAt).roundToInt()
-            val under = ((xOf(homeTitle) ?: return false) - homeAt).roundToInt()
+            val under = ((xOf(homeSearch) ?: return false) - homeAt).roundToInt()
             if (top !in home.width / 5..home.width * 4 / 5) return false
             val frame = shot()
             assertShows(frame, search, top, top until frame.width, "$what, Search over Home (Search at $top)", home, under)

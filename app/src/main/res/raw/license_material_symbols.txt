@@ -1,19 +1,20 @@
 Material Symbols (icons used by this app)
 =========================================
 
-The viewer's icon buttons use three glyphs from Material Symbols, outlined style, 24 dp:
+The viewer's icon buttons and Home's sync button use four glyphs from Material Symbols, outlined style, 24 dp:
 
   volume_up      (Mute)
   volume_off     (Unmute)
   open_in_new    (Open on Instagram)
+  sync           (Sync, on Home)
 
 Material Symbols are copyright Google LLC and licensed under the Apache License, Version 2.0
 (https://www.apache.org/licenses/LICENSE-2.0). Source: https://github.com/google/material-design-icons and
 https://fonts.google.com/icons.
 
 Changes: each glyph's SVG path is re-expressed as an Android vector drawable (res/drawable/ic_volume_up.xml,
-ic_volume_off.xml, ic_open_in_new.xml): the y coordinates of its absolute commands are shifted by 960 so the path
-fits a 0..960 viewport. The shapes are otherwise unchanged.
+ic_volume_off.xml, ic_open_in_new.xml, ic_sync.xml): the y coordinates of its absolute commands are shifted by 960
+so the path fits a 0..960 viewport. The shapes are otherwise unchanged.
 
 The app's own launcher icon (res/drawable/ic_launcher_foreground.xml and ic_launcher_monochrome.xml) is not from
 Material Symbols; it is original to this project and covered by the repository's LICENSE.

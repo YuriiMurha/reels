@@ -1,24 +1,26 @@
 package io.github.yuriimurha.reels.ui.home
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -29,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextAlign
@@ -39,9 +42,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.yuriimurha.reels.data.db.CollectionCard
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.data.library.UNCATEGORIZED_ID
+import io.github.yuriimurha.reels.di.Backend
 import io.github.yuriimurha.reels.ui.LocalAppContainer
-import io.github.yuriimurha.reels.ui.common.SyncStatusChip
-import io.github.yuriimurha.reels.ui.common.SyncStatusSummary
 import io.github.yuriimurha.reels.ui.common.Thumbnail
 
 @Composable
@@ -51,12 +53,19 @@ fun HomeScreen(
     onOpenSync: () -> Unit,
 ) {
     val container = LocalAppContainer.current
-    val viewModel = viewModel { HomeViewModel(container.library, container.syncController) }
+    val viewModel = viewModel {
+        HomeViewModel(
+            container.library.collectionCards(),
+            container.syncController.latestRun,
+            // Only the real library needs a session: Mock mode's fake one never asks for a login.
+            session = if (container.backend is Backend.Real) container.session.state else null,
+        )
+    }
     val cards by viewModel.cards.collectAsStateWithLifecycle()
-    val status by viewModel.status.collectAsStateWithLifecycle()
+    val badge by viewModel.badge.collectAsStateWithLifecycle()
     HomeContent(
         cards = cards,
-        status = status,
+        badge = badge,
         onOpenCard = { card -> onOpenSource(card.toSource(), card.name) },
         onOpenSearch = onOpenSearch,
         onOpenSync = onOpenSync,
@@ -66,11 +75,19 @@ fun HomeScreen(
 private fun CollectionCard.toSource(): MediaSource =
     if (id == UNCATEGORIZED_ID) MediaSource.Uncategorized else MediaSource.Collection(id)
 
+/** The search bar's test tag (Compose tests and the emulator smoke suite). */
+const val HOME_SEARCH_TAG = "home-search"
+
+/**
+ * Home's top bar is the owner's design of 2026-10-21, after Instagram's search tab: no title, a rounded search bar filling the
+ * width (it opens Search, whose field takes the focus, so the keyboard comes up) and the icon-only [SyncButton] at the end.
+ * When the library last synced is said on the Sync screen only.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeContent(
     cards: List<CollectionCard>?,
-    status: SyncStatusSummary,
+    badge: SyncBadge,
     onOpenCard: (CollectionCard) -> Unit,
     onOpenSearch: () -> Unit,
     onOpenSync: () -> Unit,
@@ -78,12 +95,8 @@ fun HomeContent(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Saved") },
-                actions = {
-                    IconButton(onClick = onOpenSearch) { Icon(Icons.Default.Search, contentDescription = "Search") }
-                    SyncStatusChip(status, onOpenSync)
-                    Spacer(Modifier.width(8.dp))
-                },
+                title = { SearchBarButton(onOpenSearch) },
+                actions = { SyncButton(badge, onOpenSync) },
             )
         },
     ) { padding ->
@@ -100,6 +113,35 @@ fun HomeContent(
                 items(cards, key = { it.id }) { card -> CollectionCardView(card, onClick = { onOpenCard(card) }) }
             }
         }
+    }
+}
+
+/**
+ * Looks like a search field and is a button: a tap opens Search, where the typing happens. Its words are its hint, "Search",
+ * read with the role Button and the click label "Open search".
+ */
+@Composable
+private fun SearchBarButton(onClick: () -> Unit) {
+    val hint = MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(40.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            .testTag(HOME_SEARCH_TAG)
+            .clickable(onClickLabel = "Open search", role = Role.Button, onClick = onClick)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Default.Search, contentDescription = null, tint = hint, modifier = Modifier.size(20.dp))
+        Text(
+            "Search",
+            style = MaterialTheme.typography.bodyLarge,
+            color = hint,
+            maxLines = 1,
+            modifier = Modifier.padding(start = 10.dp),
+        )
     }
 }
 

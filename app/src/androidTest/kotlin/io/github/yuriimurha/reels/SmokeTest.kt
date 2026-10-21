@@ -7,18 +7,20 @@ import android.view.ViewGroup
 import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDisplayed
 import androidx.compose.ui.test.isEnabled
+import androidx.compose.ui.test.isFocused
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -33,6 +35,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.yuriimurha.reels.data.db.SyncRunEntity
 import io.github.yuriimurha.reels.data.db.SyncStatus
+import io.github.yuriimurha.reels.ui.home.HOME_SEARCH_TAG
+import io.github.yuriimurha.reels.ui.home.SYNC_BUTTON_TAG
 import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_COUNTER_TAG
 import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_DOTS_TAG
 import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_PAGER_TAG
@@ -82,13 +86,15 @@ class SmokeTest {
 
     // --- 1. Launch -------------------------------------------------------------------------------------------------------
 
+    /** Home's top bar (2026-10-21): a search bar and an icon-only sync button; no "Saved" title and no status chip. */
     @Test
-    fun t1Launch_homeShowsTitleSearchAndSyncChip() {
+    fun t1Launch_homeShowsTheSearchBarAndTheSyncButton() {
         val shots = Screenshots(composeRule, "t1")
-        await("the Home top bar") { exists(homeTitle) }
-        composeRule.onNode(homeTitle).assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Search").assertIsDisplayed()
-        composeRule.onNode(syncChip).assertIsDisplayed()
+        await("the Home top bar") { exists(homeSearch) }
+        composeRule.onNode(homeSearch).assertIsDisplayed().assertTextEquals("Search").assertHasClickAction()
+        composeRule.onNode(syncButton).assertIsDisplayed()
+        assertTrue("the sync button names itself: ${contentDescriptionOf(syncButton)}", contentDescriptionOf(syncButton).startsWith("Sync"))
+        composeRule.onAllNodes(oldTopBar).assertCountEquals(0)
         shots.take("home")
     }
 
@@ -97,7 +103,7 @@ class SmokeTest {
     @Test
     fun t2Sync_sessionIsLoggedOutDeveloperShowsMockModeAndSyncFillsHome() {
         val shots = Screenshots(composeRule, "t2")
-        await("the Home top bar") { exists(homeTitle) }
+        await("the Home top bar") { exists(homeSearch) }
         openSync()
         shots.take("sync-screen")
 
@@ -118,8 +124,13 @@ class SmokeTest {
         composeRule.onNodeWithText("Last run").performScrollTo().assertIsDisplayed()
         shots.take("sync-finished")
 
-        pressBackUntil("Home") { exists(homeTitle) && exists(card("All Saved")) }
+        // When it last synced is said on Sync, in History (Home no longer says it).
+        composeRule.onNodeWithText("Last sync").performScrollTo().assertIsDisplayed()
+
+        pressBackUntil("Home") { exists(homeSearch) && exists(card("All Saved")) }
         composeRule.onNode(card("All Saved")).assertIsDisplayed()
+        // A finished run leaves the plain glyph: no dot, no turn.
+        await("the sync button to show the finished run") { contentDescriptionOf(syncButton) == "Sync" }
         shots.take("home-after-sync")
     }
 
@@ -187,8 +198,10 @@ class SmokeTest {
     fun t5Search_aCaptionWordFindsResultsAndBackReturnsHome() {
         val shots = Screenshots(composeRule, "t5")
         ensureLibrary()
-        composeRule.onNodeWithContentDescription("Search").performClick()
+        composeRule.onNode(homeSearch).performClick()
         await("the search field") { exists(hasTestTag("searchField")) }
+        // It takes the focus on arrival, so the keyboard is up: Home's search bar only looks like a field.
+        await("the search field to take the focus") { exists(hasTestTag("searchField") and isFocused()) }
         shots.take("search-empty")
 
         // A word the fake library's captions are made of (FakeLibrary.WORDS): about one item in five has it.
@@ -198,7 +211,7 @@ class SmokeTest {
         shots.take("search-results")
 
         // The first Back may only close the keyboard.
-        pressBackUntil("Home") { exists(homeTitle) && exists(card("All Saved")) && !exists(hasTestTag("searchField")) }
+        pressBackUntil("Home") { exists(homeSearch) && exists(card("All Saved")) && !exists(hasTestTag("searchField")) }
         shots.take("home-after-search")
     }
 
@@ -264,11 +277,11 @@ class SmokeTest {
         if (exists(anyCard)) return
         openSync()
         syncToCompletion()
-        pressBackUntil("Home") { exists(homeTitle) && exists(anyCard) }
+        pressBackUntil("Home") { exists(homeSearch) && exists(anyCard) }
     }
 
     private fun openSync() {
-        composeRule.onNode(syncChip).performClick()
+        composeRule.onNode(syncButton).performClick()
         await("the Sync screen") { exists(hasText("Instagram session")) }
     }
 
@@ -355,7 +368,15 @@ class SmokeTest {
 
     // --- Matchers and waiting --------------------------------------------------------------------------------------------
 
-    private val homeTitle = hasText("Saved")
+    private val homeSearch = hasTestTag(HOME_SEARCH_TAG)
+    private val syncButton = hasTestTag(SYNC_BUTTON_TAG) and hasClickAction()
+
+    /** The top bar Home had until 2026-10-21: the "Saved" title and the status chip's labels. */
+    private val oldTopBar = hasText("Saved") or hasText("Not synced") or hasText("Syncing", substring = true) or
+        hasText("Synced ", substring = true) or hasText("⚠", substring = true)
+
+    private fun contentDescriptionOf(matcher: SemanticsMatcher): String =
+        composeRule.onNode(matcher).fetchSemanticsNode().config.getOrElse(SemanticsProperties.ContentDescription) { emptyList() }.joinToString()
     private val anyCard = hasTestTag("collection-name")
     private fun card(name: String) = hasTestTag("collection-name") and hasText(name, substring = true)
     private val tile = hasTestTag("tile") and isEnabled()
@@ -363,8 +384,6 @@ class SmokeTest {
 
     /** A grid's top bar title, which is not the Home card of the same name (that one has a test tag). */
     private fun gridTitle(name: String) = hasText(name) and !hasTestTag("collection-name") and !hasClickAction()
-    private val syncChip = hasClickAction() and
-        (hasText("Not synced") or hasText("Syncing…") or hasText("Synced ", substring = true) or hasText("⚠", substring = true))
     private val openOnInstagram = hasContentDescription("Open on Instagram") // an icon button: its words are its content description
     private val muteControl = hasContentDescription("Mute") or hasContentDescription("Unmute")
     private val carouselCounter = hasTestTag(CAROUSEL_COUNTER_TAG)
