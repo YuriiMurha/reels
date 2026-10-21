@@ -255,5 +255,5 @@ rules, because the repo is public and every commit is published:
 
 ## License
 
-[MIT](LICENSE), © 2026 Yurii Murha. The viewer's three Material Symbols glyphs are © Google LLC under the Apache License
+[MIT](LICENSE), © 2026 Yurii Murha. The four Material Symbols glyphs (the viewer's three and Home's sync icon) are © Google LLC under the Apache License
 2.0; their notice is in [`app/src/main/res/raw/license_material_symbols.txt`](app/src/main/res/raw/license_material_symbols.txt).

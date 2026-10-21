@@ -1519,8 +1519,8 @@ are shown in the viewer on demand.
 `app/.../ui/home/`: `HomeScreen.kt`, `HomeViewModel.kt`, `SyncButton.kt`. The owner's design of 2026-10-21, after Instagram's
 search tab: the "Saved" title and the status chip are gone.
 
-- **The top bar.** A `TopAppBar` with no title text: its title slot holds a rounded search bar (a 40 dp pill in 8 % of the
-  surface colour, a magnifier and the hint "Search") that fills the width, and its actions the sync button. The search bar
+- **The top bar.** A `TopAppBar` with no title text: its title slot holds a rounded search bar (a 40 dp pill filled with the
+  on-surface colour at 8 % alpha, a magnifier and the hint "Search") that fills the width, and its actions the sync button. The search bar
   only looks like a field: it is one clickable `Row` (role Button, click label "Open search", test tag `home-search`), and a
   tap opens Search, whose field takes the focus while it is empty (`SearchScreen`'s `LaunchedEffect(query)`), so the keyboard
   is up on arrival.

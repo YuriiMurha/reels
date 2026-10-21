@@ -349,7 +349,7 @@ Don't reinstall or clear the app's data to skip it.
    query, this step shows `collections query stale`, `repair: start` and `repair: learned new id` instead: that is the
    repair working, so go on to step 4 and then **skip step 5** (a second repair minutes later would only load the site's
    pages once more): do step 5b.
-4. **Check the collection names on the grid.** Open **Reels** (the **Saved** home). **Look for:** All Saved, Uncategorized
+4. **Check the collection names on the grid.** Open **Reels** (Home: the collections under a search bar). **Look for:** All Saved, Uncategorized
    and each of your collections under its Instagram name (not "Collection 1"), each with its count, each collection's grid
    holding the posts you know are in it, and **no** "All posts" card and no audio card (Instagram's automatic collections are
    left out). If the collections exist but are **empty** while All Saved has items, the `collection_id` the names query sends
