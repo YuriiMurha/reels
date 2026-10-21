@@ -192,6 +192,20 @@ class ViewerOverlayTest {
         assertFalse(mute.overlaps(open), "the two buttons are apart: $mute, $open")
     }
 
+    /**
+     * R30: the "N/M" counter is the page's (its overlay layer's) now, no longer drawn inside the carousel's pager, and it sits
+     * where it always has: at the page's top end, 16 dp in from the top and from the end.
+     */
+    @Test
+    fun theCounterSitsAtTheTopEnd() {
+        show(mediaEntity("1000005", MediaType.CAROUSEL), carouselAt(settled = 0))
+        val root = compose.onRoot().getBoundsInRoot()
+        val counter = compose.onNodeWithTag(CAROUSEL_COUNTER_TAG).assertIsDisplayed().getBoundsInRoot()
+
+        assertTrue(abs((root.right - counter.right).value - 16f) <= 0.5f, "the counter $counter at the end of $root")
+        assertTrue(abs((counter.top - root.top).value - 16f) <= 0.5f, "the counter $counter at the top of $root")
+    }
+
     /** Open on Instagram sits at the start and Mute at the end, each at the overlay's 16 dp margin, as the text buttons were side by side. */
     @Test
     fun muteIsAtTheEndAndOpenOnInstagramAtTheStart() {

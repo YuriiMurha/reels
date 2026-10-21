@@ -1037,3 +1037,48 @@ belongs on the Sync screen. Home's top bar now looks like Instagram's search tab
   logged-out dot (`HomeScreenTest` reads it; agents keep the emulator in Mock mode).
 - **Pacing.** Unchanged: UI only, no request, rate or concurrency. **Safety.** Nothing contacted Instagram (the glyph's
   SVG was read from GitHub), and the phone was not touched.
+
+## 2026-10-21: the viewer's text and controls stay above the moving post (R30)
+
+Spec `docs/superpowers/specs/2026-10-12-viewer-ux-design.md` §6: R30, from the owner's use of the release build on the phone.
+
+- **The bug.** When a post grew from its tile into the viewer, the growing picture was drawn over the viewer's overlay: the
+  author and caption, Back, Open on Instagram, Mute, and a carousel's "N/M" counter and dots showed only once the post had
+  settled, and going back the shrinking picture hid them at once. R14's shared bounds draw the moving media in the
+  `SharedTransitionLayout`'s overlay, above everything laid out under it, the viewer's own controls included.
+- **The fix.** `Modifier.aboveSharedMedia()` (`Motion.kt`) puts the page's overlay layer (a new full-page box holding the
+  counter at the top end, and the dots and the overlay at the bottom) and the Back button into that overlay too, at z-index 1
+  over the media's 0 (`renderInSharedTransitionScopeOverlay`), for as long as the viewer's own transition runs (its fade, or
+  the back gesture seeking it); the media's bounds animate on that same transition. Drawn from there a layer no longer takes its page's fade, so it fades itself with the
+  viewer's own `viewerEnter` and `viewerExit` (`animateEnterExit`), and looks at every frame as it would on its page. The
+  counter left the carousel's pager (the shared media) for a `CarouselCounter` the page places, as the dots already were: it
+  stays at the top end instead of growing and shrinking with the post. The grow, the shrink, predictive back, the page under
+  the viewer, no motion with animations off and the single player surface are unchanged. UI only: nothing about pacing,
+  rates or concurrency changes.
+- **Safety.** Nothing contacted Instagram or touched the owner's phone: Robolectric with an in-memory library and the fake
+  backend, and the emulator in Mock mode (every adb call and the connected run pinned to it).
+- **Tests.** `./gradlew check --no-build-cache --rerun-tasks`, on top of the home bar's update: 1344 app tests in 100
+  classes and 388 `:instagram` tests, 0 failures, lint with no errors (17 warnings, none in the changed code: dependency and SDK version notices and older KTX
+  hints). `connectedDebugAndroidTest` on the emulator: 54 tests, 0 failures. New (4):
+  - `NavigationBackTest.theViewersControlsAreDrawnAboveTheMediaAsItGrowsAndShrinks`: the real nav host, a carousel among
+    images whose covers have no file (so a picture is the placeholder's flat dark grey), read from the screen's pixels frame
+    by frame under native graphics. In every frame each control (Back, the counter, the dots, the author, the caption, Open on
+    Instagram) is where it is at rest and as large; wherever the moving media covers one and the viewer's fade has it at least
+    70 % opaque, at least 95 % of its white strokes show bright. Without the fix the growing picture leaves the dots' strokes
+    all dark grey (0 of 98), going back it hides Back at the first moving frame, and the counter travels with the picture.
+  - `MotionTest.theOverlayLayerFadesWithItsPage`: a page fading in and out with nothing shared on it; its overlay layer's
+    opacity matches the page's at every frame (taking the page's fade on top of its own would square it).
+  - `MotionTest.aboveSharedMediaIsANoOpOutsideASharedTransition`, and `ViewerOverlayTest.theCounterSitsAtTheTopEnd` (the
+    counter, now the page's, still 16 dp in from the top and the end).
+  - `CarouselPagerTest`'s pager-only screens draw the counter over the pager from the same pager state, as the page does.
+- **Mutants, in a scratch export (deleted).** A first round of 15 left one alive: the overlay layer kept in the overlay only
+  while the viewer's transition runs, without also asking whether a shared transition is active. The media's bounds animate
+  on the viewer's transition, so the extra condition could never matter, and it was removed. Then 15, all killed: no overlay
+  layer (only the fade), the modifier doing nothing, the API's default condition (a shared transition active), the layer in
+  the overlay only while the viewer enters, no own fade, no fade in, no fade out, the layer below the media, the page's layer
+  or Back left in place, the counter in place outside the layer, the bottom column (dots, author, caption, Open on Instagram)
+  outside it, the counter back inside the media, the counter at the top start, and the counter without its 16 dp margin.
+- **On the emulator** (Mock mode, animator duration scale slowed to 10 and put back unset, screenshots deleted): a carousel
+  grown from its tile and shrunk back by Back, 14 screenshots of each. In the frames looked at, Back, the "1/10" counter, the
+  dots, the author, the caption and Open on Instagram showed over the picture wherever it lay under them, during the grow and
+  the shrink alike, fading in and out with the viewer.

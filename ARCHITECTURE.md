@@ -1561,8 +1561,9 @@ renewal and the cache are in [Video](#video).
 
 - **Pagers.** The vertical post pager is unchanged. A carousel post holds a horizontal pager of its items (`CarouselPager`), so
   a vertical swipe moves between posts and a horizontal one between items, and a horizontal swipe never changes the post. The
-  carousel's `PagerState` is hoisted to `ViewerPage` (`rememberCarouselPagerState`), which draws the dots (`CarouselDots`,
-  bottom centre, above the overlay) from it. It is seeded with the visit's settled item (coerced into the page count), so a
+  carousel's `PagerState` is hoisted to `ViewerPage` (`rememberCarouselPagerState`), which draws the counter
+  (`CarouselCounter`, top end) and the dots (`CarouselDots`, bottom centre, above the overlay) from it, in its overlay layer
+  ([Motion](#motion), R30). It is seeded with the visit's settled item (coerced into the page count), so a
   rotation, which makes the pager again, does not flip the post to item 0; it is `remember`ed, not saved (the lazy layout
   would bring a post back on its old item), and `CarouselPager` follows the visit's `settled` when that changes and the owner
   is not swiping.
@@ -1720,8 +1721,13 @@ renewal and the cache are in [Video](#video).
   grid tile's thumbnail (a placeholder tile has none) and on the viewer's SETTLED page only: its neighbours are composed too,
   and only one element on screen may carry a post's key. In the viewer it is on `PostMedia`'s box (`POST_MEDIA_TAG`), which
   wraps whatever shows, the thumbnail, the playing video or, for a carousel, the whole pager. So the thumbnail giving way to
-  the video, or a carousel moving to another item, never replaces the shared node mid-transition, and a carousel's counter
-  scales with it.
+  the video, or a carousel moving to another item, never replaces the shared node mid-transition.
+- **The viewer's controls stay on top (R30).** The moving media is drawn in the `SharedTransitionLayout`'s overlay, above
+  everything laid out in it, so `Modifier.aboveSharedMedia()` puts the page's overlay layer (author, caption, Open on
+  Instagram, Mute, a carousel's counter and dots) and Back there too, at z-index 1 over the media's 0
+  (`renderInSharedTransitionScopeOverlay`), while the viewer's own transition runs (the media's bounds animate on it), fading
+  itself with `viewerEnter` and `viewerExit` (`animateEnterExit`), since from the overlay it no longer takes its page's fade;
+  the counter left the media for that layer, so it no longer grows and shrinks with the post.
 - **Shared bounds, not a shared element (R14).** `sharedMedia` is `sharedBounds(…, resizeMode =
   ResizeMode.scaleToBounds())`: each side is laid out at its own size and scaled into the bounds, and the two cross-fade. On
   the emulator `sharedElement`, which draws only the target's content laid out again at every animated size, made the picture
@@ -1904,13 +1910,14 @@ All of them run without Instagram: fakes, an in-memory or file Room database, a 
   `ViewerOverlayTest` (the icon buttons: labels, tooltips, which button when, no text button left), `ViewerPageTest`, `AppIconGuardTest` (the layers, the safe zone, no stroke, no activity icon, each glyph's own outline,
   the helper drawing the glyph it is given, the notice and its licence terms, the notice kept, no extended icon library).
 - **Motion.** `MotionTest` (the transitions, scale 0, an unset scale, the nav host's use of every factory, the shared key, a
-  late page), `NavigationBackTest` (the real nav host and Room, bounds read frame by frame on a paused clock: open grows from
-  the tile, back shrinks into the tile of the post the viewer is on, a tile in view stays put, the search results' returns, no
-  motion at scale 0, the back gesture shrinks and can be cancelled; and R24's push: forward and back its direction, distance
-  (the whole width, a third), length (over within 24 frames) and easing (slowing into its end), the page gesture following its
-  progress linearly on both pages, and, from the screen's pixels under Robolectric's native graphics, the moving page on top
-  with neither page faded, forward, back and under the gesture), `MediaGridTest` (`revealTile`, a tall tile included),
-  `ManifestGuardTest` (predictive back is on, with its target API).
+  late page, R30's overlay layer fading as its page does), `NavigationBackTest` (the real nav host and Room, bounds read frame
+  by frame on a paused clock: open grows from the tile, back shrinks into the tile of the post the viewer is on, a tile in
+  view stays put, the search results' returns, no motion at scale 0, the back gesture shrinks and can be cancelled; and R24's
+  push: forward and back its direction, distance (the whole width, a third), length (over within 24 frames) and easing
+  (slowing into its end), the page gesture following its progress linearly on both pages, and, from the screen's pixels under
+  Robolectric's native graphics, the moving page on top with neither page faded, forward, back and under the gesture; and
+  R30's viewer controls drawn above the growing and the shrinking post, in place, from the pixels), `MediaGridTest`
+  (`revealTile`, a tall tile included), `ManifestGuardTest` (predictive back is on, with its target API).
 - **Emulator, Mock mode.** `SmokeTest` `t6Carousel_aCarouselSwipesToItsSecondItem` and
   `t7Motion_backFromAFarPostShowsThatPostsTile`. Its viewer controls are matched by content description now.
 - **Lint.** `./gradlew check` runs lint, with no errors. The update adds one warning, left alone: `ObsoleteSdkInt` for the

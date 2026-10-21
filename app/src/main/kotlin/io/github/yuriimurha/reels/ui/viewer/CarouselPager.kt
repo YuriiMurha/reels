@@ -116,12 +116,13 @@ fun rememberCarouselPagerState(state: CarouselUiState): PagerState {
 
 /**
  * A carousel post in the viewer (spec 2026-10-12 §3.2): its items side by side, swiped left and right inside the vertical post
- * pager, with an "N/M" counter at the top end. Item 0 shows the stored cover at once, so the first frame never waits for the
- * network; an image item shows its downloaded file once there is one (R7: until then its placeholder, the pager is never held
- * up); a video item draws [player] while it is the settled one (the screen gives [player] only to the unit that plays), with
- * its own poster (R26), or item 0's cover, as the frame's shutter: Media3's `ContentFrame` covers the surface with it until
- * the player renders this unit's first frame, and each item's frame is its own, so no item's picture covers another's video.
- * [onItemSettled] gets the page every time the pager settles. The dots are [CarouselDots], placed by the page with its overlay.
+ * pager. Item 0 shows the stored cover at once, so the first frame never waits for the network; an image item shows its
+ * downloaded file once there is one (R7: until then its placeholder, the pager is never held up); a video item draws [player]
+ * while it is the settled one (the screen gives [player] only to the unit that plays), with its own poster (R26), or item 0's
+ * cover, as the frame's shutter: Media3's `ContentFrame` covers the surface with it until the player renders this unit's
+ * first frame, and each item's frame is its own, so no item's picture covers another's video.
+ * [onItemSettled] gets the page every time the pager settles. The "N/M" counter and the dots are [CarouselCounter] and
+ * [CarouselDots], which the page places in its overlay layer (R30).
  */
 @Composable
 fun CarouselPager(
@@ -141,40 +142,47 @@ fun CarouselPager(
             pagerState.scrollToPage(state.settled)
         }
     }
-    Box(modifier.fillMaxSize()) {
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize().testTag(CAROUSEL_PAGER_TAG)) { page ->
-            val item = state.items.getOrNull(page)
-            CarouselItemPage(
-                media = media,
-                item = item,
-                index = page,
-                player = player?.takeIf { page == state.settled && item?.type == MediaType.VIDEO },
-                onTogglePlay = onTogglePlay,
-                message = item?.failure ?: state.coverOnlyMessage?.takeIf { state.items.isEmpty() },
-            )
-        }
-        Row(
-            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (state.loading && state.items.isEmpty()) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(14.dp).testTag(CAROUSEL_LOADING_TAG),
-                    color = Color.White,
-                    strokeWidth = 2.dp,
-                )
-            }
-            Text(
-                "${pagerState.currentPage + 1}/${carouselTotal(media, state)}",
+    HorizontalPager(state = pagerState, modifier = modifier.fillMaxSize().testTag(CAROUSEL_PAGER_TAG)) { page ->
+        val item = state.items.getOrNull(page)
+        CarouselItemPage(
+            media = media,
+            item = item,
+            index = page,
+            player = player?.takeIf { page == state.settled && item?.type == MediaType.VIDEO },
+            onTogglePlay = onTogglePlay,
+            message = item?.failure ?: state.coverOnlyMessage?.takeIf { state.items.isEmpty() },
+        )
+    }
+}
+
+/**
+ * The carousel's "N/M" counter, N the item [pagerState] (the pager's own) is on, with the small loading mark before it while the
+ * items are being filled. The page puts it at its top end, in its overlay layer with the dots (R30): above the post's media, also
+ * while the post grows from its tile and shrinks back, where a counter inside the media would move and scale with it.
+ */
+@Composable
+fun CarouselCounter(media: MediaEntity, state: CarouselUiState, pagerState: PagerState, modifier: Modifier = Modifier) {
+    Row(
+        modifier.statusBarsPadding().padding(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (state.loading && state.items.isEmpty()) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp).testTag(CAROUSEL_LOADING_TAG),
                 color = Color.White,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier
-                    .testTag(CAROUSEL_COUNTER_TAG)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                strokeWidth = 2.dp,
             )
         }
+        Text(
+            "${pagerState.currentPage + 1}/${carouselTotal(media, state)}",
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier
+                .testTag(CAROUSEL_COUNTER_TAG)
+                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        )
     }
 }
 

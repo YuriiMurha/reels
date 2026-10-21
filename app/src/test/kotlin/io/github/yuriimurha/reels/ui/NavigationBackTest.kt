@@ -5,14 +5,17 @@ import android.provider.Settings
 import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.PixelMap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -25,6 +28,7 @@ import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.unit.IntOffset
 import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavHostController
@@ -33,6 +37,7 @@ import androidx.navigation.toRoute
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.yuriimurha.reels.data.db.ALL_SAVED_ID
+import io.github.yuriimurha.reels.data.db.CarouselItemEntity
 import io.github.yuriimurha.reels.data.db.CollectionMediaEntity
 import io.github.yuriimurha.reels.data.library.MediaSource
 import io.github.yuriimurha.reels.di.AppContainer
@@ -41,7 +46,10 @@ import io.github.yuriimurha.reels.testutil.closingAfterComposition
 import io.github.yuriimurha.reels.testutil.mediaEntity
 import io.github.yuriimurha.reels.ui.home.HOME_SEARCH_TAG
 import io.github.yuriimurha.reels.ui.theme.ReelsTheme
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_COUNTER_TAG
+import io.github.yuriimurha.reels.ui.viewer.CAROUSEL_DOTS_TAG
 import io.github.yuriimurha.reels.ui.viewer.POST_MEDIA_TAG
+import io.github.yuriimurha.reels.ui.viewer.VIEWER_BACK_TAG
 import kotlinx.coroutines.runBlocking
 import org.junit.Before
 import org.junit.Rule
@@ -50,6 +58,8 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -602,6 +612,146 @@ class NavigationBackTest {
         assertTrue(forward >= 3 && backward >= 3 && seeked == 2, "too few frames checked: $forward forward, $backward back, $seeked of the gesture")
     }
 
+    /**
+     * [count] images as [seed] makes them, but item 1 (`m28`, the right column's first tile) is a carousel of three stored image
+     * items, so the viewer shows its counter and its dots. Every cover is a path with no file behind it: a post's picture is the
+     * placeholder's flat dark grey (`surfaceVariant`), in its tile and in the viewer alike.
+     */
+    private fun seedACarouselAmongImages(count: Int) = runBlocking {
+        container.db.mediaDao().upsert(
+            List(count) {
+                if (it == CAROUSEL) mediaEntity("m$it", MediaType.CAROUSEL).copy(carouselCount = 3) else mediaEntity("m$it", MediaType.IMAGE)
+            },
+        )
+        container.db.carouselItemDao().replace(
+            "m$CAROUSEL",
+            List(3) { CarouselItemEntity("m$CAROUSEL", it, MediaType.IMAGE, 1080, 1920, "fake://thumb/m$CAROUSEL-$it", null, null) },
+        )
+        container.db.collectionDao().upsertMemberships(
+            List(count) { CollectionMediaEntity(ALL_SAVED_ID, "m$it", sortKey = it.toLong(), lastSeenRunId = 1) },
+        )
+    }
+
+    /** The viewer's text and controls that R30 keeps above the post's media, on the carousel `m28`, by name. */
+    private val viewerControls = mapOf(
+        "Back" to hasTestTag(VIEWER_BACK_TAG),
+        "the counter" to hasTestTag(CAROUSEL_COUNTER_TAG),
+        "the dots" to hasTestTag(CAROUSEL_DOTS_TAG),
+        "the author" to (hasText("@author_m$CAROUSEL") and !hasTestTag("tile")),
+        "the caption" to (hasText("caption m$CAROUSEL") and !hasTestTag("tile")),
+        "Open on Instagram" to hasContentDescription("Open on Instagram"),
+    )
+
+    /** The bounds of the one node matching [matcher] on screen (the viewer's neighbouring pages are composed too, out of sight). */
+    private fun onScreen(matcher: SemanticsMatcher): Rect? {
+        val shown = compose.onAllNodes(matcher).fetchSemanticsNodes().map { it.boundsInRoot }.filter { it.width > 0f && it.height > 0f }
+        check(shown.size <= 1) { "more than one on screen: $shown" }
+        return shown.singleOrNull()
+    }
+
+    /** The screen as it is drawn now (Robolectric's native graphics). */
+    private fun capture(): PixelMap = compose.onRoot().captureToImage().toPixelMap()
+
+    /** The darkest of the pixel's three colour channels: 255 for white, low for the placeholder's dark grey. */
+    private fun PixelMap.minChannel(at: IntOffset): Int =
+        this[at.x, at.y].toArgb().let { minOf(it ushr 16 and 0xFF, it ushr 8 and 0xFF, it and 0xFF) }
+
+    /** A control's strokes in [shot]: the pixels inside its [bounds] that are near white (its text, glyph or dot). */
+    private fun strokesOf(shot: PixelMap, bounds: Rect): List<IntOffset> =
+        (ceil(bounds.top).toInt() until floor(bounds.bottom).toInt()).flatMap { y ->
+            (ceil(bounds.left).toInt() until floor(bounds.right).toInt()).map { x -> IntOffset(x, y) }
+        }.filter { shot.minChannel(it) >= STROKE }
+
+    private fun Rect.covers(other: Rect) = left <= other.left && top <= other.top && right >= other.right && bottom >= other.bottom
+
+    /**
+     * On a paused clock, [frames] frames, checking the viewer's controls in each against how they are at rest ([atRest], and
+     * their [strokes] there): each control on screen is where it is at rest and as large (the overlay does not move or scale with
+     * the media); and where the moving media covers it and the viewer's fade has it at least [OPAQUE] opaque ([opacity] of the
+     * frame's number, 1 for the first, and of the frame the media first showed in, says how opaque at least), its strokes show
+     * bright: drawn above the media. The media drawn over them would leave them its dark grey, with at most a quarter of them
+     * showing through the cross-fade (dimmer than [BRIGHT]). Returns, for each control, in how many frames its strokes were read.
+     */
+    private fun checkControlsFrameByFrame(
+        frames: Int,
+        what: String,
+        atRest: Map<String, Rect>,
+        strokes: Map<String, List<IntOffset>>,
+        opacity: (frame: Int, mediaSince: Int?) -> Float,
+    ): Map<String, Int> {
+        val read = viewerControls.keys.associateWith { 0 }.toMutableMap()
+        var mediaSince: Int? = null
+        for (frame in 1..frames) {
+            compose.mainClock.advanceTimeByFrame()
+            Thread.sleep(10) // lets Room's and Paging's background loads land between frames
+            compose.waitForIdle()
+            val media = shownMedia()
+            if (media != null && mediaSince == null) mediaSince = frame
+            val shot = if (media != null && media != root() && opacity(frame, mediaSince) >= OPAQUE) capture() else null
+            for ((name, matcher) in viewerControls) {
+                val bounds = onScreen(matcher) ?: continue
+                val rest = atRest.getValue(name)
+                assertTrue(
+                    listOf(rest.left to bounds.left, rest.top to bounds.top, rest.width to bounds.width, rest.height to bounds.height)
+                        .all { (a, b) -> abs(a - b) <= 1f },
+                    "$what, frame $frame: $name at $bounds, not where it is at rest, $rest (the media is at $media)",
+                )
+                if (shot == null || media == null || !media.covers(bounds)) continue
+                val own = strokes.getValue(name)
+                val bright = own.count { shot.minChannel(it) >= BRIGHT }
+                assertTrue(bright >= own.size * 0.95f, "$what, frame $frame: $bright of ${own.size} strokes of $name show over the media at $media")
+                read[name] = read.getValue(name) + 1
+            }
+        }
+        return read
+    }
+
+    /**
+     * R30: the viewer's text and controls (Back, a carousel's "N/M" counter and its dots, the post's author and caption, Open on
+     * Instagram) are drawn above the post's media at every moment of the grow and of the shrink back. The shared bounds draw the
+     * moving media in the shared transition's overlay, above everything laid out under it, the viewer's page included; the
+     * owner saw the growing picture hide them. Read from the screen's pixels frame by frame ([checkControlsFrameByFrame]), on a
+     * carousel, whose counter and dots used to sit inside its media. Mute shares Open on Instagram's row.
+     */
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    @Config(qualifiers = "xhdpi")
+    fun theViewersControlsAreDrawnAboveTheMediaAsItGrowsAndShrinks() {
+        seedACarouselAmongImages(30)
+        showGrid()
+        val gridEntry = navController.currentBackStackEntry!!
+        openTile(CAROUSEL_INDEX, gridEntry)
+        awaitUntil("the carousel's dots") { onScreen(viewerControls.getValue("the dots")) != null }
+        val rest = capture()
+        val atRest = viewerControls.mapValues { (name, matcher) -> onScreen(matcher) ?: error("no $name on the viewer at rest") }
+        val strokes = atRest.mapValues { (name, bounds) ->
+            strokesOf(rest, bounds).also { assertTrue(it.size >= 10, "the setup: $name has ${it.size} strokes at rest, at $bounds") }
+        }
+        compose.runOnUiThread { back.onBackPressed() }
+        awaitUntil("the grid again") { !onTheViewer() && tilesShown() }
+
+        compose.mainClock.autoAdvance = false
+        compose.onAllNodesWithTag("tile")[CAROUSEL_INDEX].performClick()
+        // Opening, the viewer fades in from the frame it composes in, which is no later than the first frame its media shows in.
+        val grow = checkControlsFrameByFrame(60, "opening", atRest, strokes) { frame, mediaSince ->
+            if (mediaSince == null) 0f else FastOutSlowInEasing.transform(((frame - mediaSince) * FRAME_MS / VIEWER_FADE_MS).coerceAtMost(1f))
+        }
+        compose.mainClock.autoAdvance = true
+        awaitUntil("the carousel's dots again") { onScreen(viewerControls.getValue("the dots")) != null }
+
+        compose.mainClock.autoAdvance = false
+        compose.runOnUiThread { back.onBackPressed() }
+        // Going back, the viewer fades out from a frame no earlier than the press.
+        val shrink = checkControlsFrameByFrame(40, "going back", atRest, strokes) { frame, _ ->
+            1f - FastOutSlowInEasing.transform((frame * FRAME_MS / VIEWER_FADE_MS).coerceIn(0f, 1f))
+        }
+        compose.mainClock.autoAdvance = true
+        compose.waitForIdle()
+
+        assertTrue(grow.values.all { it >= 3 }, "too few frames read while the post grew: $grow")
+        assertTrue(shrink.values.all { it >= 1 }, "too few frames read while the post shrank: $shrink")
+    }
+
     /** With the system's animations off (scale 0): no growing, no shrinking, no fade; each page is there on the next frames. */
     @Test
     fun withAnimationsOffAPostOpensAndClosesWithoutMotion() {
@@ -633,5 +783,20 @@ class NavigationBackTest {
          */
         const val PUSH_MIN_FRAMES = 16
         const val PUSH_FRAMES = 20
+
+        /** The seeds' carousel, `m28`: item 1, the right column's first tile. */
+        const val CAROUSEL_INDEX = 1
+        const val CAROUSEL = 28
+
+        /** A frame on the test clock, and the viewer's fade (`Motion.kt`: 300 ms, tween's FastOutSlowInEasing). */
+        const val FRAME_MS = 16f
+        const val VIEWER_FADE_MS = 300f
+
+        /** A control's stroke at rest is at least this bright in its darkest channel; during a frame, [BRIGHT] at least. */
+        const val STROKE = 0xE0
+        const val BRIGHT = 0x80
+
+        /** The least opacity of the viewer's fade at which a frame's strokes are read: 0.7 of white is far above [BRIGHT]. */
+        const val OPAQUE = 0.7f
     }
 }

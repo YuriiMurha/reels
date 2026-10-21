@@ -10,6 +10,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -20,8 +21,12 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -33,6 +38,7 @@ import io.github.yuriimurha.reels.testutil.KotlinSource
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.annotation.GraphicsMode
 import java.io.File
 import kotlin.math.abs
 import kotlin.test.assertEquals
@@ -221,5 +227,68 @@ class MotionTest {
     fun sharedMediaIsANoOpOutsideASharedTransition() {
         compose.setContent { Box(Modifier.size(40.dp).sharedMedia("1").testTag("media")) }
         compose.onNodeWithTag("media").assertIsDisplayed()
+    }
+
+    /** The same for the viewer's overlay layer ([aboveSharedMedia]). */
+    @Test
+    fun aboveSharedMediaIsANoOpOutsideASharedTransition() {
+        compose.setContent { Box(Modifier.size(40.dp).aboveSharedMedia().testTag("controls")) }
+        compose.onNodeWithTag("controls").assertIsDisplayed()
+    }
+
+    /**
+     * R30: drawn from the shared transition's overlay, the viewer's overlay layer ([aboveSharedMedia]) fades exactly as its page
+     * does, frame by frame, in and out, here on a page with nothing shared on it (a late first page: no media moves, and the
+     * viewer still fades). The page is red over black and its layer a white box: the page's red shows how opaque the page's
+     * fade has it, the box's green how opaque the box is, and the two must match. Taking the page's fade on top of its own
+     * would leave the box fainter (its opacity squared); not fading itself, it would show at once.
+     */
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun theOverlayLayerFadesWithItsPage() {
+        var screen by mutableIntStateOf(0)
+        compose.setContent {
+            SharedTransitionLayout(Modifier.fillMaxSize().background(Color.Black)) {
+                CompositionLocalProvider(LocalSharedTransitionScope provides this) {
+                    AnimatedContent(screen, transitionSpec = { viewerEnter(context) togetherWith viewerExit(context) }) { shown ->
+                        CompositionLocalProvider(LocalNavAnimatedVisibilityScope provides this) {
+                            if (shown == 1) {
+                                Box(Modifier.fillMaxSize().background(Color.Red)) {
+                                    Box(Modifier.padding(20.dp).size(40.dp).aboveSharedMedia().background(Color.White).testTag("controls"))
+                                }
+                            } else {
+                                Box(Modifier.fillMaxSize())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+        compose.mainClock.autoAdvance = false
+
+        /**
+         * The page's and the box's opacity in each of [frames] frames while the page is there, read from the screen's red and the
+         * box's green.
+         */
+        fun opacities(frames: Int) = List(frames) {
+            compose.mainClock.advanceTimeByFrame()
+            val box = compose.onAllNodesWithTag("controls").fetchSemanticsNodes().singleOrNull()?.boundsInRoot?.center ?: return@List null
+            val pixels = compose.onRoot().captureToImage().toPixelMap()
+            val page = pixels[pixels.width - 2, pixels.height - 2].toArgb() ushr 16 and 0xFF
+            val layer = pixels[box.x.toInt(), box.y.toInt()].toArgb() ushr 8 and 0xFF
+            page to layer
+        }.filterNotNull()
+
+        screen = 1
+        val fadingIn = opacities(25)
+        screen = 0
+        val fadingOut = opacities(25)
+        compose.mainClock.autoAdvance = true
+
+        for ((what, frames) in listOf("in" to fadingIn, "out" to fadingOut)) {
+            assertTrue(frames.count { (page, _) -> page in 60..200 } >= 3, "too few frames half-way through the fade $what: $frames")
+            assertTrue(frames.all { (page, layer) -> abs(page - layer) <= 3 }, "the box did not fade $what as its page did: $frames")
+        }
     }
 }

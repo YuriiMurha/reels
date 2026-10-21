@@ -366,3 +366,16 @@ CDN download of item 0's own picture when the changed post is open in the viewer
 - **M-2, item 0 after a sync's drop.** It was black for the rest of the visit (documented as a cost); it now loads its own
   picture (item 4 above).
 - **M-3 and M-6, the docs.** The renewal's two downloads are stated, and the docs claim what the code does.
+
+R30 comes from the owner's use of the release build on the phone (2026-10-21). It changes the code, with tests that fail
+without it.
+
+- **R30: the viewer's text and controls stay above the moving post (amends §3.6 and R14).** The viewer's overlay (the post's
+  author and caption, Back, Open on Instagram, Mute, and a carousel's "N/M" counter and dots) is drawn above the post's media
+  at every moment of the grow and of the shrink, not only once the post has settled. Why: R14's shared bounds draw the moving
+  media in the shared transition's overlay, above everything laid out under it, so the growing picture covered the controls
+  until it settled and the shrinking one hid them at once. The page's overlay layer and Back go into that overlay too, above
+  the media, while the viewer's own transition runs (the media's bounds animate on it), and fade themselves with the viewer's
+  own fade (drawn from there, they no longer take their page's). The counter leaves the media for that layer. The grow and the shrink, predictive back,
+  the page under the viewer (R15), no motion with animations off and the single player surface are unchanged. Cost: the
+  counter stays at the top end instead of growing and shrinking with the post.
