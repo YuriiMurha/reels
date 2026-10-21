@@ -17,6 +17,8 @@ import io.github.yuriimurha.reels.ui.theme.ReelsTheme
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.shadows.ShadowSystem
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 @RunWith(AndroidJUnit4::class)
@@ -79,6 +81,36 @@ class SyncContentTest {
         compose.onAllNodesWithText("420 / 300").assertCountEquals(0)
         compose.onNodeWithText("Requests in 24 h").assertExists()
         compose.onNodeWithText("450 / 600").assertExists()
+    }
+
+    /**
+     * Home's status chip said "Synced 5 minutes ago" until 2026-10-21; since then only the Sync screen says when the library last
+     * synced: in History, on the "Last sync" row, beside the last full sync.
+     */
+    @Test
+    fun theLastSyncShowsInHistory() {
+        // The clock the screen's DateUtils reads under Robolectric (the framework's System.currentTimeMillis is its shadow's).
+        val now = ShadowSystem.currentTimeMillis()
+        compose.setContent {
+            ReelsTheme {
+                SyncContent(
+                    run = SyncRunEntity(mode = SyncMode.QUICK, status = SyncStatus.DONE, startedAt = now - 6 * 60_000),
+                    ui = syncUiState(null, null, now),
+                    pacer = null,
+                    lastSyncAt = now - 5 * 60_000,
+                    lastFullSyncAt = null,
+                    onSync = {}, onFullSync = {}, onCancel = {}, onDiscard = {}, onDeleteLibrary = {},
+                )
+            }
+        }
+        compose.onNodeWithText("History").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Last sync").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("5 minutes ago").assertIsDisplayed()
+        assertEquals(top("Last sync"), top("5 minutes ago"), "the time is on the Last sync row")
+        assertTrue(top("History") < top("Last sync"), "under History")
+        compose.onNodeWithText("Last full sync").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Never").assertIsDisplayed()
+        assertEquals(top("Last full sync"), top("Never"), "no full sync yet")
     }
 
     // ---- M6: the Storage section's own message line ----

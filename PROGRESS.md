@@ -976,3 +976,64 @@ Closes the `TODO.md` line left by R29's review: a Cancel that lands during a syn
     (the phase and the seven counts) dropped alone, `newItems` and `seenItems` written into each other, and a counter
     forgotten in `SyncRunProgress`. The mid-run test kills every mapping mutant on its own, the mapping test as well, and
     the field test kills the forgotten counter.
+
+## 2026-10-21: Home's top bar becomes a search bar and a sync button
+
+The owner's request, with the design they approved: the "Saved" title is redundant, and the "Synced N minutes ago" chip
+belongs on the Sync screen. Home's top bar now looks like Instagram's search tab.
+
+- **The top bar** (`ui/home/HomeScreen.kt`). No title. On the left, filling the width, a rounded search bar (a magnifier
+  and the hint "Search"); it only looks like a field: a tap opens the existing Search screen, whose empty field takes the
+  focus on arrival, so the keyboard is up (it already did; a test pins it now). On the right, an icon-only sync button that
+  opens Sync, in the viewer's icon-button pattern: a tooltip on a long press and the same words as its content description.
+- **The glyph** is Material Symbols' `sync` (outlined, 24 dp), a vector drawable like the viewer's (`ic_sync.xml`, its path
+  read from google/material-design-icons and moved down by 960 like the others), named in the Apache notice; no
+  `material-icons-extended`.
+- **The badge** (`ui/home/SyncButton.kt`, the owner's choice of small badges). Idle ("Sync"): the plain glyph. Running
+  ("Sync, running"): the glyph turns against the clock, the way its arrows point, a turn in 2 s; with animations removed
+  (`motionEnabled` false) it stays still in the primary colour. Needs attention ("Sync, needs attention"): Material's small
+  red `Badge` dot. Mapped from the old chip's states: "Syncing…" is Running; "⚠" and the reason, which the chip showed for
+  every resumable run (PAUSED, so a Cancel, "Interrupted" and the budgets too, and every STOPPED status: challenge,
+  expired session, rate limit, "Adapter needs repair"), is the dot; "Synced 5 min ago" and "Not synced" are Idle. A
+  running run wins, as on the chip. A cooldown alone never made the chip warn and gives no dot; a run the rate limit
+  stopped did, and does. The chip never read the session: now, with the real library, a session that is logged out,
+  expired or challenged is a dot too (Sync stays off until the owner logs in); Mock mode passes no session, and one not read
+  yet is no dot.
+- **The Sync screen** already said when the library last synced, in History ("Last sync", relative, the chip's own
+  resolution), on the first screen on the emulator in Mock mode; nothing was added there, and a test pins it.
+- **Code moved.** `ui/common/SyncStatusSummary.kt` (the summary and the chip) became `ui/home/SyncButton.kt` (`SyncBadge`
+  and `SyncButton`); `HomeViewModel` takes the cards, the latest run and the session as flows, and its run shows before the
+  session has been read.
+- **Tests.** New: `SyncBadgeTest` (retargeted from `SyncStatusSummaryTest`, its assertions kept as states: each chip state,
+  the resumable statuses exactly, the session for the real library only), `HomeViewModelTest`, `SyncButtonTest` (read from
+  the button's pixels at xxhdpi on a paused clock: the idle glyph plain and still, the running glyph turning, still and in
+  the primary colour with animations off, the red dot; the labels, the tooltip, the tap), `HomeScreenTest` (the real nav
+  host: the search bar opens Search with its field focused, the button opens Sync, a logged-out real library shows the dot
+  and Mock mode does not); in `HomeContentTest`, no title and no chip text in any state, the bar's layout and each control's
+  screen; in `SyncContentTest`, the last sync on its History row; in `AppIconGuardTest`, `ic_sync` among the glyphs (24 dp,
+  its own outline, listed in the notice, which is now read as a list) and the button drawing it. `NavigationBackTest` reads
+  Home's position from its search bar instead of the title. `SmokeTest`: `t1` checks the search bar and the sync button and
+  that no title or chip text is left, `t2` the last sync in History and no dot on Home after the fake Sync, `t5` opens Search
+  from the search bar and waits for its field's focus; Home is found by its search bar's tag, Sync opened by the button's.
+- **Mutants, in a scratch export (deleted): 30, all killed.** The badge (stopped runs idle, running not shown, the session
+  read in Mock mode, the session never a dot, only PAUSED a dot, an unread session a dot), the button (never turns, turns
+  with animations off, no tint, always tinted, no dot, always a dot, a fixed content description, a fixed tooltip, a turn that
+  goes nowhere, another glyph), Home (the session passed in Mock mode, never passed, the title kept, the chip text kept, the
+  search bar opening Sync, the sync button opening Search, a search bar that does not fill the width), the view model (the
+  session never mattering, the run waiting for the session), Search without its focus, Sync without the last sync row or
+  with the full sync's time on it, another outline for the glyph, and the notice without `sync` in its list.
+- **Docs.** `ARCHITECTURE.md`: a Home section (the bar, the button, the badge and its mapping, the tests), the UI shell, the
+  Sync screen, the run outcomes, Motion, the app icon and the smoke suite. `README.md`: the "Try it" step, the features, the
+  diagram and the screenshot's description. `docs/GUIDE.md`: every mention of the chip and of the "Saved" screen (now
+  Home), and what the button's states mean. `docs/images/mock-home.png` retaken from the smoke suite's `t2` on
+  `emulator-5554` in Mock mode (fake data only), downscaled to 450 × 1000 like the others, with only its image chunks kept;
+  the grid and carousel shots show no Home bar and are unchanged.
+- **Checked.** `./gradlew check --no-build-cache --rerun-tasks` (1,340 `:app` and 388 `:instagram` unit tests, lint; none
+  failed or skipped) and `connectedDebugAndroidTest` on `emulator-5554` in Mock mode (54 tests, none failed or skipped). By
+  eye on the emulator: the bar, the search bar opening Search with the keyboard up, the glyph turning during a fake Full
+  sync ("Sync, running"), the red dot after a Cancel ("Sync, needs attention", the run PAUSED "Cancelled") and gone again
+  after Resume finished it, and "Last sync" on Sync's first screen. Not seen on a device: the still, tinted glyph with
+  animations removed (the emulator's animation scale was left alone; `SyncButtonTest` reads it), and the real library's
+  logged-out dot (`HomeScreenTest` reads it; agents keep the emulator in Mock mode).
+- **Pacing.** Unchanged: UI only, no request, rate or concurrency. **Safety.** Nothing contacted Instagram (the glyph's
+  SVG was read from GitHub), and the phone was not touched.

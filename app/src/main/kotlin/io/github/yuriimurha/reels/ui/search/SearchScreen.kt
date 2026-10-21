@@ -68,6 +68,8 @@ fun SearchScreen(
             onReturnedIndexConsumed()
         }
     }
+    // An empty field takes the focus, so the keyboard is up on arrival: Home's search bar only looks like a field, and the
+    // typing happens here (HomeScreenTest pins it).
     LaunchedEffect(query) {
         if (query.isEmpty()) focus.requestFocus()
     }

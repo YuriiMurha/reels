@@ -11,8 +11,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Pins the app's own launcher icon and the viewer's three icon-button glyphs (spec 2026-10-12 §3.4 and §3.5), read from the source
- * files (in the style of [CleartextGuardTest]; they run from the app module directory).
+ * Pins the app's own launcher icon, the viewer's three icon-button glyphs (spec 2026-10-12 §3.4 and §3.5) and Home's sync glyph
+ * (2026-10-21), read from the source files (in the style of [CleartextGuardTest]; they run from the app module directory).
  *
  * The icon is adaptive: the launcher masks it to a circle, a squircle or the like and may scale it, so only the inner 66 of the
  * foreground's 108 units are guaranteed to show (the safe zone, 21..87). A path that strays outside could be cut off.
@@ -256,9 +256,12 @@ class AppIconGuardTest {
         assertTrue(last.boxes[1].matches(foreground.last().boxes.single()), "the same triangle as the foreground's: ${last.boxes[1]}")
     }
 
+    /** The viewer's three glyphs and Home's sync glyph (2026-10-21). */
+    private val glyphs = listOf("ic_volume_up", "ic_volume_off", "ic_open_in_new", "ic_sync")
+
     @Test
-    fun theViewerIconGlyphsAreMaterialSymbolsVectorsOf24Dp() {
-        for (glyph in listOf("ic_volume_up", "ic_volume_off", "ic_open_in_new")) {
+    fun theIconGlyphsAreMaterialSymbolsVectorsOf24Dp() {
+        for (glyph in glyphs) {
             val vector = xml("res/drawable/$glyph.xml")
             assertEquals("vector", vector.tagName, glyph)
             assertEquals("24dp", vector.attr("width"), glyph)
@@ -275,11 +278,12 @@ class AppIconGuardTest {
     /**
      * T10: each glyph is its own Material Symbols shape, not just its own file name. Each is pinned by where its outline starts
      * (`volume_off` begins with the slash across the speaker), and no two draw the same: with `volume_up` drawn as `volume_off`,
-     * Mute and Unmute would look alike and the button would no longer show the state.
+     * Mute and Unmute would look alike and the button would no longer show the state. `sync` starts at its lower arrow's corner.
      */
     @Test
-    fun eachViewerGlyphDrawsItsOwnShape() {
-        val starts = mapOf("ic_volume_off" to "M792,904 ", "ic_volume_up" to "M560,829v", "ic_open_in_new" to "M200,840q")
+    fun eachGlyphDrawsItsOwnShape() {
+        val starts = mapOf("ic_volume_off" to "M792,904 ", "ic_volume_up" to "M560,829v", "ic_open_in_new" to "M200,840q", "ic_sync" to "M160,800v")
+        assertEquals(glyphs.toSet(), starts.keys, "every glyph is pinned by its shape")
         val paths = starts.keys.associateWith { glyph ->
             val path = xml("res/drawable/$glyph.xml").getElementsByTagName("path")
             (0 until path.length).joinToString("|") { (path.item(it) as Element).attr("pathData") }
@@ -313,12 +317,27 @@ class AppIconGuardTest {
         assertTrue(icons.single().trimStart().startsWith("painterResource(icon)"), "the Icon draws the given glyph: Icon(${icons.single()})")
     }
 
+    /** Home's sync button draws the sync glyph, its one Icon, whatever its badge (2026-10-21). */
+    @Test
+    fun theSyncButtonDrawsTheSyncGlyph() {
+        val source = file("kotlin/io/github/yuriimurha/reels/ui/home/SyncButton.kt").readText()
+        val start = source.indexOf("fun SyncButton(")
+        assertTrue(start >= 0, "SyncButton is missing")
+        val body = source.substring(start, source.indexOf("\n}\n", start))
+        val icons = KotlinSource.callArguments(body, "Icon(")
+        assertEquals(1, icons.size, "one Icon in SyncButton: $icons")
+        assertTrue(icons.single().trimStart().startsWith("painterResource(R.drawable.ic_sync)"), "the Icon draws ic_sync: Icon(${icons.single()})")
+    }
+
     @Test
     fun theGlyphsCarryTheirApacheNotice() {
         val notice = file("res/raw/license_material_symbols.txt").readText()
         assertTrue("Material Symbols" in notice)
         assertTrue("Apache License" in notice && "Version 2.0" in notice)
-        for (glyph in listOf("volume_up", "volume_off", "open_in_new")) assertTrue(glyph in notice, "the notice names $glyph")
+        // Each in the notice's list of glyphs, not only inside a file name ("ic_sync.xml") in its Changes paragraph.
+        for (glyph in glyphs.map { it.removePrefix("ic_") }) {
+            assertTrue(Regex("""^ +$glyph +\(""", RegexOption.MULTILINE).containsMatchIn(notice), "the notice lists $glyph")
+        }
         // Task 5 minor 3: the licence itself, not only its header: its terms from their title to their end.
         for (line in listOf("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION", "Grant of Copyright License", "END OF TERMS AND CONDITIONS")) {
             assertTrue(line in notice, "the notice carries the licence's '$line'")
@@ -334,7 +353,7 @@ class AppIconGuardTest {
         assertTrue("@raw/license_material_symbols" in kept, "tools:keep: $kept")
     }
 
-    /** The glyphs are three small vector files of ours, not the `material-icons-extended` library (global constraints, icons). */
+    /** The glyphs are four small vector files of ours, not the `material-icons-extended` library (global constraints, icons). */
     @Test
     fun theExtendedIconLibraryIsNotADependency() {
         for (build in listOf(File("build.gradle.kts"), File("../gradle/libs.versions.toml"))) {
