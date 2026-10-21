@@ -115,7 +115,7 @@ suspend fun LazyStaggeredGridState.revealTile(index: Int) {
     }
 }
 
-/** The "1/N" badge text on a carousel's grid tile (the viewer has its own "N/M" counter, `CarouselPager`). */
+/** The "1/N" badge text on a carousel's grid tile (the viewer has its own "N/M" counter, `CarouselCounter`). */
 internal fun carouselLabel(media: MediaEntity): String = "1/${media.carouselCount ?: 1}"
 
 @Composable

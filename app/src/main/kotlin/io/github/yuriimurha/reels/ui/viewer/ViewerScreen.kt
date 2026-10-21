@@ -78,6 +78,7 @@ import io.github.yuriimurha.reels.instagram.MediaType
 import io.github.yuriimurha.reels.instagram.Permalinks
 import io.github.yuriimurha.reels.ui.LocalAppContainer
 import io.github.yuriimurha.reels.ui.common.Thumbnail
+import io.github.yuriimurha.reels.ui.common.aboveSharedMedia
 import io.github.yuriimurha.reels.ui.common.sharedMedia
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
@@ -87,6 +88,9 @@ const val VIDEO_SURFACE_TAG = "video-surface"
 
 /** Test tag of a page's media (the box the shared element goes on, see `PostMedia`). */
 const val POST_MEDIA_TAG = "post-media"
+
+/** Test tag of the viewer's Back button (the grid under an opening or closing viewer has a Back of its own). */
+const val VIEWER_BACK_TAG = "viewer-back"
 
 /** The player stopped on the unit of [page] with [error]; a new instance per failure, so the effect that handles it restarts. */
 private class PlayerFailure(val page: SettledPage, val error: Throwable)
@@ -229,7 +233,11 @@ internal fun ViewerScreen(source: MediaSource, startIndex: Int, onIndexSettled: 
                 sharedWithTile = page == pagerState.settledPage,
             )
         }
-        IconButton(onClick = onBack, modifier = Modifier.statusBarsPadding().padding(8.dp)) {
+        // Above the post's media too, with the page's overlay layer (R30).
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.aboveSharedMedia().statusBarsPadding().padding(8.dp).testTag(VIEWER_BACK_TAG),
+        ) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
         }
     }
@@ -294,18 +302,24 @@ fun ViewerPage(
             MediaType.CAROUSEL -> carouselState?.settledItem?.type == MediaType.VIDEO
             MediaType.IMAGE -> false
         }
-        Column(Modifier.align(Alignment.BottomStart).fillMaxWidth()) {
+        // The page's overlay layer, above the media also while the post grows from its tile and shrinks back (R30).
+        Box(Modifier.fillMaxSize().aboveSharedMedia()) {
             if (carouselState != null && carouselPager != null) {
-                CarouselDots(carouselPager, carouselState.items.size, Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp))
+                CarouselCounter(media, carouselState, carouselPager, Modifier.align(Alignment.TopEnd))
             }
-            Overlay(media, collections, isVideo, muted, unavailable, onToggleMute, onOpenInstagram)
+            Column(Modifier.align(Alignment.BottomStart).fillMaxWidth()) {
+                if (carouselState != null && carouselPager != null) {
+                    CarouselDots(carouselPager, carouselState.items.size, Modifier.align(Alignment.CenterHorizontally).padding(bottom = 8.dp))
+                }
+                Overlay(media, collections, isVideo, muted, unavailable, onToggleMute, onOpenInstagram)
+            }
         }
     }
 }
 
 /**
  * The current post's media, filling [modifier]: the playing video, the thumbnail, or for a carousel its [CarouselPager] (over
- * [carouselPager], hoisted so the page can put the dots with the overlay).
+ * [carouselPager], hoisted so the page can put the counter and the dots in its overlay layer).
  *
  * One box, tagged [POST_MEDIA_TAG], wraps whatever shows, and [modifier] (with the shared element, when this is the settled page)
  * goes on it: the thumbnail giving way to the video as it starts, or a carousel moving to another item, never replaces the shared

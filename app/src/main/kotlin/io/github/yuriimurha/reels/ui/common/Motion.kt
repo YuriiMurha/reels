@@ -26,7 +26,8 @@ import androidx.compose.ui.unit.IntOffset
  * The app's motion (spec 2026-10-12 §3.6, as amended by R24). A post grows from its grid tile into the viewer and shrinks back
  * into the tile of the post the viewer is on (a shared element, [sharedMedia]); every other page change is a push, as in
  * Instagram: the new page slides in over the old one, which drifts a third of the way out under it, and Back is the reverse.
- * Only the viewer fades. When the system's animations are removed (animator duration scale 0), nothing animates.
+ * Only the viewer fades, and its text and controls stay above the moving post ([aboveSharedMedia], R30). When the system's
+ * animations are removed (animator duration scale 0), nothing animates.
  */
 
 /** False when the system's animator duration scale is 0 (Remove animations): then no page transition and no shared element. */
@@ -113,4 +114,34 @@ fun Modifier.sharedMedia(pk: String): Modifier {
             resizeMode = SharedTransitionScope.ResizeMode.scaleToBounds(),
         )
     }
+}
+
+/** The viewer's overlay layer's z-index in the shared transition's overlay ([aboveSharedMedia]): above the media's, the default 0. */
+private const val ABOVE_MEDIA_Z_INDEX = 1f
+
+/**
+ * Draws this, the viewer's overlay layer (its text and controls), above the post's media at every moment of the grow and the
+ * shrink (R30). While the post moves, [sharedMedia] draws its media in the [SharedTransitionLayout]'s overlay, above everything
+ * laid out in the layout, the viewer's page with its controls included. So this layer goes into that overlay too, above the
+ * media, for as long as the viewer's own transition runs (it fades in or out, or the back gesture seeks it): the media's bounds
+ * animate on that same transition, which lasts until they have settled.
+ *
+ * Drawn from the overlay it no longer takes the fade of the page it sits on, so it fades itself, with the viewer's own fade
+ * ([viewerEnter], [viewerExit], on the destination's transition): at every frame it is as faded as its page, also when no
+ * media moves (a late first page), rather than taking the page's fade and its own. Does nothing outside a shared transition
+ * (previews, screen tests).
+ */
+@Composable
+fun Modifier.aboveSharedMedia(): Modifier {
+    val shared = LocalSharedTransitionScope.current ?: return this
+    val visibility = LocalNavAnimatedVisibilityScope.current ?: return this
+    val context = LocalContext.current
+    val transition = visibility.transition
+    val layer = with(shared) {
+        this@aboveSharedMedia.renderInSharedTransitionScopeOverlay(
+            zIndexInOverlay = ABOVE_MEDIA_Z_INDEX,
+            renderInOverlay = { transition.currentState != transition.targetState },
+        )
+    }
+    return with(visibility) { layer.animateEnterExit(enter = viewerEnter(context), exit = viewerExit(context)) }
 }

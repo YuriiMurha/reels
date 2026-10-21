@@ -1,10 +1,12 @@
 package io.github.yuriimurha.reels.ui.viewer
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -103,10 +105,15 @@ class CarouselPagerTest {
         }
     }
 
+    /** The carousel's pager alone, with its counter over it from the same pager state, as the page shows them. */
     private fun showPager(media: MediaEntity = carousel, player: Player? = null) = compose.setContent {
         ReelsTheme {
             val current by states.collectAsState()
-            CarouselPager(media, current, player, onItemSettled = ::onItemSettled, Modifier.fillMaxSize())
+            val pagerState = rememberCarouselPagerState(current)
+            Box(Modifier.fillMaxSize()) {
+                CarouselPager(media, current, player, onItemSettled = ::onItemSettled, Modifier.fillMaxSize(), pagerState = pagerState)
+                CarouselCounter(media, current, pagerState, Modifier.align(Alignment.TopEnd))
+            }
         }
     }
 
